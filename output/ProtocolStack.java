@@ -1,13 +1,9 @@
-// $Id: ProtocolStack.java,v 1.8 2003/12/26 23:52:05 belaban Exp $
+// $Id: ProtocolStack.java,v 1.15 2004/10/04 20:43:34 belaban Exp $
 
 package org.jgroups.stack;
 
-import org.jgroups.Event;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
-import org.jgroups.Transport;
+import org.jgroups.*;
 import org.jgroups.conf.ClassConfigurator;
-import org.jgroups.log.Trace;
 import org.jgroups.util.Promise;
 import org.jgroups.util.TimeScheduler;
 
@@ -31,12 +27,12 @@ import java.util.Vector;
 public class ProtocolStack extends Protocol implements Transport {
     private Protocol                top_prot=null;
     private Protocol                bottom_prot=null;
-    private Configurator            conf=new Configurator();
-    private String                  setup_string;
+    private final Configurator            conf=new Configurator();
+    private final String                  setup_string;
     private JChannel                channel=null;
     private boolean                 stopped=true;
-    public  TimeScheduler           timer=new TimeScheduler(5000);
-    Promise                         ack_promise=new Promise();
+    public final  TimeScheduler           timer=new TimeScheduler(5000);
+    final Promise                         ack_promise=new Promise();
 
     /** Used to sync on START/START_OK events for start()*/
     Promise                         start_promise=null;
@@ -49,10 +45,10 @@ public class ProtocolStack extends Protocol implements Transport {
 
 
 
-    public ProtocolStack(JChannel channel, String setup_string) {
+    public ProtocolStack(JChannel channel, String setup_string) throws ChannelException {
         this.setup_string=setup_string;
         this.channel=channel;
-        ClassConfigurator.getInstance(); // will create the singleton
+        ClassConfigurator.getInstance(true); // will create the singleton
     }
 
 
@@ -87,20 +83,20 @@ public class ProtocolStack extends Protocol implements Transport {
         while(prot != null) {
             name=prot.getName();
             if(name != null) {
-                if(name.equals("ProtocolStack"))
+                if("ProtocolStack".equals(name))
                     break;
                 sb.append(name);
                 if(include_properties) {
                     props=prot.getProperties();
                     if(props != null) {
-                        sb.append("\n");
+                        sb.append('\n');
                         for(Iterator it=props.entrySet().iterator(); it.hasNext();) {
                             entry=(Map.Entry)it.next();
                             sb.append(entry + "\n");
                         }
                     }
                 }
-                sb.append("\n");
+                sb.append('\n');
 
                 prot=prot.getDownProtocol();
             }
@@ -253,38 +249,14 @@ public class ProtocolStack extends Protocol implements Transport {
 
         if(stopped) return;
 
-
         if(stop_promise == null)
             stop_promise=new Promise();
         else
             stop_promise.reset();
 
         down(new Event(Event.STOP));
-        stop_promise.getResult(0);
+        stop_promise.getResult(5000);
         stopped=true;
-
-
-//        synchronized(mutex) {
-//            Protocol p;
-//            Vector   prots=getProtocols(); // from top to bottom
-//            Queue    down_queue;
-//
-//            for(int i=0; i < prots.size(); i++) {
-//                p=(Protocol)prots.elementAt(i);
-//
-//                // 1. Wait until down queue is empty
-//                down_queue=p.getDownQueue();
-//                if(down_queue != null) {
-//                    while(down_queue.size() > 0 && !down_queue.closed()) {
-//                        Util.sleep(100);  // FIXME: use a signal when empty (implement when switching to util.concurrent)
-//                    }
-//                }
-//
-//                // 2. Call stop() on protocol
-//                p.stop();
-//            }
-//            stopped=true;
-//        }
     }
 
     public void stopInternal() {
@@ -303,8 +275,7 @@ public class ProtocolStack extends Protocol implements Transport {
         down(new Event(Event.ACK));
         ack_promise.getResult(0);
         stop=System.currentTimeMillis();
-        if(Trace.trace)
-            Trace.info("ProtocolStack.flushEvents()", "flushing took " + (stop-start) + " msecs");
+        if(log.isDebugEnabled()) log.debug("flushing took " + (stop-start) + " msecs");
     }
 
 
@@ -356,7 +327,7 @@ public class ProtocolStack extends Protocol implements Transport {
         if(top_prot != null)
             top_prot.receiveDownEvent(evt);
         else
-            Trace.error("ProtocolStack.down()", "no down protocol available !");
+            log.error("no down protocol available !");
     }
 
 

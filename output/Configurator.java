@@ -1,10 +1,11 @@
-// $Id: Configurator.java,v 1.1 2003/09/09 01:24:12 belaban Exp $
+// $Id: Configurator.java,v 1.9 2004/10/23 20:57:00 belaban Exp $
 
 package org.jgroups.stack;
 
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jgroups.Event;
-import org.jgroups.log.Trace;
 
 import java.util.Properties;
 import java.util.StringTokenizer;
@@ -21,6 +22,8 @@ import java.util.Vector;
  * @author Bela Ban
  */
 public class Configurator {
+
+     protected final Log log=LogFactory.getLog(getClass());
 
 
     /**
@@ -93,7 +96,7 @@ public class Configurator {
     }
 
 
-    public Protocol getBottommostProtocol(Protocol prot_stack) throws Exception {
+    public Protocol getBottommostProtocol(Protocol prot_stack) {
         Protocol tmp=null, curr_prot=prot_stack;
 
         while(true) {
@@ -213,9 +216,17 @@ public class Configurator {
         StringTokenizer tok;
         String token;
 
+        /*tok=new StringTokenizer(config_str, delimiter, false);
+        while(tok.hasMoreTokens()) {
+            token=tok.nextToken();
+            retval.addElement(token);
+        }*/
+        // change suggested by gwoolsey
         tok=new StringTokenizer(config_str, delimiter, false);
         while(tok.hasMoreTokens()) {
             token=tok.nextToken();
+            while(token.endsWith("\\"))
+                token=token.substring(0, token.length() - 1) + delimiter + tok.nextToken();
             retval.addElement(token);
         }
 
@@ -415,7 +426,7 @@ public class Configurator {
 
         public String toString() {
             StringBuffer ret=new StringBuffer();
-            ret.append("\n" + name + ":");
+            ret.append('\n' + name + ':');
             if(up_reqs != null)
                 ret.append("\nRequires from above: " + printUpReqs());
 
@@ -435,20 +446,20 @@ public class Configurator {
             StringBuffer ret=new StringBuffer("[");
             if(up_reqs != null) {
                 for(int i=0; i < up_reqs.size(); i++) {
-                    ret.append(Event.type2String(((Integer)up_reqs.elementAt(i)).intValue()) + " ");
+                    ret.append(Event.type2String(((Integer)up_reqs.elementAt(i)).intValue()) + ' ');
                 }
             }
-            return ret.toString() + "]";
+            return ret.toString() + ']';
         }
 
         String printDownReqs() {
             StringBuffer ret=new StringBuffer("[");
             if(down_reqs != null) {
                 for(int i=0; i < down_reqs.size(); i++) {
-                    ret.append(Event.type2String(((Integer)down_reqs.elementAt(i)).intValue()) + " ");
+                    ret.append(Event.type2String(((Integer)down_reqs.elementAt(i)).intValue()) + ' ');
                 }
             }
-            return ret.toString() + "]";
+            return ret.toString() + ']';
         }
 
 
@@ -456,10 +467,10 @@ public class Configurator {
             StringBuffer ret=new StringBuffer("[");
             if(up_provides != null) {
                 for(int i=0; i < up_provides.size(); i++) {
-                    ret.append(Event.type2String(((Integer)up_provides.elementAt(i)).intValue()) + " ");
+                    ret.append(Event.type2String(((Integer)up_provides.elementAt(i)).intValue()) + ' ');
                 }
             }
-            return ret.toString() + "]";
+            return ret.toString() + ']';
         }
 
         String printDownProvides() {
@@ -467,9 +478,9 @@ public class Configurator {
             if(down_provides != null) {
                 for(int i=0; i < down_provides.size(); i++)
                     ret.append(Event.type2String(((Integer)down_provides.elementAt(i)).intValue()) +
-                               " ");
+                               ' ');
             }
-            return ret.toString() + "]";
+            return ret.toString() + ']';
         }
 
     }
@@ -482,8 +493,8 @@ public class Configurator {
     public class ProtocolConfiguration {
         private String protocol_name=null;
         private String properties_str=null;
-        private Properties properties=new Properties();
-        private final String protocol_prefix="org.jgroups.protocols";
+        private final Properties properties=new Properties();
+        private static final String protocol_prefix="org.jgroups.protocols";
 
 
         /**
@@ -551,8 +562,14 @@ public class Configurator {
             // complex classloaders environments
             // FH: The context class loader doesn't work in Tomcat
             ClassLoader loader=Thread.currentThread().getContextClassLoader();
+            // When invoked from C++ getContextClassLoader returns null
+            // see http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4489399
+            //so:
+            if(loader == null){
+            	loader = ClassLoader.getSystemClassLoader();
+            }
             try {
-                String defaultProtocolName=protocol_prefix + "." + protocol_name;
+                String defaultProtocolName=protocol_prefix + '.' + protocol_name;
                 Class clazz=null;
 
                 // first try to load the class in the default package
@@ -604,9 +621,8 @@ public class Configurator {
                 retval.init();
             }
             catch(InstantiationException inst_ex) {
-                Trace.error("Configurator.ProtocolConfiguration.createLayer()", "an instance of " +
-                                                                                protocol_name + " could not be created. Please check that it implements" +
-                                                                                " interface Protocol and that is has a public empty constructor !");
+                log.error("an instance of " + protocol_name + " could not be created. Please check that it implements" +
+                        " interface Protocol and that is has a public empty constructor !");
                 throw inst_ex;
             }
             return retval;
@@ -621,7 +637,7 @@ public class Configurator {
             else
                 retval.append(protocol_name);
             if(properties != null)
-                retval.append("(" + properties + ")");
+                retval.append("(" + properties + ')');
             return retval.toString();
         }
     }

@@ -1,25 +1,31 @@
-// $Id: ParticipantGmsImpl.java,v 1.3 2003/11/21 19:43:30 belaban Exp $
+// $Id: ParticipantGmsImpl.java,v 1.9 2004/09/23 16:29:38 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
-import java.util.Vector;
+import org.jgroups.Address;
+import org.jgroups.Event;
+import org.jgroups.Message;
+import org.jgroups.View;
+import org.jgroups.util.Promise;
 
-import org.jgroups.*;
-import org.jgroups.util.*;
-import org.jgroups.log.Trace;
+import java.util.Vector;
 
 
 public class ParticipantGmsImpl extends GmsImpl {
-    boolean    leaving=false;
-    Vector     suspected_mbrs=new Vector();
-    Promise    leave_promise=new Promise();
+    private final Vector     suspected_mbrs=new Vector(11);
+    private final Promise    leave_promise=new Promise();
 
 
     public ParticipantGmsImpl(GMS g) {
         gms=g;
-        suspected_mbrs.removeAllElements();
     }
 
+
+    public void init() throws Exception {
+        super.init();
+        suspected_mbrs.removeAllElements();
+        leave_promise.reset();
+    }
 
     public void join(Address mbr) {
         wrongMethod("join");
@@ -46,8 +52,8 @@ public class ParticipantGmsImpl extends GmsImpl {
                 gms.getImpl().handleLeave(mbr, false);    // regular leave
                 return;
             }
-            if(Trace.trace)
-                Trace.info("ParticipantGmsImpl.leave()", "sending LEAVE request to " + coord);
+
+            if(log.isDebugEnabled()) log.debug("sending LEAVE request to " + coord);
             sendLeaveMessage(coord, mbr);
             synchronized(leave_promise) {
                 result=leave_promise.getResult(gms.leave_timeout);
@@ -65,7 +71,7 @@ public class ParticipantGmsImpl extends GmsImpl {
 
     public void handleLeaveResponse() {
         if(leave_promise == null) {
-            Trace.error("ParticipantGmsImpl.handleLeaveResponse()", "leave_promise is null");
+            if(log.isErrorEnabled()) log.error("leave_promise is null");
             return;
         }
         synchronized(leave_promise) {
@@ -106,7 +112,7 @@ public class ParticipantGmsImpl extends GmsImpl {
      */
     public void handleViewChange(View new_view, Digest digest) {
         Vector mbrs=new_view.getMembers();
-        if(Trace.trace) Trace.info("ParticipantGmsImpl.handleViewChange()", "view=" + new_view);
+         if(log.isDebugEnabled()) log.debug("view=" + new_view);
         suspected_mbrs.removeAllElements();
         if(leaving && !mbrs.contains(gms.local_addr)) { // received a view in which I'm not member: ignore
             return;
@@ -121,16 +127,12 @@ public class ParticipantGmsImpl extends GmsImpl {
         if(mbr == null) return;
         if(!suspected_mbrs.contains(mbr))
             suspected_mbrs.addElement(mbr);
-
-
-        if(Trace.trace)
-            Trace.info("ParticipantGmsImpl.handleSuspect()", "suspected mbr=" + mbr +
-                                                             ", suspected_mbrs=" + suspected_mbrs);
+        
+        if(log.isDebugEnabled()) log.debug("suspected mbr=" + mbr + ", suspected_mbrs=" + suspected_mbrs);
 
         if(wouldIBeCoordinator()) {
-            if(Trace.trace)
-                Trace.info("ParticipantGmsImpl.handleSuspect()", "suspected mbr=" + mbr + "), members are " +
-                                                                 gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
+            if(log.isDebugEnabled()) log.debug("suspected mbr=" + mbr + "), members are " +
+                    gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
 
             suspects=(Vector)suspected_mbrs.clone();
             suspected_mbrs.removeAllElements();

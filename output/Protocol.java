@@ -1,12 +1,14 @@
-// $Id: Protocol.java,v 1.7 2003/12/26 23:50:44 belaban Exp $
+// $Id: Protocol.java,v 1.20 2004/09/23 16:29:53 belaban Exp $
 
 package org.jgroups.stack;
 
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jgroups.Event;
-import org.jgroups.log.Trace;
 import org.jgroups.util.Queue;
 import org.jgroups.util.QueueClosedException;
+import org.jgroups.util.Util;
 
 import java.util.Properties;
 import java.util.Vector;
@@ -18,6 +20,7 @@ class UpHandler extends Thread {
     private Queue mq=null;
     private Protocol handler=null;
     private ProtocolObserver observer=null;
+    protected final Log  log=LogFactory.getLog(this.getClass());
 
 
     public UpHandler(Queue mq, Protocol handler, ProtocolObserver observer) {
@@ -25,9 +28,10 @@ class UpHandler extends Thread {
         this.handler=handler;
         this.observer=observer;
         if(handler != null)
-            setName("UpHandler (" + handler.getName() + ")");
+            setName("UpHandler (" + handler.getName() + ')');
         else
             setName("UpHandler");
+        setDaemon(true);
     }
 
 
@@ -43,7 +47,7 @@ class UpHandler extends Thread {
             try {
                 evt=(Event)mq.remove();
                 if(evt == null) {
-                    Trace.warn("Protocol.UpHandler.run()", "removed null event");
+                    if(log.isWarnEnabled()) log.warn("removed null event");
                     continue;
                 }
 
@@ -59,7 +63,7 @@ class UpHandler extends Thread {
                 break;
             }
             catch(Throwable e) {
-                Trace.warn("Protocol.UpHandler.run()", getName() + " exception: " + e);
+                if(log.isWarnEnabled()) log.warn(getName() + " exception: " + e);
                 e.printStackTrace();
             }
         }
@@ -72,6 +76,8 @@ class DownHandler extends Thread {
     private Queue mq=null;
     private Protocol handler=null;
     private ProtocolObserver observer=null;
+    protected final Log  log=LogFactory.getLog(this.getClass());
+
 
 
     public DownHandler(Queue mq, Protocol handler, ProtocolObserver observer) {
@@ -79,9 +85,10 @@ class DownHandler extends Thread {
         this.handler=handler;
         this.observer=observer;
         if(handler != null)
-            setName("DownHandler (" + handler.getName() + ")");
+            setName("DownHandler (" + handler.getName() + ')');
         else
             setName("DownHandler");
+        setDaemon(true);
     }
 
 
@@ -97,7 +104,7 @@ class DownHandler extends Thread {
             try {
                 evt=(Event)mq.remove();
                 if(evt == null) {
-                    Trace.warn("Protocol.DownHandler.run()", "removed null event");
+                    if(log.isWarnEnabled()) log.warn("removed null event");
                     continue;
                 }
 
@@ -119,7 +126,7 @@ class DownHandler extends Thread {
                 break;
             }
             catch(Throwable e) {
-                Trace.warn("Protocol.DownHandler.run()", getName() + " exception is " + e);
+                if(log.isWarnEnabled()) log.warn(getName() + " exception is " + e);
                 e.printStackTrace();
             }
         }
@@ -150,18 +157,20 @@ class DownHandler extends Thread {
  * constructor !</b>
  */
 public abstract class Protocol {
-    protected Properties       props=null;
+    protected final Properties       props=new Properties();
     protected Protocol         up_prot=null, down_prot=null;
     protected ProtocolStack    stack=null;
-    protected Queue            up_queue=new Queue(), down_queue=new Queue();
+    protected final Queue            up_queue=new Queue();
+    protected final Queue down_queue=new Queue();
     protected UpHandler        up_handler=null;
     protected int              up_thread_prio=-1;
     protected DownHandler      down_handler=null;
     protected int              down_thread_prio=-1;
     protected ProtocolObserver observer=null; // hook for debugger
-    private final long         THREAD_JOIN_TIMEOUT=1000;
+    private final static long  THREAD_JOIN_TIMEOUT=1000;
     protected boolean          down_thread=true;  // determines whether the down_handler thread should be started
     protected boolean          up_thread=true;    // determines whether the up_handler thread should be started
+    protected final Log        log=LogFactory.getLog(this.getClass());
 
 
     /**
@@ -171,7 +180,8 @@ public abstract class Protocol {
      * </pre>
      */
     public boolean setProperties(Properties props) {
-        this.props=props;
+        if(props != null)
+            this.props.putAll(props);
         return true;
     }
 
@@ -181,11 +191,11 @@ public abstract class Protocol {
      */
     public boolean setPropertiesInternal(Properties props) {
         String str;
-        this.props=(Properties)props.clone();
+        this.props.putAll(props);
 
         str=props.getProperty("down_thread");
         if(str != null) {
-            down_thread=new Boolean(str).booleanValue();
+            down_thread=Boolean.valueOf(str).booleanValue();
             props.remove("down_thread");
         }
 
@@ -197,7 +207,7 @@ public abstract class Protocol {
 
         str=props.getProperty("up_thread");
         if(str != null) {
-            up_thread=new Boolean(str).booleanValue();
+            up_thread=Boolean.valueOf(str).booleanValue();
             props.remove("up_thread");
         }
 
@@ -218,7 +228,7 @@ public abstract class Protocol {
 
     public void setObserver(ProtocolObserver observer) {
         this.observer=observer;
-	observer.setProtocol(this);
+        observer.setProtocol(this);
         if(up_handler != null)
             up_handler.setObserver(observer);
         if(down_handler != null)
@@ -334,9 +344,8 @@ public abstract class Protocol {
                         up_handler.setPriority(up_thread_prio);
                     }
                     catch(Throwable t) {
-                        Trace.error("Protocol.startUpHandler()",
-                                    "priority " + up_thread_prio +
-                                    " could not be set for thread: " + Trace.getStackTrace(t));
+                        if(log.isErrorEnabled()) log.error("priority " + up_thread_prio +
+                                    " could not be set for thread: " + Util.getStackTrace(t));
                     }
                 }
                 up_handler.start();
@@ -356,9 +365,8 @@ public abstract class Protocol {
                         down_handler.setPriority(down_thread_prio);
                     }
                     catch(Throwable t) {
-                        Trace.error("Protocol.startDownHandler()",
-                                    "priority " + down_thread_prio +
-                                    " could not be set for thread: " + Trace.getStackTrace(t));
+                        if(log.isErrorEnabled()) log.error("priority " + down_thread_prio +
+                                    " could not be set for thread: " + Util.getStackTrace(t));
                     }
                 }
                 down_handler.start();
@@ -385,7 +393,7 @@ public abstract class Protocol {
                 catch(Exception ex) {
                 }
                 if(up_handler != null && up_handler.isAlive())
-                    Trace.error("Protocol.stopInternal()", "up_handler thread for " + getName() +
+                    if(log.isErrorEnabled()) log.error("up_handler thread for " + getName() +
                                                            " was interrupted (in order to be terminated), but is still alive");
             }
         }
@@ -406,7 +414,7 @@ public abstract class Protocol {
                 catch(Exception ex) {
                 }
                 if(down_handler != null && down_handler.isAlive())
-                    Trace.error("Protocol.stopInternal()", "down_handler thread for " + getName() +
+                    if(log.isErrorEnabled()) log.error("down_handler thread for " + getName() +
                                                            " was interrupted (in order to be terminated), but is is still alive");
             }
         }
@@ -432,9 +440,10 @@ public abstract class Protocol {
         }
         try {
             up_queue.add(evt);
+            evt=null;
         }
         catch(Exception e) {
-            Trace.warn("Protocol.receiveUpEvent()", "exception: " + e);
+            if(log.isWarnEnabled()) log.warn("exception: " + e);
         }
     }
 
@@ -461,9 +470,10 @@ public abstract class Protocol {
         }
         try {
             down_queue.add(evt);
+            evt=null;
         }
         catch(Exception e) {
-            Trace.warn("Protocol.receiveDownEvent()", "exception: " + e);
+            if(log.isWarnEnabled()) log.warn("exception: " + e);
         }
     }
 
@@ -480,9 +490,10 @@ public abstract class Protocol {
 
         if(up_prot != null) {
             up_prot.receiveUpEvent(evt);
+            evt=null; // give the garbage collector a hand
         }
         else
-            Trace.error("Protocol.passUp()", "no upper layer available");
+            if(log.isErrorEnabled()) log.error("no upper layer available");
     }
 
     /**
@@ -496,10 +507,12 @@ public abstract class Protocol {
             }
         }
 
-        if(down_prot != null)
+        if(down_prot != null) {
             down_prot.receiveDownEvent(evt);
+            evt=null; // give the garbage collector a hand
+        }
         else
-            Trace.error("Protocol.passDown()", "no lower layer available");
+            if(log.isErrorEnabled()) log.error("no lower layer available");
     }
 
 

@@ -1,4 +1,4 @@
-// $Id: Draw.java,v 1.2 2003/09/24 23:20:47 belaban Exp $
+// $Id: Draw.java,v 1.7 2004/09/23 16:29:35 belaban Exp $
 
 
 package org.jgroups.demos;
@@ -6,7 +6,6 @@ package org.jgroups.demos;
 
 import org.jgroups.*;
 import org.jgroups.debug.Debugger;
-import org.jgroups.log.Trace;
 import org.jgroups.util.Util;
 
 import javax.swing.*;
@@ -25,27 +24,28 @@ import java.util.Random;
  * @author Bela Ban, Oct 17 2001
  */
 public class Draw implements ActionListener, ChannelListener {
-    private ByteArrayOutputStream  out=new ByteArrayOutputStream();
-    private String                 groupname="DrawGroupDemo";
+    private final ByteArrayOutputStream  out=new ByteArrayOutputStream();
+    private final String                 groupname="DrawGroupDemo";
     private JChannel               channel=null;
     private int                    member_size=1;
     Debugger                       debugger=null;
-    boolean                        first=true, cummulative=true;
+    final boolean                        first=true;
+    final boolean cummulative=true;
     private JFrame                 mainFrame=null;
     private JPanel                 sub_panel=null;
     private DrawPanel              panel=null;
     private JButton                clear_button, leave_button;
-    private Random                 random=new Random(System.currentTimeMillis());
+    private final Random                 random=new Random(System.currentTimeMillis());
     private final Font             default_font=new Font("Helvetica",Font.PLAIN,12);
-    private Color                  draw_color=selectColor(), background_color=Color.white;
+    private final Color                  draw_color=selectColor();
+    private final Color background_color=Color.white;
     boolean                        no_channel=false;
 
 
 
 
 
-    public Draw(String props, boolean debug, boolean no_channel) throws Exception {
-        Trace.init();
+    public Draw(String props, boolean debug, boolean cummulative, boolean no_channel) throws Exception {
         this.no_channel=no_channel;
         if(no_channel)
             return;
@@ -65,25 +65,30 @@ public class Draw implements ActionListener, ChannelListener {
 
 
    public static void main(String[] args) {
-        Draw             draw=null;
-        String           props=null;
-        boolean          debug=false;
-        boolean          no_channel=false;
+       Draw             draw=null;
+       String           props=null;
+       boolean          debug=false;
+       boolean          cummulative=false;
+       boolean          no_channel=false;
 
         for(int i=0; i < args.length; i++) {
-            if(args[i].equals("-help")) {
+            if("-help".equals(args[i])) {
                 help();
                 return;
             }
-            if(args[i].equals("-debug")) {
+            if("-debug".equals(args[i])) {
                 debug=true;
                 continue;
             }
-            if(args[i].equals("-props")) {
+            if("-cummulative".equals(args[i])) {
+                cummulative=true;
+                continue;
+            }
+            if("-props".equals(args[i])) {
                 props=args[++i];
                 continue;
             }
-            if(args[i].equals("-no_channel")) {
+            if("-no_channel".equals(args[i])) {
                 no_channel=true;
                 continue;
             }
@@ -110,7 +115,7 @@ public class Draw implements ActionListener, ChannelListener {
 
 
         try {
-            draw=new Draw(props, debug, no_channel);
+            draw=new Draw(props, debug, cummulative, no_channel);
             draw.go();
         }
         catch(Throwable e) {
@@ -121,7 +126,7 @@ public class Draw implements ActionListener, ChannelListener {
 
 
     static void help() {
-        System.out.println("\nDraw [-help] [-debug] [-no_channel] [-props <protocol stack definition>]");
+        System.out.println("\nDraw [-help] [-debug] [-cummulative] [-no_channel] [-props <protocol stack definition>]");
         System.out.println("-debug: brings up a visual debugger");
         System.out.println("-no_channel: doesn't use JGroups at all, any drawing will be relected on the " +
                            "whiteboard directly");
@@ -228,7 +233,7 @@ public class Draw implements ActionListener, ChannelListener {
                 msg=(Message)tmp;
                 comm=null;
 
-                Object obj=Util.objectFromByteBuffer(msg.getBuffer());
+                Object obj=msg.getObject();
                 if(obj instanceof DrawCommand)
                     comm=(DrawCommand)obj;
                 else if(obj instanceof Message) {
@@ -241,7 +246,7 @@ public class Draw implements ActionListener, ChannelListener {
                         System.out.println("*** Draw.run(): obj is " + obj.getClass() +
                                            ", hdrs are" + msg.printObjectHeaders());
                     else
-                        System.out.println("*** Draw.run(): hdrs are" + msg.printObjectHeaders());
+                        System.out.println("*** Draw.run(): hdrs are " + msg.printObjectHeaders());
                     Util.dumpStack(false);
                     continue;
                 }
@@ -307,14 +312,14 @@ public class Draw implements ActionListener, ChannelListener {
 
     public void actionPerformed(ActionEvent e) {
         String     command=e.getActionCommand();
-        if(command.equals("Clear")) {
+        if("Clear".equals(command)) {
             if(no_channel) {
                 clearPanel();
                 return;
             }
             sendClearPanelMsg();
         }
-        else if(command.equals("Leave & Exit")) {
+        else if("Leave & Exit".equals(command)) {
             if(!no_channel) {
                 try {
                     channel.close();
@@ -365,7 +370,7 @@ public class Draw implements ActionListener, ChannelListener {
 
 
     private class DrawPanel extends JPanel implements MouseMotionListener {
-        Dimension        preferred_size=new Dimension(235, 170);
+        final Dimension        preferred_size=new Dimension(235, 170);
         Image            img=null; // for drawing pixels
         Dimension        d, imgsize;
         Graphics         gr=null;

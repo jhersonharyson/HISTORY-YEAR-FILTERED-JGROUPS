@@ -1,18 +1,20 @@
-// $Id: GMS.java,v 1.6 2003/11/22 00:35:45 belaban Exp $
+// $Id: GMS.java,v 1.24 2004/10/08 13:04:24 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
 
-import java.io.IOException;
-import java.io.ObjectInput;
-import java.io.ObjectOutput;
-import java.io.Serializable;
-import java.util.*;
-
 import org.jgroups.*;
-import org.jgroups.util.*;
-import org.jgroups.stack.*;
-import org.jgroups.log.Trace;
+import org.jgroups.stack.Protocol;
+import org.jgroups.util.BoundedList;
+import org.jgroups.util.TimeScheduler;
+import org.jgroups.util.Util;
+import org.jgroups.util.Streamable;
+
+import java.io.*;
+import java.util.Hashtable;
+import java.util.Iterator;
+import java.util.Properties;
+import java.util.Vector;
 
 
 
@@ -23,43 +25,41 @@ import org.jgroups.log.Trace;
  * any messages until they are members.
  */
 public class GMS extends Protocol {
-    private GmsImpl    impl=null;
-    public Properties  props=null;
-    public Address     local_addr=null;
-    public String      group_addr=null;
-    public Membership  members=new Membership();     // real membership
-    public Membership  tmp_members=new Membership(); // base for computing next view
+    private GmsImpl           impl=null;
+    Address                   local_addr=null;
+    final Membership          members=new Membership();     // real membership
+    private final Membership  tmp_members=new Membership(); // base for computing next view
 
     /** Members joined but for which no view has been received yet */
-    public Vector      joining=new Vector();
+    private final Vector      joining=new Vector(7);
 
     /** Members excluded from group, but for which no view has been received yet */
-    public Vector      leaving=new Vector();
+    private final Vector      leaving=new Vector(7);
 
-    public ViewId      view_id=null;
-    public long        ltime=0;
-    public long        join_timeout=5000;
-    public long        join_retry_timeout=2000;
-    public long        leave_timeout=5000;
-    public long        digest_timeout=5000;        // time to wait for a digest (from PBCAST). should be fast
-    public long        merge_timeout=10000;        // time to wait for all MERGE_RSPS
-    public Object      impl_mutex=new Object();    // synchronizes event entry into impl
-    private Object     digest_mutex=new Object();  // synchronizes the GET_DIGEST/GET_DIGEST_OK events
-    private Digest     digest=null;                // holds result of GET_DIGEST event
-    private Hashtable  impls=new Hashtable();
-    private boolean    shun=true;
-    private boolean    print_local_addr=true;
-    boolean            disable_initial_coord=false; // can the member become a coord on startup or not ?
-    final String       CLIENT="Client";
-    final String       COORD="Coordinator";
-    final String       PART="Participant";
-    TimeScheduler      timer=null;
+    ViewId                    view_id=null;
+    private long              ltime=0;
+    long                      join_timeout=5000;
+    long                      join_retry_timeout=2000;
+    long                      leave_timeout=5000;
+    private long              digest_timeout=5000;        // time to wait for a digest (from PBCAST). should be fast
+    long                      merge_timeout=10000;        // time to wait for all MERGE_RSPS
+    private final Object      impl_mutex=new Object();    // synchronizes event entry into impl
+    private final Object      digest_mutex=new Object();  // synchronizes the GET_DIGEST/GET_DIGEST_OK events
+    private Digest            digest=null;                // holds result of GET_DIGEST event
+    private final Hashtable   impls=new Hashtable(3);
+    private boolean           shun=true;
+    private boolean           print_local_addr=true;
+    boolean                   disable_initial_coord=false; // can the member become a coord on startup or not ?
+    static final String       CLIENT="Client";
+    static final String       COORD="Coordinator";
+    static final String       PART="Participant";
+    TimeScheduler             timer=null;
 
     /** Max number of old members to keep in history */
-    protected int      num_prev_mbrs=50;
+    protected int             num_prev_mbrs=50;
 
     /** Keeps track of old members (up to num_prev_mbrs) */
-    BoundedList        prev_members=null;
+    BoundedList               prev_members=null;
 
 
     public GMS() {
@@ -73,7 +73,7 @@ public class GMS extends Protocol {
 
 
     public Vector requiredDownServices() {
-        Vector retval=new Vector();
+        Vector retval=new Vector(3);
         retval.addElement(new Integer(Event.GET_DIGEST));
         retval.addElement(new Integer(Event.SET_DIGEST));
         retval.addElement(new Integer(Event.FIND_INITIAL_MBRS));
@@ -84,7 +84,10 @@ public class GMS extends Protocol {
     public void setImpl(GmsImpl new_impl) {
         synchronized(impl_mutex) {
             impl=new_impl;
-            if(Trace.trace) Trace.info("GMS.setImpl()", "changed role to " + new_impl.getClass().getName());
+            if(log.isDebugEnabled()) {
+                String msg=(local_addr != null? local_addr.toString()+" " : "") + "changed role to " + new_impl.getClass().getName();
+                log.debug(msg);
+            }
         }
     }
 
@@ -116,14 +119,17 @@ public class GMS extends Protocol {
 
     public void becomeCoordinator() {
         CoordGmsImpl tmp=(CoordGmsImpl)impls.get(COORD);
-
         if(tmp == null) {
             tmp=new CoordGmsImpl(this);
             impls.put(COORD, tmp);
         }
-        tmp.leaving=false;
+        try {
+            tmp.init();
+        }
+        catch(Exception e) {
+            log.error("exception switching to coordinator role", e);
+        }
         setImpl(tmp);
-        if(Trace.trace) Trace.info("GMS.becomeCoordinator()", local_addr + " became coordinator");
     }
 
 
@@ -134,21 +140,28 @@ public class GMS extends Protocol {
             tmp=new ParticipantGmsImpl(this);
             impls.put(PART, tmp);
         }
-        tmp.leaving=false;
+        try {
+            tmp.init();
+        }
+        catch(Exception e) {
+            log.error("exception switching to participant", e);
+        }
         setImpl(tmp);
-        if(Trace.trace) Trace.info("GMS.becomeParticipant()", local_addr + " became participant");
     }
 
     public void becomeClient() {
         ClientGmsImpl tmp=(ClientGmsImpl)impls.get(CLIENT);
-
         if(tmp == null) {
             tmp=new ClientGmsImpl(this);
             impls.put(CLIENT, tmp);
         }
-        tmp.initial_mbrs.removeAllElements();
+        try {
+            tmp.init();
+        }
+        catch(Exception e) {
+            log.error("exception switching to client role", e);
+        }
         setImpl(tmp);
-        if(Trace.trace) Trace.info("GMS.becomeClient", local_addr + " became client");
     }
 
 
@@ -170,18 +183,16 @@ public class GMS extends Protocol {
 
         synchronized(members) {
             if(view_id == null) {
-                Trace.error("GMS.getNextView()", "view_id is null");
+                log.error("view_id is null");
                 return null; // this should *never* happen !
             }
             vid=Math.max(view_id.getId(), ltime) + 1;
             ltime=vid;
-
-            if(Trace.trace)
-                Trace.debug("GMS.getNextView()", "VID=" + vid + ", current members=" +
-                                                 Util.printMembers(members.getMembers()) +
-                                                 ", new_mbrs=" + Util.printMembers(new_mbrs) +
-                                                 ", old_mbrs=" + Util.printMembers(old_mbrs) + ", suspected_mbrs=" +
-                                                 Util.printMembers(suspected_mbrs));
+            if(log.isDebugEnabled()) log.debug("VID=" + vid + ", current members=" +
+                    Util.printMembers(members.getMembers()) +
+                    ", new_mbrs=" + Util.printMembers(new_mbrs) +
+                    ", old_mbrs=" + Util.printMembers(old_mbrs) + ", suspected_mbrs=" +
+                    Util.printMembers(suspected_mbrs));
 
             tmp_mbrs=tmp_members.copy();  // always operate on the temporary membership
             tmp_mbrs.remove(suspected_mbrs);
@@ -218,8 +229,7 @@ public class GMS extends Protocol {
                 }
             }
 
-            if(Trace.trace)
-                Trace.debug("GMS.getNextView()", "new view is " + v);
+            if(log.isDebugEnabled()) log.debug("new view is " + v);
             return v;
         }
     }
@@ -274,8 +284,7 @@ public class GMS extends Protocol {
         Message view_change_msg;
         GmsHeader hdr;
 
-        if(Trace.trace)
-            Trace.info("GMS.castViewChange()", "mcasting view {" + new_view + "} (" + new_view.size() + " mbrs)\n");
+        if(log.isDebugEnabled()) log.debug("mcasting view {" + new_view + "} (" + new_view.size() + " mbrs)\n");
         view_change_msg=new Message(); // bcast to all members
         hdr=new GmsHeader(GmsHeader.VIEW, new_view);
         hdr.digest=digest;
@@ -304,14 +313,15 @@ public class GMS extends Protocol {
         ViewId vid=new_view.getVid();
         Vector mbrs=new_view.getMembers();
 
-        if(Trace.trace) Trace.info("GMS.installView()", "[local_addr=" + local_addr + "] view is " + new_view);
+        if(log.isDebugEnabled()) log.debug("[local_addr=" + local_addr + "] view is " + new_view);
 
         // Discards view with id lower than our own. Will be installed without check if first view
         if(view_id != null) {
             rc=vid.compareTo(view_id);
             if(rc <= 0) {
-                Trace.error("GMS.installView()", "[" + local_addr + "] received view <= current view;" +
-                                                 " discarding it (current vid: " + view_id + ", new vid: " + vid + ")");
+                if(log.isDebugEnabled())
+                    log.debug("[" + local_addr + "] received view <= current view;" +
+                              " discarding it (current vid: " + view_id + ", new vid: " + vid + ')');
                 return;
             }
         }
@@ -321,19 +331,19 @@ public class GMS extends Protocol {
         /* Check for self-inclusion: if I'm not part of the new membership, I just discard it.
         This ensures that messages sent in view V1 are only received by members of V1 */
         if(checkSelfInclusion(mbrs) == false) {
-            if(Trace.trace)
-                Trace.warn("GMS.installView()", "checkSelfInclusion() failed, " + local_addr +
-                                                " is not a member of view " + new_view + "; discarding view");
+            if(log.isWarnEnabled()) log.warn("checkSelfInclusion() failed, " + local_addr +
+                    " is not a member of view " + new_view + "; discarding view");
 
             // only shun if this member was previously part of the group. avoids problem where multiple
             // members (e.g. X,Y,Z) join {A,B} concurrently, X is joined first, and Y and Z get view
             // {A,B,X}, which would cause Y and Z to be shunned as they are not part of the membership
             // bela Nov 20 2003
             if(shun && local_addr != null && prev_members.contains(local_addr)) {
-                if(Trace.trace)
-                    Trace.warn("GMS.installView()", "I (" + local_addr +
-                                                    ") am being shunned, will leave and rejoin group. " +
-                                                    "prev_members are " + prev_members);
+                if(log.isWarnEnabled())
+                    log.warn("I (" + local_addr + ") am being shunned, will leave and " +
+                            "rejoin group (prev_members are " + prev_members + ')');
+                if(impl != null)
+                    impl.handleExit();
                 passUp(new Event(Event.EXIT));
             }
             return;
@@ -368,7 +378,9 @@ public class GMS extends Protocol {
             passUp(view_event);
 
             coord=determineCoordinator();
-            if(coord != null && coord.equals(local_addr) && !(coord.equals(vid.getCoordAddress()))) {
+            // if(coord != null && coord.equals(local_addr) && !(coord.equals(vid.getCoordAddress()))) {
+            // changed on suggestion by yaronr and Nicolas Piedeloupe
+            if(coord != null && coord.equals(local_addr) && !haveCoordinatorRole()) {
                 becomeCoordinator();
             }
             else {
@@ -460,10 +472,12 @@ public class GMS extends Protocol {
         synchronized(digest_mutex) {
             digest=null;
             passDown(new Event(Event.GET_DIGEST));
-            try {
-                digest_mutex.wait(digest_timeout);
-            }
-            catch(Exception ex) {
+            if(digest == null) {
+                try {
+                    digest_mutex.wait(digest_timeout);
+                }
+                catch(Exception ex) {
+                }
             }
             if(digest != null) {
                 ret=digest;
@@ -471,7 +485,7 @@ public class GMS extends Protocol {
                 return ret;
             }
             else {
-                Trace.error("GMS.getDigest()", "digest could not be fetched from PBCAST layer");
+                if(log.isErrorEnabled()) log.error("digest could not be fetched from PBCAST layer");
                 return null;
             }
         }
@@ -500,15 +514,12 @@ public class GMS extends Protocol {
                         impl.handleJoinResponse(hdr.join_rsp);
                         break;
                     case GmsHeader.LEAVE_REQ:
-                        if(Trace.trace)
-                            Trace.info("GMS.up()", "received LEAVE_REQ " + hdr + " from " + msg.getSrc());
-
+                        if(log.isDebugEnabled()) log.debug("received LEAVE_REQ " + hdr + " from " + msg.getSrc());
                         if(hdr.mbr == null) {
-                            if(Trace.trace)
-                                Trace.error("GMS.up()", "LEAVE_REQ's mbr field is null");
+                            if(log.isErrorEnabled()) log.error("LEAVE_REQ's mbr field is null");
                             return;
                         }
-                        sendLeaveResponse(hdr.mbr);
+                        // sendLeaveResponse(hdr.mbr);
                         impl.handleLeave(hdr.mbr, false);
                         break;
                     case GmsHeader.LEAVE_RSP:
@@ -516,7 +527,7 @@ public class GMS extends Protocol {
                         break;
                     case GmsHeader.VIEW:
                         if(hdr.view == null) {
-                            Trace.error("GMS.up()", "[VIEW]: view == null");
+                            if(log.isErrorEnabled()) log.error("[VIEW]: view == null");
                             return;
                         }
                         impl.handleViewChange(hdr.view, hdr.digest);
@@ -541,7 +552,7 @@ public class GMS extends Protocol {
                         break;
 
                     default:
-                        Trace.error("GMS.up()", "GmsHeader with type=" + hdr.type + " not known");
+                        if(log.isErrorEnabled()) log.error("GmsHeader with type=" + hdr.type + " not known");
                 }
                 return;  // don't pass up
 
@@ -604,14 +615,8 @@ public class GMS extends Protocol {
 
             case Event.CONNECT:
                 passDown(evt);
-                try {
-                    group_addr=(String)evt.getArg();
-                }
-                catch(ClassCastException cce) {
-                    Trace.error("GMS.down()", "[CONNECT]: group address must be a string (channel name)");
-                }
                 if(local_addr == null)
-                    Trace.fatal("GMS.down()", "[CONNECT] local_addr is null");
+                    if(log.isFatalEnabled()) log.fatal("[CONNECT] local_addr is null");
                 impl.join(local_addr);
                 passUp(new Event(Event.CONNECT_OK));
                 return;                              // don't pass down: was already passed down
@@ -632,51 +637,52 @@ public class GMS extends Protocol {
     public boolean setProperties(Properties props) {
         String str;
 
+        super.setProperties(props);
         str=props.getProperty("shun");
         if(str != null) {
-            shun=new Boolean(str).booleanValue();
+            shun=Boolean.valueOf(str).booleanValue();
             props.remove("shun");
         }
 
         str=props.getProperty("print_local_addr");
         if(str != null) {
-            print_local_addr=new Boolean(str).booleanValue();
+            print_local_addr=Boolean.valueOf(str).booleanValue();
             props.remove("print_local_addr");
         }
 
         str=props.getProperty("join_timeout");           // time to wait for JOIN
         if(str != null) {
-            join_timeout=new Long(str).longValue();
+            join_timeout=Long.parseLong(str);
             props.remove("join_timeout");
         }
 
         str=props.getProperty("join_retry_timeout");     // time to wait between JOINs
         if(str != null) {
-            join_retry_timeout=new Long(str).longValue();
+            join_retry_timeout=Long.parseLong(str);
             props.remove("join_retry_timeout");
         }
 
         str=props.getProperty("leave_timeout");           // time to wait until coord responds to LEAVE req.
         if(str != null) {
-            leave_timeout=new Long(str).longValue();
+            leave_timeout=Long.parseLong(str);
             props.remove("leave_timeout");
         }
 
         str=props.getProperty("merge_timeout");           // time to wait for MERGE_RSPS from subgroup coordinators
         if(str != null) {
-            merge_timeout=new Long(str).longValue();
+            merge_timeout=Long.parseLong(str);
             props.remove("merge_timeout");
         }
 
         str=props.getProperty("digest_timeout");          // time to wait for GET_DIGEST_OK from PBCAST
         if(str != null) {
-            digest_timeout=new Long(str).longValue();
+            digest_timeout=Long.parseLong(str);
             props.remove("digest_timeout");
         }
 
         str=props.getProperty("disable_initial_coord");
         if(str != null) {
-            disable_initial_coord=new Boolean(str).booleanValue();
+            disable_initial_coord=Boolean.valueOf(str).booleanValue();
             props.remove("disable_initial_coord");
         }
 
@@ -710,19 +716,18 @@ public class GMS extends Protocol {
         GmsHeader hdr;
 
         if(mbr == null) {
-            if(Trace.trace)
-                Trace.error("GMS.handleJoinRequest()", "mbr is null");
+            if(log.isErrorEnabled()) log.error("mbr is null");
             return;
         }
 
-        if(Trace.trace)
-            Trace.debug("GMS.handleJoinRequest()", "mbr=" + mbr);
+        if(log.isDebugEnabled()) log.debug("mbr=" + mbr);
 
         // 1. Get the new view and digest
         join_rsp=impl.handleJoin(mbr);
         if(join_rsp == null)
-            Trace.error("GMS.handleJoinRequest()", impl.getClass().toString() + ".handleJoin(" + mbr +
-                                                   ") returned null: will not be able to multicast new view");
+            if(log.isErrorEnabled())
+                log.error(impl.getClass().toString() + ".handleJoin(" + mbr +
+                        ") returned null: will not be able to multicast new view");
 
         // 2. Send down a local TMP_VIEW event. This is needed by certain layers (e.g. NAKACK) to compute correct digest
         //    in case client's next request (e.g. getState()) reaches us *before* our own view change multicast.
@@ -742,18 +747,13 @@ public class GMS extends Protocol {
     }
 
 
-    void sendLeaveResponse(Address mbr) {
-        Message msg=new Message(mbr, null, null);
-        GmsHeader hdr=new GmsHeader(GmsHeader.LEAVE_RSP);
-        msg.putHeader(getName(), hdr);
-        passDown(new Event(Event.MSG, msg));
-    }
+
 
     /* --------------------------- End of Private Methods ------------------------------- */
 
 
 
-    public static class GmsHeader extends Header {
+    public static class GmsHeader extends Header implements Streamable {
         public static final int JOIN_REQ=1;
         public static final int JOIN_RSP=2;
         public static final int LEAVE_REQ=3;
@@ -803,7 +803,7 @@ public class GMS extends Protocol {
 
         public String toString() {
             StringBuffer sb=new StringBuffer("GmsHeader");
-            sb.append("[" + type2String(type) + "]");
+            sb.append('[' + type2String(type) + ']');
             switch(type) {
 
                 case JOIN_REQ:
@@ -842,7 +842,7 @@ public class GMS extends Protocol {
                     sb.append(", <merge cancelled>, merge_id=" + merge_id);
                     break;
             }
-            sb.append("\n");
+            sb.append('\n');
             return sb.toString();
         }
 
@@ -891,6 +891,27 @@ public class GMS extends Protocol {
             join_rsp=(JoinRsp)in.readObject();
             digest=(Digest)in.readObject();
             merge_id=(Serializable)in.readObject();
+            merge_rejected=in.readBoolean();
+        }
+
+
+        public void writeTo(DataOutputStream out) throws IOException {
+            out.writeInt(type);
+            Util.writeStreamable(view, out);
+            Util.writeAddress(mbr, out);
+            Util.writeStreamable(join_rsp, out);
+            Util.writeStreamable(digest, out);
+            Util.writeStreamable((Streamable)merge_id, out); // kludge: we know merge_id is a ViewId
+            out.writeBoolean(merge_rejected);
+        }
+
+        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+            type=in.readInt();
+            view=(View)Util.readStreamable(View.class, in);
+            mbr=Util.readAddress(in);
+            join_rsp=(JoinRsp)Util.readStreamable(JoinRsp.class, in);
+            digest=(Digest)Util.readStreamable(Digest.class, in);
+            merge_id=(Serializable)Util.readStreamable(ViewId.class, in);
             merge_rejected=in.readBoolean();
         }
 

@@ -1,27 +1,31 @@
-// $Id: Util.java,v 1.2 2003/12/24 01:45:19 belaban Exp $
+// $Id: Util.java,v 1.25 2004/11/29 09:29:32 belaban Exp $
 
 package org.jgroups.util;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jgroups.*;
+import org.jgroups.conf.ClassConfigurator;
+import org.jgroups.stack.IpAddress;
 
 import java.io.*;
 import java.net.BindException;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.ServerSocket;
+import java.util.ArrayList;
 import java.util.StringTokenizer;
 import java.util.Vector;
-import java.util.ArrayList;
-
-import org.jgroups.*;
-import org.jgroups.log.Trace;
-import org.jgroups.stack.IpAddress;
 
 
 /**
  * Collection of various utility routines that can not be assigned to other classes.
  */
 public class Util {
-    private static Object mutex=new Object();
-    private static ByteArrayOutputStream out_stream=new ByteArrayOutputStream(65535);
+    private static final Object mutex=new Object();
+    private static final ByteArrayOutputStream out_stream=new ByteArrayOutputStream(512);
+
+    protected static final Log log=LogFactory.getLog(Util.class);
 
     // constants
     public static final int MAX_PORT=65535; // highest port allocatable
@@ -36,10 +40,9 @@ public class Util {
             if(buffer == null) return null;
             Object retval=null;
             ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer);
-            ObjectInputStream in=new ObjectInputStream(in_stream);
+            ObjectInputStream in=new ContextObjectInputStream(in_stream); // changed Nov 29 2004 (bela)
             retval=in.readObject();
             in.close();
-
             if(retval == null)
                 return null;
             return retval;
@@ -58,11 +61,243 @@ public class Util {
             out.writeObject(obj);
             result=out_stream.toByteArray();
             out.close();
-
         }
         return result;
     }
 
+
+    public static void writeAddress(Address addr, DataOutputStream out) throws IOException {
+        if(addr == null) {
+            out.write(0);
+            return;
+        }
+
+        out.write(1);
+        if(addr instanceof IpAddress) {
+            // regular case, we don't need to include class information about the type of Address, e.g. JmsAddress
+            out.write(1);
+            addr.writeTo(out);
+        }
+        else {
+            out.write(0);
+            writeOtherAddress(addr, out);
+        }
+    }
+
+
+
+
+    private static void writeOtherAddress(Address addr, DataOutputStream out) throws IOException {
+        ClassConfigurator conf=null;
+        try {conf=ClassConfigurator.getInstance(false);} catch(Exception e) {}
+        int magic_number=conf != null? conf.getMagicNumber(addr.getClass()) : -1;
+
+        // write the class info
+        if(magic_number == -1) {
+            out.write(0);
+            out.writeUTF(addr.getClass().getName());
+        }
+        else {
+            out.write(1);
+            out.writeInt(magic_number);
+        }
+
+        // write the data itself
+        addr.writeTo(out);
+    }
+
+    public static Address readAddress(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        Address addr=null;
+        int b=in.read();
+        if(b == 0)
+            return null;
+        b=in.read();
+        if(b == 1) {
+            addr=new IpAddress();
+            addr.readFrom(in);
+        }
+        else {
+            addr=readOtherAddress(in);
+        }
+        return addr;
+    }
+
+    private static Address readOtherAddress(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        ClassConfigurator conf=null;
+        try {conf=ClassConfigurator.getInstance(false);} catch(Exception e) {}
+        int b=in.read();
+        int magic_number;
+        String classname;
+        Class cl=null;
+        Address addr;
+        if(b == 1) {
+            magic_number=in.readInt();
+            cl=conf.get(magic_number);
+        }
+        else {
+            classname=in.readUTF();
+            cl=conf.get(classname);
+        }
+        addr=(Address)cl.newInstance();
+        addr.readFrom(in);
+        return addr;
+    }
+
+
+    public static void writeStreamable(Streamable obj, DataOutputStream out) throws IOException {
+        if(obj == null) {
+            out.write(0);
+            return;
+        }
+        out.write(1);
+        obj.writeTo(out);
+    }
+
+
+    public static Streamable readStreamable(Class clazz, DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        Streamable retval=null;
+        int b=in.read();
+        if(b == 0)
+            return null;
+        retval=(Streamable)clazz.newInstance();
+        retval.readFrom(in);
+        return retval;
+    }
+
+
+    public static void writeGenericStreamable(Streamable obj, DataOutputStream out) throws IOException {
+        int magic_number;
+        String classname;
+
+        if(obj == null) {
+            out.write(0);
+            return;
+        }
+
+        try {
+            out.write(1);
+            magic_number=ClassConfigurator.getInstance(false).getMagicNumber(obj.getClass());
+            // write the magic number or the class name
+            if(magic_number == -1) {
+                out.write(0);
+                classname=obj.getClass().getName();
+                out.writeUTF(classname);
+            }
+            else {
+                out.write(1);
+                out.writeInt(magic_number);
+            }
+
+            // write the contents
+            obj.writeTo(out);
+        }
+        catch(ChannelException e) {
+            throw new IOException("failed writing object of type " + obj.getClass() + " to stream: " + e.toString());
+        }
+    }
+
+
+
+    public static Streamable readGenericStreamable(DataInputStream in) throws IOException {
+        Streamable retval=null;
+        int b=in.read();
+        if(b == 0)
+            return null;
+
+        int use_magic_number=in.read(), magic_number;
+        String classname;
+        Class clazz;
+
+        try {
+            if(use_magic_number == 1) {
+                magic_number=in.readInt();
+                clazz=ClassConfigurator.getInstance(false).get(magic_number);
+            }
+            else {
+                classname=in.readUTF();
+                clazz=ClassConfigurator.getInstance(false).get(classname);
+            }
+
+            retval=(Streamable)clazz.newInstance();
+            retval.readFrom(in);
+            return retval;
+        }
+        catch(Exception ex) {
+            throw new IOException("failed reading object: " + ex.toString());
+        }
+    }
+
+
+    public static void writeString(String s, DataOutputStream out) throws IOException {
+        if(s != null) {
+            out.write(1);
+            out.writeUTF(s);
+        }
+        else {
+            out.write(0);
+        }
+    }
+
+    public static String readString(DataInputStream in) throws IOException {
+        int b=in.read();
+        if(b == 1)
+            return in.readUTF();
+        return null;
+    }
+
+    public static void writeByteBuffer(byte[] buf, DataOutputStream out) throws IOException {
+        if(buf != null) {
+            out.write(1);
+            out.writeInt(buf.length);
+            out.write(buf, 0, buf.length);
+        }
+        else {
+            out.write(0);
+        }
+    }
+
+    public static byte[] readByteBuffer(DataInputStream in) throws IOException {
+        int b=in.read();
+        if(b == 1) {
+            b=in.readInt();
+            byte[] buf=new byte[b];
+            in.read(buf, 0, buf.length);
+            return buf;
+        }
+        return null;
+    }
+
+
+
+    public static boolean match(Object obj1, Object obj2) {
+        if(obj1 == null && obj2 == null)
+            return true;
+        if(obj1 != null)
+            return obj1.equals(obj2);
+        else
+            return obj2.equals(obj1);
+    }
+
+
+    public static boolean match(long[] a1, long[] a2) {
+        if(a1 == null && a2 == null)
+            return true;
+        if(a1 == null || a2 == null)
+            return false;
+
+        if(a1 == a2) // identity
+            return true;
+
+        // at this point, a1 != null and a2 != null
+        if(a1.length != a2.length)
+            return false;
+
+        for(int i=0; i < a1.length; i++) {
+            if(a1[i] != a2[i])
+                return false;
+        }
+        return true;
+    }
 
     /** Sleep for timeout msecs. Returns when timeout has elapsed or thread was interrupted */
     public static void sleep(long timeout) {
@@ -103,7 +338,7 @@ public class Util {
     /** Sleeps between 1 and timeout milliseconds, chosen randomly. Timeout must be > 1 */
     public static void sleepRandom(long timeout) {
         if(timeout <= 0) {
-            Trace.println("Util.sleepRandom()", Trace.ERROR, "timeout must be > 0 !");
+            log.error("timeout must be > 0 !");
             return;
         }
 
@@ -158,6 +393,10 @@ public class Util {
         return s.toString();
     }
 
+    public static String getStackTrace(Throwable t) {
+        return printStackTrace(t);
+    }
+
     /**
      * Use with caution: lots of overhead
      */
@@ -189,7 +428,7 @@ public class Util {
         if(evt.getType() == Event.MSG) {
             msg=(Message)evt.getArg();
             if(msg != null) {
-                if(msg.getBuffer() != null)
+                if(msg.getLength() > 0)
                     return printMessage(msg);
                 else
                     return msg.printObjectHeaders();
@@ -201,17 +440,13 @@ public class Util {
 
     /** Tries to read an object from the message's buffer and prints it */
     public static String printMessage(Message msg) {
-        Object obj;
-
         if(msg == null)
             return "";
-        byte[] buf=msg.getBuffer();
-        if(buf == null)
+        if(msg.getLength() == 0)
             return null;
 
         try {
-            obj=objectFromByteBuffer(buf);
-            return obj.toString();
+            return msg.getObject().toString();
         }
         catch(Exception e) {  // it is not an object
             return "";
@@ -226,12 +461,11 @@ public class Util {
         Object obj;
         if(msg == null)
             return "";
-        byte[] buf=msg.getBuffer();
-        if(buf == null)
+        if(msg.getLength() == 0)
             return "";
 
         try {
-            obj=objectFromByteBuffer(buf);
+            obj=msg.getObject();
             return obj.toString();
         }
         catch(Exception e) {  // it is not an object
@@ -258,7 +492,7 @@ public class Util {
         Thread.enumerate(threads);
         sb.append("------- Threads -------\n");
         for(int i=0; i < threads.length; i++) {
-            sb.append("#" + i + ": " + threads[i] + "\n");
+            sb.append("#" + i + ": " + threads[i] + '\n');
         }
         sb.append("------- Threads -------\n");
         return sb.toString();
@@ -298,6 +532,39 @@ public class Util {
 
 
     /**
+     * Given a buffer and a fragmentation size, compute a list of fragmentation offset/length pairs, and
+     * return them in a list. Example:<br/>
+     * Buffer is 10 bytes, frag_size is 4 bytes. Return value will be ({0,4}, {4,4}, {8,2}).
+     * This is a total of 3 fragments: the first fragment starts at 0, and has a length of 4 bytes, the second fragment
+     * starts at offset 4 and has a length of 4 bytes, and the last fragment starts at offset 8 and has a length
+     * of 2 bytes.
+     * @param frag_size
+     * @return List. A List<Range> of offset/length pairs
+     */
+    public static java.util.List computeFragOffsets(int offset, int length, int frag_size) {
+        java.util.List   retval=new ArrayList();
+        long   total_size=length + offset;
+        int    index=offset;
+        int    tmp_size=0;
+        Range  r;
+
+        while(index < total_size) {
+            if(index + frag_size <= total_size)
+                tmp_size=frag_size;
+            else
+                tmp_size=(int)(total_size - index);
+            r=new Range(index, tmp_size);
+            retval.add(r);
+            index+=tmp_size;
+        }
+        return retval;
+    }
+
+    public static java.util.List computeFragOffsets(byte[] buf, int frag_size) {
+        return computeFragOffsets(0, buf.length, frag_size);
+    }
+
+    /**
      Concatenates smaller fragments into entire buffers.
      @param fragments An array of byte buffers (<code>byte[]</code>)
      @return A byte buffer
@@ -324,7 +591,7 @@ public class Util {
 
     public static void printFragments(byte[] frags[]) {
         for(int i=0; i < frags.length; i++)
-            System.out.println("'" + new String(((byte[])frags[i])) + "'");
+            System.out.println('\'' + new String(frags[i]) + '\'');
     }
 
 
@@ -399,7 +666,7 @@ public class Util {
                 ret.append(array[i] + " ");
         }
 
-        ret.append("]");
+        ret.append(']');
         return ret.toString();
     }
 
@@ -411,7 +678,7 @@ public class Util {
                 ret.append(array[i] + " ");
         }
 
-        ret.append("]");
+        ret.append(']');
         return ret.toString();
     }
 
@@ -422,7 +689,7 @@ public class Util {
             for(int i=0; i < array.length; i++)
                 ret.append(array[i] + " ");
         }
-        ret.append("]");
+        ret.append(']');
         return ret.toString();
     }
 
@@ -489,7 +756,7 @@ public class Util {
                     sb.append(el);
             }
         }
-        sb.append(")");
+        sb.append(')');
         return sb.toString();
     }
 
@@ -524,7 +791,7 @@ public class Util {
             return data.length;
         }
         catch(Exception ex) {
-            Trace.error("Util.sizeOf()", "exception=" + ex);
+            if(log.isErrorEnabled()) log.error("exception=" + ex);
             return 0;
         }
     }
@@ -538,7 +805,7 @@ public class Util {
             return data.length;
         }
         catch(Exception ex) {
-            Trace.error("Util.sizeOf()", "exception+" + ex);
+            if(log.isErrorEnabled()) log.error("exception+" + ex);
             return 0;
         }
     }
@@ -551,7 +818,7 @@ public class Util {
 
         if(one == null || two == null) return false;
         if(!(one instanceof IpAddress) || !(two instanceof IpAddress)) {
-            Trace.error("Util.sameHost()", "addresses have to be of type IpAddress to be compared");
+            if(log.isErrorEnabled()) log.error("addresses have to be of type IpAddress to be compared");
             return false;
         }
 
@@ -572,7 +839,7 @@ public class Util {
             new File(fname).delete();
         }
         catch(Exception ex) {
-            Trace.error("Util.removeFile()", "exception=" + ex);
+            if(log.isErrorEnabled()) log.error("exception=" + ex);
         }
     }
 
@@ -620,7 +887,6 @@ public class Util {
 
 
     public static String shortName(String hostname) {
-        String host;
         int index;
         StringBuffer sb=new StringBuffer();
 
@@ -648,12 +914,32 @@ public class Util {
                 continue;
             }
             catch(IOException io_ex) {
-                Trace.error("Util.createServerSocket()", "exception is " + io_ex);
+                if(log.isErrorEnabled()) log.error("exception is " + io_ex);
             }
             break;
         }
         return ret;
     }
+
+    public static ServerSocket createServerSocket(InetAddress bind_addr, int start_port) {
+        ServerSocket ret=null;
+
+        while(true) {
+            try {
+                ret=new ServerSocket(start_port, 50, bind_addr);
+            }
+            catch(BindException bind_ex) {
+                start_port++;
+                continue;
+            }
+            catch(IOException io_ex) {
+                if(log.isErrorEnabled()) log.error("exception is " + io_ex);
+            }
+            break;
+        }
+        return ret;
+    }
+
 
 
     /**
@@ -719,7 +1005,32 @@ public class Util {
         return os != null && os.toLowerCase().startsWith("win") ? true : false;
     }
 
+    public static void prompt(String s) {
+        System.out.println(s);
+        System.out.flush();
+        try {
+            while(System.in.available() > 0)
+                System.in.read();
+            System.in.read();
+        }
+        catch(IOException e) {
+            e.printStackTrace();
+        }
+    }
 
+    public static String memStats(boolean gc) {
+        StringBuffer sb=new StringBuffer();
+        Runtime rt=Runtime.getRuntime();
+        if(gc)
+            rt.gc();
+        long free_mem, total_mem, used_mem;
+        free_mem=rt.freeMemory();
+        total_mem=rt.totalMemory();
+        used_mem=total_mem - free_mem;
+        sb.append("Free mem: ").append(free_mem).append("\nUsed mem: ").append(used_mem);
+        sb.append("\nTotal mem: ").append(total_mem);
+        return sb.toString();
+    }
 
 
     /*
@@ -768,6 +1079,7 @@ public class Util {
         System.out.println("Check for Solaris: " + checkForSolaris());
         System.out.println("Check for Windows: " + checkForWindows());
     }
+
 
 
 }

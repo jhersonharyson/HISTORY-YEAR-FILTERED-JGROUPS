@@ -1,16 +1,21 @@
-// $Id: TUNNEL.java,v 1.2 2003/09/24 23:19:23 belaban Exp $
+// $Id: TUNNEL.java,v 1.9 2004/10/07 10:10:37 belaban Exp $
 
 
 package org.jgroups.protocols;
 
 
+import org.jgroups.Address;
+import org.jgroups.Event;
+import org.jgroups.Message;
+import org.jgroups.View;
+import org.jgroups.util.TimeScheduler;
+import org.jgroups.util.Util;
+import org.jgroups.stack.Protocol;
+import org.jgroups.stack.RouterStub;
+
+import java.util.Enumeration;
 import java.util.Properties;
 import java.util.Vector;
-import java.util.Enumeration;
-
-import org.jgroups.*;
-import org.jgroups.stack.*;
-import org.jgroups.log.Trace;
 
 
 
@@ -29,14 +34,26 @@ import org.jgroups.log.Trace;
  * @author Bela Ban
  */
 public class TUNNEL extends Protocol implements Runnable {
-    Properties properties=null;
+    final Properties properties=null;
     String channel_name=null;
-    Vector members=new Vector();
+    final Vector members=new Vector();
     String router_host=null;
     int router_port=0;
     Address local_addr=null;  // sock's local addr and local port
     Thread receiver=null;
     RouterStub stub=null;
+    private final Object stub_mutex=new Object();
+
+    /** If true, messages sent to self are treated specially: unicast messages are
+     * looped back immediately, multicast messages get a local copy first and -
+     * when the real copy arrives - it will be discarded. Useful for Window
+     * media (non)sense */
+    boolean  loopback=true;
+
+    TimeScheduler timer=null;
+
+    Reconnector reconnector=null;
+    private final Object reconnector_mutex=new Object();
 
 
     public TUNNEL() {
@@ -44,7 +61,7 @@ public class TUNNEL extends Protocol implements Runnable {
 
 
     public String toString() {
-        return "Protocol TUNNEL(local_addr=" + local_addr + ")";
+        return "Protocol TUNNEL(local_addr=" + local_addr + ')';
     }
 
 
@@ -56,43 +73,65 @@ public class TUNNEL extends Protocol implements Runnable {
         return "TUNNEL";
     }
 
+    public void init() throws Exception {
+        super.init();
+        timer=stack.timer;
+    }
+
     public void start() throws Exception {
         createTunnel();  // will generate and pass up a SET_LOCAL_ADDRESS event
         passUp(new Event(Event.SET_LOCAL_ADDRESS, local_addr));
     }
 
     public void stop() {
-        if(receiver != null) {
+        if(receiver != null)
             receiver=null;
-            if(stub != null)
-                stub.disconnect();
-        }
         teardownTunnel();
+        stopReconnector();
     }
 
+
+
+    /**
+     * DON'T REMOVE ! This prevents the up-handler thread to be created, which essentially is superfluous:
+     * messages are received from the network rather than from a layer below.
+     */
+    public void startUpHandler() {
+        ;
+    }
 
     /** Setup the Protocol instance acording to the configuration string */
     public boolean setProperties(Properties props) {
         String str;
 
+        super.setProperties(props);
         str=props.getProperty("router_host");
         if(str != null) {
-            router_host=new String(str);
+            router_host=str;
             props.remove("router_host");
         }
 
         str=props.getProperty("router_port");
         if(str != null) {
-            router_port=new Integer(str).intValue();
+            router_port=Integer.parseInt(str);
             props.remove("router_port");
         }
 
-        if(Trace.trace)
-            Trace.info("TUNNEL.setProperties()", "router_host=" + router_host + ";router_port=" + router_port);
+        if(log.isDebugEnabled()) {
+            log.debug("router_host=" + router_host + ";router_port=" + router_port);
+        }
 
         if(router_host == null || router_port == 0) {
-            Trace.error("TUNNEL.setProperties()", "both router_host and router_port have to be set !");
-            //System.exit(-1);
+            if(log.isErrorEnabled()) {
+                log.error("both router_host and router_port have to be set !");
+                return false;
+            }
+        }
+
+        str=props.getProperty("loopback");
+        if(str != null) {
+            loopback=Boolean.valueOf(str).booleanValue();
+            props.remove("loopback");
         }
 
         if(props.size() > 0) {
@@ -103,7 +142,7 @@ public class TUNNEL extends Protocol implements Runnable {
                     sb.append(", ");
                 }
             }
-            Trace.error("TUNNEL.setProperties()", "The following properties are not recognized: " + sb.toString());
+            if(log.isErrorEnabled()) log.error("The following properties are not recognized: " + sb);
             return false;
         }
         return true;
@@ -111,11 +150,14 @@ public class TUNNEL extends Protocol implements Runnable {
 
 
     /** Caller by the layer above this layer. We just pass it on to the router. */
-    public synchronized void down(Event evt) {
+    public void down(Event evt) {
         Message      msg;
         TunnelHeader hdr;
+        Address dest;
 
-        if(Trace.trace) Trace.info("TUNNEL.down()", "event is " + evt);
+        if(log.isDebugEnabled()) {
+            log.debug(evt.toString());
+        }
 
         if(evt.getType() != Event.MSG) {
             handleDownEvent(evt);
@@ -124,14 +166,34 @@ public class TUNNEL extends Protocol implements Runnable {
 
         hdr=new TunnelHeader(channel_name);
         msg=(Message)evt.getArg();
+        dest=msg.getDest();
         msg.putHeader(getName(), hdr);
 
         if(msg.getSrc() == null)
             msg.setSrc(local_addr);
 
-        if(!stub.send(msg, channel_name)) { // if msg is not sent okay,
-            if(stub.reconnect())                 // try reconnecting until router is ok again
-                stub.register(channel_name);
+        // Don't send if destination is local address. Instead, switch dst and src and put in up_queue.
+        // If multicast message, loopback a copy directly to us (but still multicast). Once we receive this,
+        // we will discard our own multicast message
+        if(loopback && (dest == null || dest.equals(local_addr) || dest.isMulticastAddress())) {
+            Message copy=msg.copy();
+            // copy.removeHeader(name); // we don't remove the header
+            copy.setSrc(local_addr);
+            copy.setDest(dest);
+            evt=new Event(Event.MSG, copy);
+
+            /* Because Protocol.up() is never called by this bottommost layer, we call up() directly in the observer.
+               This allows e.g. PerfObserver to get the time of reception of a message */
+            if(observer != null)
+                observer.up(evt, up_queue.size());
+            if(log.isTraceEnabled()) log.trace("looped back local message " + copy);
+            passUp(evt);
+            if(dest != null && !dest.isMulticastAddress())
+                return;
+        }
+
+        if(!stub.isConnected() || !stub.send(msg, channel_name)) { // if msg is not sent okay,
+            startReconnector();
         }
     }
 
@@ -141,18 +203,22 @@ public class TUNNEL extends Protocol implements Runnable {
         if(router_host == null || router_port == 0)
             throw new Exception("router_host and/or router_port not set correctly; tunnel cannot be created");
 
-        stub=new RouterStub(router_host, router_port);
-        local_addr=stub.connect();
+        synchronized(stub_mutex) {
+            stub=new RouterStub(router_host, router_port);
+            local_addr=stub.connect();
+        }
         if(local_addr == null)
             throw new Exception("could not obtain local address !");
     }
 
 
     /** Tears the TCP connection to the router down */
-    synchronized void teardownTunnel() {
-        if(stub != null) {
-            stub.disconnect();
-            stub=null;
+    void teardownTunnel() {
+        synchronized(stub_mutex) {
+            if(stub != null) {
+                stub.disconnect();
+                stub=null;
+            }
         }
     }
 
@@ -167,7 +233,7 @@ public class TUNNEL extends Protocol implements Runnable {
         Message msg;
 
         if(stub == null) {
-            Trace.error("TUNNEL.run()", "router stub is null; cannot receive messages from router !");
+            if(log.isErrorEnabled()) log.error("router stub is null; cannot receive messages from router !");
             return;
         }
 
@@ -175,11 +241,10 @@ public class TUNNEL extends Protocol implements Runnable {
             msg=stub.receive();
             if(msg == null) {
                 if(receiver == null) break;
-                Trace.error("TUNNEL.run()", "received a null message. Trying to reconnect to router");
-                if(stub.reconnect()) {
-                    stub.register(channel_name);
-                    Trace.warn("TUNNEL.run()", "Reconnected!");
-                }
+                if(log.isErrorEnabled()) log.error("received a null message. Trying to reconnect to router");
+                if(!stub.isConnected())
+                    startReconnector();
+                Util.sleep(5000);
                 continue;
             }
             handleIncomingMessage(msg);
@@ -198,7 +263,21 @@ public class TUNNEL extends Protocol implements Runnable {
     public void handleIncomingMessage(Message msg) {
         TunnelHeader hdr=(TunnelHeader)msg.removeHeader(getName());
 
-        if(Trace.trace) Trace.info("TUNNEL.handleIncomingMessage()", "received msg " + msg);
+        // discard my own multicast loopback copy
+        if(loopback) {
+            Address dst=msg.getDest();
+            Address src=msg.getSrc();
+
+            if(dst != null && dst.isMulticastAddress() && src != null && local_addr.equals(src)) {
+                if(log.isTraceEnabled())
+                    log.trace("discarded own loopback multicast packet");
+                return;
+            }
+        }
+
+         if(log.isDebugEnabled()) {
+             log.debug("received message " + msg);
+         }
 
 
         /* Discard all messages destined for a channel with a different name */
@@ -235,8 +314,9 @@ public class TUNNEL extends Protocol implements Runnable {
 
             case Event.CONNECT:
                 channel_name=(String)evt.getArg();
-                if(stub == null)
-                    Trace.error("TUNNEL.handleDownEvent()", "CONNECT:  router stub is null!");
+                if(stub == null) {
+                    if(log.isErrorEnabled()) log.error("CONNECT:  router stub is null!");
+                }
                 else {
                     stub.register(channel_name);
                 }
@@ -265,9 +345,51 @@ public class TUNNEL extends Protocol implements Runnable {
         }
     }
 
+    private void startReconnector() {
+        synchronized(reconnector_mutex) {
+            if(reconnector == null || reconnector.cancelled()) {
+                reconnector=new Reconnector();
+                timer.add(reconnector);
+            }
+        }
+    }
 
+    private void stopReconnector() {
+        synchronized(reconnector_mutex) {
+            if(reconnector != null) {
+                reconnector.stop();
+                reconnector=null;
+            }
+        }
+    }
 
     /* ------------------------------------------------------------------------------- */
+
+
+    private class Reconnector implements TimeScheduler.Task {
+        boolean cancelled=false;
+
+
+        public void stop() {
+            cancelled=true;
+        }
+
+        public boolean cancelled() {
+            return cancelled;
+        }
+
+        public long nextInterval() {
+            return 5000;
+        }
+
+        public void run() {
+            if(stub.reconnect()) {
+                stub.register(channel_name);
+                if(log.isDebugEnabled()) log.debug("reconnected");
+                stop();
+            }
+        }
+    }
 
 
 }

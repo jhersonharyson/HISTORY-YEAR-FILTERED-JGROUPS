@@ -1,13 +1,14 @@
-// $Id: RpcDispatcher.java,v 1.3 2003/12/11 07:18:03 belaban Exp $
+// $Id: RpcDispatcher.java,v 1.13 2004/08/14 01:46:25 belaban Exp $
 
 package org.jgroups.blocks;
 
 
+import org.jgroups.*;
+import org.jgroups.util.RspList;
+import org.jgroups.util.Util;
+
 import java.io.Serializable;
 import java.util.Vector;
-import org.jgroups.*;
-import org.jgroups.util.*;
-import org.jgroups.log.Trace;
 
 
 
@@ -18,7 +19,6 @@ import org.jgroups.log.Trace;
  * @author Bela Ban
  */
 public class RpcDispatcher extends MessageDispatcher implements ChannelListener {
-    MethodLookup         method_lookup=new MethodLookupClos();
     protected Object     server_obj=null;
     protected Marshaller marshaller=null;
 
@@ -71,75 +71,27 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
     public String getName() {return "RpcDispatcher";}
 
-    public MethodLookup getMethodLookup() {return method_lookup;}
-
-    public void setMethodLookup(MethodLookup method_lookup) {
-        this.method_lookup=method_lookup;
-    }
-
     public void       setMarshaller(Marshaller m) {this.marshaller=m;}
 
     public Marshaller getMarshaller()             {return marshaller;}
 
+    public Object getServerObject() {return server_obj;}
 
 
     public RspList castMessage(Vector dests, Message msg, int mode, long timeout) {
-        Trace.error("RpcDispatcher.castMessage()", "this method should not be used with " +
+        if(log.isErrorEnabled()) log.error("this method should not be used with " +
                     "RpcDispatcher, but MessageDispatcher. Returning null");
         return null;
     }
 
     public Object sendMessage(Message msg, int mode, long timeout) throws TimeoutException, SuspectedException {
-        Trace.error("RpcDispatcher.sendMessage()", "this method should not be used with " +
+        if(log.isErrorEnabled()) log.error("this method should not be used with " +
                     "RpcDispatcher, but MessageDispatcher. Returning null");
         return null;
     }
 
 
 
-
-    /**
-     * @deprecated use callRemoteMethods(Vector,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    
-    public RspList callRemoteMethods(Vector dests, String method_name, int mode, long timeout) {
-        MethodCall method_call=new MethodCall(method_name);
-        return callRemoteMethods(dests, method_call, mode, timeout);
-    }
-
-
-    /**
-     * @deprecated use callRemoteMethods(Vector,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    public RspList callRemoteMethods(Vector dests, String method_name, Object arg1, 
-                                     int mode, long timeout) {
-        MethodCall method_call=new MethodCall(method_name, arg1);
-        return callRemoteMethods(dests, method_call, mode, timeout);
-    }
-
-
-    /**
-     * @deprecated use callRemoteMethods(Vector,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    public RspList callRemoteMethods(Vector dests, String method_name, Object arg1, Object arg2, 
-                                     int mode, long timeout) {
-        MethodCall method_call=new MethodCall(method_name, arg1, arg2);
-        return callRemoteMethods(dests, method_call, mode, timeout);
-    }
-
-
-    /**
-     * @deprecated use callRemoteMethods(Vector,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    public RspList callRemoteMethods(Vector dests, String method_name, Object arg1, Object arg2,
-                                     Object arg3, int mode, long timeout) {
-        MethodCall method_call=new MethodCall(method_name, arg1, arg2, arg3);
-        return callRemoteMethods(dests, method_call, mode, timeout);
-    }
 
 
     public RspList callRemoteMethods(Vector dests, String method_name, Object[] args,
@@ -158,93 +110,34 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
     public RspList callRemoteMethods(Vector dests, MethodCall method_call, int mode, long timeout) {
         byte[]   buf=null;
         Message  msg=null;
+        RspList  retval=null;
+
+        if(log.isTraceEnabled())
+            log.trace("dests=" + dests + ", method_call=" + method_call + ", mode=" + mode + ", timeout=" + timeout);
+
+        if(dests != null && dests.size() == 0) {
+            // don't send if dest list is empty
+            if(log.isTraceEnabled())
+                log.trace("destination list is non-null and empty: no need to send message");
+            return new RspList();
+        }
 
         try {
             buf=marshaller != null? marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
         }
         catch(Exception e) {
-            Trace.error("RpcProtocol.callRemoteMethods()", "exception=" + e);
+            if(log.isErrorEnabled()) log.error("exception=" + e);
             return null;
         }
 
         msg=new Message(null, null, buf);
-        return super.castMessage(dests, msg, mode, timeout);
+        retval=super.castMessage(dests, msg, mode, timeout);
+        if(log.isTraceEnabled()) log.trace("responses: " + retval);
+        return retval;
     }
 
 
 
-
-
-    /**
-     * Calls the remote methods in a number of receivers and returns the results asynchronously via
-     * the RspCollector interface.
-     * @param dests The destination membership. All members if null
-     * @param req_id The request id. Used to match requests and responses. has to be unique for this process
-     * @param method_call The method to be called
-     * @param coll The RspCollector to be called when a message arrives
-     */
-//    public void callRemoteMethods(Vector dests, long req_id, MethodCall method_call, RspCollector coll) {
-//        byte[]   buf=null;
-//        Message  msg=null;
-//
-//        try {
-//            buf=marshaller != null? marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
-//        }
-//        catch(Exception e) {
-//            Trace.error("RpcProtocol.callRemoteMethods()", "exception=" + e);
-//            return;
-//        }
-//
-//        msg=new Message(null, null, buf);
-//        super.castMessage(dests, req_id, msg, coll);
-//    }
-
-
-
-
-
-    /**
-     * @deprecated use callRemoteMethod(Address,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    public Object callRemoteMethod(Address dest, String method_name, int mode, long timeout) 
-        throws TimeoutException, SuspectedException {
-        MethodCall method_call=new MethodCall(method_name);
-        return callRemoteMethod(dest, method_call, mode, timeout);
-    }
-
-
-    /**
-     * @deprecated use callRemoteMethod(Address,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    public Object callRemoteMethod(Address dest, String method_name, Object arg1, int mode, long timeout) 
-        throws TimeoutException, SuspectedException {
-        MethodCall method_call=new MethodCall(method_name, arg1);
-        return callRemoteMethod(dest, method_call, mode, timeout);
-    }
-
-    
-    /**
-     * @deprecated use callRemoteMethod(Address,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    public Object callRemoteMethod(Address dest, String method_name, Object arg1, Object arg2, 
-                                int mode, long timeout) throws TimeoutException, SuspectedException {
-        MethodCall method_call=new MethodCall(method_name, arg1, arg2);
-        return callRemoteMethod(dest, method_call, mode, timeout);
-    }
-
-
-    /**
-     * @deprecated use callRemoteMethod(Address,MethodCall, int, long);
-     * @see #callRemoteMethod(Address,MethodCall, int, long)
-     */
-    public Object callRemoteMethod(Address dest, String method_name, Object arg1, Object arg2, 
-                                   Object arg3, int mode, long timeout) throws TimeoutException, SuspectedException {
-        MethodCall method_call=new MethodCall(method_name, arg1, arg2, arg3);
-        return callRemoteMethod(dest, method_call, mode, timeout);
-    }
 
 
     public Object callRemoteMethod(Address dest, String method_name, Object[] args,
@@ -265,17 +158,23 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             throws TimeoutException, SuspectedException {
         byte[]   buf=null;
         Message  msg=null;
+        Object   retval=null;
+
+        if(log.isTraceEnabled())
+            log.trace("dest=" + dest + ", method_call=" + method_call + ", mode=" + mode + ", timeout=" + timeout);
 
         try {
             buf=marshaller != null? marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
         }
         catch(Exception e) {
-            Trace.error("RpcProtocol.callRemoteMethod()", "exception=" + e);
+            if(log.isErrorEnabled()) log.error("exception=" + e);
             return null;
         }
 
         msg=new Message(dest, null, buf);
-        return super.sendMessage(msg, mode, timeout);
+        retval=super.sendMessage(msg, mode, timeout);
+        if(log.isTraceEnabled()) log.trace("retval: " + retval);
+        return retval;
     }
 
 
@@ -291,35 +190,37 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         MethodCall  method_call;
 
         if(server_obj == null) {
-            Trace.error("RpcDispatcher.handle()", "no method handler is registered. Discarding request.");
+            if(log.isErrorEnabled()) log.error("no method handler is registered. Discarding request.");
             return null;
         }
 
-        if(req == null || req.getBuffer() == null) {
-            Trace.error("RpcProtocol.handle()", "message or message buffer is null");
+        if(req == null || req.getLength() == 0) {
+            if(log.isErrorEnabled()) log.error("message or message buffer is null");
             return null;
         }
 
         try {
-            body=marshaller != null? marshaller.objectFromByteBuffer(req.getBuffer()) :
-                    Util.objectFromByteBuffer(req.getBuffer());
+            body=marshaller != null? marshaller.objectFromByteBuffer(req.getBuffer()) : req.getObject();
         }
-        catch(Exception e) {
-            Trace.error("RpcDispatcher.handle()", "exception=" + e);
+        catch(Throwable e) {
+            if(log.isErrorEnabled()) log.error("exception=" + e);
             return e;
         }
 
         if(body == null || !(body instanceof MethodCall)) {
-            Trace.error("RpcDispatcher.handle()", "message does not contain a MethodCall object");
+            if(log.isErrorEnabled()) log.error("message does not contain a MethodCall object");
             return null;
         }
 
         method_call=(MethodCall)body;
+
         try {
-            return method_call.invoke(server_obj, method_lookup);
+            if(log.isTraceEnabled())
+                log.trace("[sender=" + req.getSrc() + "], method_call: " + method_call);
+            return method_call.invoke(server_obj);
         }
         catch(Throwable x) {
-            Trace.error("RpcDispatcher.handle()", Trace.getStackTrace(x));
+            log.error("failed invoking method", x);
             return x;
         }
     }

@@ -1,31 +1,17 @@
-// $Id: ReplicatedTree.java,v 1.2 2003/09/24 23:20:46 belaban Exp $
+// $Id: ReplicatedTree.java,v 1.8 2004/09/23 16:29:11 belaban Exp $
 
 package org.jgroups.blocks;
 
 
-import java.io.Serializable;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Set;
-import java.util.StringTokenizer;
-import java.util.TreeMap;
-import java.util.Vector;
-
-import org.jgroups.Address;
-import org.jgroups.Channel;
-import org.jgroups.ChannelClosedException;
-import org.jgroups.ChannelNotConnectedException;
-import org.jgroups.JChannel;
-import org.jgroups.MembershipListener;
-import org.jgroups.Message;
-import org.jgroups.MessageListener;
-import org.jgroups.View;
-import org.jgroups.log.Trace;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jgroups.*;
 import org.jgroups.util.Queue;
 import org.jgroups.util.QueueClosedException;
 import org.jgroups.util.Util;
+
+import java.io.Serializable;
+import java.util.*;
 
 
 
@@ -36,18 +22,20 @@ import org.jgroups.util.Util;
  * @author Bela Ban Jan 17 2002
  * @author <a href="mailto:aolias@yahoo.com">Alfonso Olias-Sanz</a>
  */
-public class ReplicatedTree implements Runnable, Cloneable, MessageListener, MembershipListener {
+public class ReplicatedTree implements Runnable, MessageListener, MembershipListener {
     public static final String SEPARATOR="/";
     final static int INDENT=4;
     Node root=new Node(SEPARATOR, SEPARATOR, null, null);
-    Vector listeners=new Vector();
-    Queue request_queue=new Queue();
+    final Vector listeners=new Vector();
+    final Queue request_queue=new Queue();
     Thread request_handler=null;
     JChannel channel=null;
     PullPushAdapter adapter=null;
     String groupname="ReplicatedTree-Group";
-    Vector members=new Vector();
+    final Vector members=new Vector();
     long state_fetch_timeout=10000;
+
+    protected final Log log=LogFactory.getLog(this.getClass());
 
 
     /** Whether or not to use remote calls. If false, all methods will be invoked directly on this
@@ -71,7 +59,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
 
 	/** Determines when the updates have to be sent across the network, avoids sending unnecessary
      * messages when there are no member in the group */
-	private transient boolean send_message = false;
+	private boolean send_message = false;
 
 
 
@@ -137,9 +125,9 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
     public void fetchState(long timeout) throws ChannelClosedException, ChannelNotConnectedException {
         boolean rc=channel.getState(null, timeout);
         if(rc)
-            Trace.info("ReplicatedTree.fetchState()", "state was retrieved successfully");
+            if(log.isInfoEnabled()) log.info("state was retrieved successfully");
         else
-            Trace.info("ReplicatedTree.fetchState()", "state could not be retrieved (first member)");
+            if(log.isInfoEnabled()) log.info("state could not be retrieved (first member)");
     }
 
 
@@ -165,9 +153,9 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
         channel.setOpt(Channel.GET_STATE_EVENTS, Boolean.TRUE);
         boolean rc=channel.getState(null, state_fetch_timeout);
         if(rc)
-            Trace.info("ReplicatedTree.init()", "state was retrieved successfully");
+            if(log.isInfoEnabled()) log.info("state was retrieved successfully");
         else
-            Trace.info("ReplicatedTree.init()", "state could not be retrieved (first member)");
+            if(log.isInfoEnabled()) log.info("state could not be retrieved (first member)");
     }
 
 
@@ -193,7 +181,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
      * Adds a new node to the tree and sets its data. If the node doesn not yet exist, it will be created.
      * Also, parent nodes will be created if not existent. If the node already has data, then the new data
      * will override the old one. If the node already existed, a nodeModified() notification will be generated.
-     * Otherwise a nodeAdded() motification will be emitted.
+     * Otherwise a nodeCreated() motification will be emitted.
      * @param fqn The fully qualified name of the new node
      * @param data The new data. May be null if no data should be set in the node.
      */
@@ -207,9 +195,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
 		//if true, propagate action to the group
         if(send_message == true) {
             if(channel == null) {
-                Trace.error(
-                        "ReplicatedTree.put()",
-                        "channel is null, cannot broadcast PUT request");
+                if(log.isErrorEnabled()) log.error("channel is null, cannot broadcast PUT request");
                 return;
             }
             try {
@@ -220,9 +206,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
                                 new Request(Request.PUT, fqn, data)));
             }
             catch(Exception ex) {
-                Trace.error(
-                        "ReplicatedTree.put()",
-                        "failure bcasting PUT request: " + ex);
+                if(log.isErrorEnabled()) log.error("failure bcasting PUT request: " + ex);
             }
         }
         else {
@@ -234,7 +218,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
     /**
      * Adds a key and value to a given node. If the node doesn't exist, it will be created. If the node
      * already existed, a nodeModified() notification will be generated. Otherwise a
-     * nodeAdded() motification will be emitted.
+     * nodeCreated() motification will be emitted.
      * @param fqn The fully qualified name of the node
      * @param key The key
      * @param value The value
@@ -250,9 +234,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
         if(send_message == true) {
 
             if(channel == null) {
-                Trace.error(
-                        "ReplicatedTree.put()",
-                        "channel is null, cannot broadcast PUT request");
+                if(log.isErrorEnabled()) log.error("channel is null, cannot broadcast PUT request");
                 return;
             }
             try {
@@ -263,9 +245,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
                                 new Request(Request.PUT, fqn, key, value)));
             }
             catch(Exception ex) {
-                Trace.error(
-                        "ReplicatedTree.set()",
-                        "failure bcasting PUT request: " + ex);
+                if(log.isErrorEnabled()) log.error("failure bcasting PUT request: " + ex);
             }
         }
         else {
@@ -287,9 +267,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
 		//if true, propagate action to the group
         if(send_message == true) {
             if(channel == null) {
-                Trace.error(
-                        "ReplicatedTree.remove()",
-                        "channel is null, cannot broadcast REMOVE request");
+                if(log.isErrorEnabled()) log.error("channel is null, cannot broadcast REMOVE request");
                 return;
             }
             try {
@@ -297,9 +275,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
                         new Message(null, null, new Request(Request.REMOVE, fqn)));
             }
             catch(Exception ex) {
-                Trace.error(
-                        "ReplicatedTree.remove()",
-                        "failure bcasting REMOVE request: " + ex);
+                if(log.isErrorEnabled()) log.error("failure bcasting REMOVE request: " + ex);
             }
         }
         else {
@@ -322,9 +298,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
 		//if true, propagate action to the group
         if(send_message == true) {
             if(channel == null) {
-                Trace.error(
-                        "ReplicatedTree.remove()",
-                        "channel is null, cannot broadcast REMOVE request");
+                if(log.isErrorEnabled()) log.error("channel is null, cannot broadcast REMOVE request");
                 return;
             }
             try {
@@ -335,9 +309,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
                                 new Request(Request.REMOVE, fqn, key)));
             }
             catch(Exception ex) {
-                Trace.error(
-                        "ReplicatedTree.remove()",
-                        "failure bcasting REMOVE request: " + ex);
+                if(log.isErrorEnabled()) log.error("failure bcasting REMOVE request: " + ex);
             }
         }
         else {
@@ -442,7 +414,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
             Collection nodes=children.values();
             for(Iterator it=nodes.iterator(); it.hasNext();) {
                 ((Node)it.next()).print(sb, indent);
-                sb.append("\n");
+                sb.append('\n');
             }
         }
         else
@@ -567,20 +539,18 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
     /** Callback. Process the contents of the message; typically an _add() or _set() request */
     public void receive(Message msg) {
         Request req=null;
-        byte[] data;
 
-        if(msg == null || (data=msg.getBuffer()) == null)
+        if(msg == null || msg.getLength() == 0)
             return;
-        data=msg.getBuffer();
         try {
-            req=(Request)Util.objectFromByteBuffer(data);
+            req=(Request)msg.getObject();
             request_queue.add(req);
         }
         catch(QueueClosedException queue_closed_ex) {
-            Trace.error("ReplicatedTree.receive()", "request queue is null");
+            if(log.isErrorEnabled()) log.error("request queue is null");
         }
         catch(Exception ex) {
-            Trace.error("ReplicatedTree.receive()", "failed unmarshalling request: " + ex);
+            if(log.isErrorEnabled()) log.error("failed unmarshalling request: " + ex);
             return;
         }
     }
@@ -591,7 +561,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
             return Util.objectToByteBuffer(root.clone());
         }
         catch(Throwable ex) {
-            Trace.error("ReplicatedTree.getState()", "exception returning cache: " + ex);
+            if(log.isErrorEnabled()) log.error("exception returning cache: " + ex);
             return null;
         }
     }
@@ -602,7 +572,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
         Object obj;
 
         if(new_state == null) {
-            Trace.info("ReplicatedTree.setState()", "new cache is null");
+            if(log.isInfoEnabled()) log.info("new cache is null");
             return;
         }
         try {
@@ -612,7 +582,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
             notifyAllNodesCreated(root);
         }
         catch(Throwable ex) {
-            Trace.error("ReplicatedTree.setState()", "could not set cache: " + ex);
+            if(log.isErrorEnabled()) log.error("could not set cache: " + ex);
         }
     }
 
@@ -685,7 +655,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
                             _remove(fqn);
                         break;
                     default:
-                        Trace.error("ReplicatedTree.run()", "type " + req.type + " unknown");
+                        if(log.isErrorEnabled()) log.error("type " + req.type + " unknown");
                         break;
                 }
             }
@@ -694,7 +664,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
                 break;
             }
             catch(Throwable other_ex) {
-                Trace.warn("ReplicatedTree.run()", "exception processing request: " + other_ex);
+                if(log.isWarnEnabled()) log.warn("exception processing request: " + other_ex);
             }
         }
     }
@@ -715,7 +685,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
         String name;
         StringBuffer sb=null;
 
-        if(fqn == null || fqn.equals(SEPARATOR) || fqn.equals(""))
+        if(fqn == null || fqn.equals(SEPARATOR) || "".equals(fqn))
             return curr;
 
         sb=new StringBuffer();
@@ -749,7 +719,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
         Node n=findParentNode(fqn, sh, false);
         String child_name=sh.getValue();
 
-        if(fqn == null || fqn.equals(SEPARATOR) || fqn.equals(""))
+        if(fqn == null || fqn.equals(SEPARATOR) || "".equals(fqn))
             return root;
 
         if(n == null || child_name == null)
@@ -914,7 +884,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
             if(children != null && children.size() > 0) {
                 Collection values=children.values();
                 for(Iterator it=values.iterator(); it.hasNext();) {
-                    sb.append("\n");
+                    sb.append('\n');
                     ((Node)it.next()).print(sb, indent + INDENT);
                 }
             }
@@ -923,7 +893,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
         void printIndent(StringBuffer sb, int indent) {
             if(sb != null) {
                 for(int i=0; i < indent; i++)
-                    sb.append(" ");
+                    sb.append(' ');
             }
         }
 
@@ -1016,7 +986,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
                 default:
                     break;
             }
-            sb.append(")");
+            sb.append(')');
             return sb.toString();
         }
 
@@ -1057,7 +1027,7 @@ public class ReplicatedTree implements Runnable, Cloneable, MessageListener, Mem
         // "PERF(details=true)";
 
         try {
-            Trace.init();
+
             tree=new ReplicatedTree(null, props, 10000);
             // tree.setRemoteCalls(false);
             tree.addReplicatedTreeListener(new MyListener());

@@ -1,18 +1,24 @@
-// $Id: GmsImpl.java,v 1.1 2003/09/09 01:24:11 belaban Exp $
+// $Id: GmsImpl.java,v 1.6 2004/10/05 15:30:06 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jgroups.Address;
+import org.jgroups.Event;
+import org.jgroups.Membership;
+import org.jgroups.View;
+
 import java.util.Vector;
-import org.jgroups.*;
-import org.jgroups.log.Trace;
 
 
 
 
 
 public abstract class GmsImpl {
-    protected GMS          gms=null;
-
+    protected GMS   gms=null;
+    protected final Log   log=LogFactory.getLog(getClass());
+    boolean         leaving=false;
 
     public abstract void      join(Address mbr);
     public abstract void      leave(Address mbr);
@@ -33,20 +39,21 @@ public abstract class GmsImpl {
     public abstract void      handleLeave(Address mbr, boolean suspected);
     public abstract void      handleViewChange(View new_view, Digest digest);
     public abstract void      handleSuspect(Address mbr);
+    public          void      handleExit() {;}
 
     public boolean            handleUpEvent(Event evt) {return true;}
     public boolean            handleDownEvent(Event evt) {return true;}
 
-    public void               init() throws Exception {;}
-    public void               start() throws Exception {;}
-    public void               stop() {;}
+    public void               init() throws Exception {leaving=false;}
+    public void               start() throws Exception {leaving=false;}
+    public void               stop() {leaving=true;}
 
 
 
 
     protected void wrongMethod(String method_name) {
-	Trace.error("GmsImpl.wrongMethod()", method_name + 
-		    "() should not be invoked on an instance of " + getClass().getName());
+        if(log.isErrorEnabled())
+            log.error(method_name + "() should not be invoked on an instance of " + getClass().getName());
     }
 
 
@@ -57,12 +64,12 @@ public abstract class GmsImpl {
        are the primary partition.
      */
     protected boolean iWouldBeCoordinator(Vector new_mbrs) {
-	Membership tmp_mbrs=gms.members.copy();
-	tmp_mbrs.merge(new_mbrs, null);
-	tmp_mbrs.sort();
-	if(tmp_mbrs.size() <= 0 || gms.local_addr == null)
-	    return false;
-	return gms.local_addr.equals(tmp_mbrs.elementAt(0));
+        Membership tmp_mbrs=gms.members.copy();
+        tmp_mbrs.merge(new_mbrs, null);
+        tmp_mbrs.sort();
+        if(tmp_mbrs.size() <= 0 || gms.local_addr == null)
+            return false;
+        return gms.local_addr.equals(tmp_mbrs.elementAt(0));
     }
 
 }

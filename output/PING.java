@@ -1,9 +1,8 @@
-// $Id: PING.java,v 1.7 2003/12/22 17:37:58 belaban Exp $
+// $Id: PING.java,v 1.19 2004/12/31 14:10:38 belaban Exp $
 
 package org.jgroups.protocols;
 
 import org.jgroups.*;
-import org.jgroups.log.Trace;
 import org.jgroups.stack.GossipClient;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
@@ -11,10 +10,7 @@ import org.jgroups.util.List;
 import org.jgroups.util.Util;
 
 import java.net.InetAddress;
-import java.util.Enumeration;
-import java.util.Properties;
-import java.util.StringTokenizer;
-import java.util.Vector;
+import java.util.*;
 
 
 /**
@@ -33,7 +29,9 @@ import java.util.Vector;
  * property: gossip_port - if you are using GOSSIP then this defines the port of the GossipServer, default is null
  */
 public class PING extends Protocol {
-    Vector members=new Vector(), initial_members=new Vector();
+    final Vector members=new Vector(11);
+    final Vector initial_members=new Vector(11);
+    final Set members_set=new HashSet(11); //copy of the members vector for fast random access
     Address local_addr=null;
     String group_addr=null;
     long timeout=3000;
@@ -43,9 +41,8 @@ public class PING extends Protocol {
     long gossip_refresh=20000; // time in msecs after which the entry in GossipServer will be refreshed
     GossipClient client;
     boolean is_server=false;
-    int       port_range=5;        // number of ports to be probed for initial membership
+    int port_range=1;        // number of ports to be probed for initial membership
     List initial_hosts=null;  // hosts to be contacted for the initial membership
-
 
     public String getName() {
         return "PING";
@@ -53,7 +50,7 @@ public class PING extends Protocol {
 
 
     public Vector providedUpServices() {
-        Vector ret=new Vector();
+        Vector ret=new Vector(1);
         ret.addElement(new Integer(Event.FIND_INITIAL_MBRS));
         return ret;
     }
@@ -65,7 +62,7 @@ public class PING extends Protocol {
      * property: num_initial_members - the minimum number of initial members for a FIND_INITAL_MBRS, default is 2
      * property: gossip_host - if you are using GOSSIP then this defines the host of the GossipServer, default is null
      * property: gossip_port - if you are using GOSSIP then this defines the port of the GossipServer, default is null
-     * 
+     *
      * @param props - a property set containing only PING properties
      * @return returns true if all properties were parsed properly
      *         returns false if there are unrecnogized properties in the property set
@@ -73,17 +70,18 @@ public class PING extends Protocol {
     public boolean setProperties(Properties props) {
         String str;
 
+        super.setProperties(props);
         str=props.getProperty("timeout");              // max time to wait for initial members
         if(str != null) {
-            timeout=new Long(str).longValue();
+            timeout=Long.parseLong(str);
             if(timeout <= 0)
-                Trace.error("PING.setProperties()", "timeout must be > 0");
+                if(log.isErrorEnabled()) log.error("timeout must be > 0");
             props.remove("timeout");
         }
 
         str=props.getProperty("num_initial_members");  // wait for at most n members
         if(str != null) {
-            num_initial_members=new Integer(str).intValue();
+            num_initial_members=Integer.parseInt(str);
             props.remove("num_initial_members");
         }
 
@@ -95,13 +93,13 @@ public class PING extends Protocol {
 
         str=props.getProperty("gossip_port");
         if(str != null) {
-            gossip_port=new Integer(str).intValue();
+            gossip_port=Integer.parseInt(str);
             props.remove("gossip_port");
         }
 
         str=props.getProperty("gossip_refresh");
         if(str != null) {
-            gossip_refresh=new Long(str).longValue();
+            gossip_refresh=Long.parseLong(str);
             props.remove("gossip_refresh");
         }
 
@@ -110,21 +108,24 @@ public class PING extends Protocol {
                 client=new GossipClient(new IpAddress(InetAddress.getByName(gossip_host), gossip_port), gossip_refresh);
             }
             catch(Exception e) {
-                Trace.error("PING.setProperties()", "creation of GossipClient failed, exception=" + e);
+                if(log.isErrorEnabled()) log.error("creation of GossipClient failed, exception=" + e);
                 return false; // will cause stack creation to abort
             }
+        }
+
+        str=props.getProperty("port_range");           // if member cannot be contacted on base port,
+        if(str != null) {                              // how many times can we increment the port
+            port_range=Integer.parseInt(str);
+            if(port_range < 1) {
+                port_range=1;
+            }
+            props.remove("port_range");
         }
 
         str=props.getProperty("initial_hosts");
         if(str != null) {
             props.remove("initial_hosts");
             initial_hosts=createInitialHosts(str);
-        }
-
-        str=props.getProperty("port_range");           // if member cannot be contacted on base port,
-        if(str != null) {                              // how many times can we increment the port
-            port_range=new Integer(str).intValue();
-            props.remove("port_range");
         }
 
         if(props.size() > 0) {
@@ -135,7 +136,7 @@ public class PING extends Protocol {
                     sb.append(", ");
                 }
             }
-            Trace.error("PING.setProperties()", "The following properties are not recognized: " + sb.toString());
+            if(log.isErrorEnabled()) log.error("The following properties are not recognized: " + sb);
             return false;
         }
         return true;
@@ -170,7 +171,7 @@ public class PING extends Protocol {
      * vector and wake up any waiting threads.
      * 2. If the event is Event.SET_LOCAL_ADDR we will simple set the local address of this protocol
      * 3. For all other messages we simple pass it up to the protocol above
-     * 
+     *
      * @param evt - the event that has been sent from the layer below
      */
 
@@ -183,63 +184,78 @@ public class PING extends Protocol {
 
         switch(evt.getType()) {
 
-            case Event.MSG:
-                msg=(Message)evt.getArg();
-                obj=msg.getHeader(getName());
-                if(obj == null || !(obj instanceof PingHeader)) {
-                    passUp(evt);
+        case Event.MSG:
+            msg=(Message)evt.getArg();
+            obj=msg.getHeader(getName());
+            if(obj == null || !(obj instanceof PingHeader)) {
+                passUp(evt);
+                return;
+            }
+            hdr=(PingHeader)msg.removeHeader(getName());
+
+            switch(hdr.type) {
+
+            case PingHeader.GET_MBRS_REQ:   // return Rsp(local_addr, coord)
+                if(!is_server) {
                     return;
                 }
-                hdr=(PingHeader)msg.removeHeader(getName());
-
-                switch(hdr.type) {
-
-                    case PingHeader.GET_MBRS_REQ:   // return Rsp(local_addr, coord)
-
-                        // System.out.println("### GET_MBRS__REQ (local_addr=" + local_addr + "): is_server=" + is_server);
-                        if(!is_server) {
-                            return;
-                        }
-                        synchronized(members) {
-                            coord=members.size() > 0? (Address)members.firstElement() : local_addr;
-                        }
-
-                        PingRsp ping_rsp=new PingRsp(local_addr, coord);
-
-                        // System.out.println("ping_rsp=" + ping_rsp + ", sent back to " + msg.getSrc());
-
-                        rsp_msg=new Message(msg.getSrc(), null, null);
-                        rsp_hdr=new PingHeader(PingHeader.GET_MBRS_RSP, ping_rsp);
-                        rsp_msg.putHeader(getName(), rsp_hdr);
-                        if(Trace.trace) Trace.info("PING.up()", "received GET_MBRS_REQ from " + msg.getSrc() + ", returning " + rsp_hdr);
-                        passDown(new Event(Event.MSG, rsp_msg));
-                        return;
-
-                    case PingHeader.GET_MBRS_RSP:   // add response to vector and notify waiting thread
-                        rsp=(PingRsp)hdr.arg;
-
-                        synchronized(initial_members) {
-                            if(Trace.trace)
-                                Trace.info("PING.up()", "received FIND_INITAL_MBRS_RSP, rsp=" + rsp);
-                            initial_members.addElement(rsp);
-                            initial_members.notify();
-                        }
-                        return;
-
-                    default:
-                        Trace.warn("PING.up()", "got PING header with unknown type (" + hdr.type + ")");
-                        return;
+                synchronized(members) {
+                    coord=members.size() > 0 ? (Address)members.firstElement() : local_addr;
                 }
 
+                PingRsp ping_rsp=new PingRsp(local_addr, coord);
+                rsp_msg=new Message(msg.getSrc(), null, null);
+                rsp_hdr=new PingHeader(PingHeader.GET_MBRS_RSP, ping_rsp);
+                rsp_msg.putHeader(getName(), rsp_hdr);
+                if(log.isTraceEnabled())
+                    log.trace("received GET_MBRS_REQ from " + msg.getSrc() + ", returning " + rsp_hdr);
+                passDown(new Event(Event.MSG, rsp_msg));
+                return;
 
-            case Event.SET_LOCAL_ADDRESS:
-                passUp(evt);
-                local_addr=(Address)evt.getArg();
-                break;
+            case PingHeader.GET_MBRS_RSP:   // add response to vector and notify waiting thread
+                rsp=hdr.arg;
+
+                if(log.isTraceEnabled())
+                    log.trace("received FIND_INITAL_MBRS_RSP, rsp=" + rsp);
+                synchronized(initial_members) {
+                    initial_members.addElement(rsp);
+                    initial_members.notifyAll();
+                }
+                return;
 
             default:
-                passUp(evt);            // Pass up to the layer above us
-                break;
+                if(log.isWarnEnabled()) log.warn("got PING header with unknown type (" + hdr.type + ')');
+                return;
+            }
+
+
+        case Event.SET_LOCAL_ADDRESS:
+            passUp(evt);
+            local_addr=(Address)evt.getArg();
+            // Add own address to initial_hosts if not present: we must always be able to ping ourself !
+            if(initial_hosts != null && local_addr != null) {
+                List hlist;
+                boolean inInitialHosts=false;
+                for(Enumeration en=initial_hosts.elements(); en.hasMoreElements() && !inInitialHosts;) {
+                    hlist=(List)en.nextElement();
+                    if(hlist.contains(local_addr)) {
+                        inInitialHosts=true;
+                    }
+                }
+                if(!inInitialHosts) {
+                    hlist=new List();
+                    hlist.add(local_addr);
+                    initial_hosts.add(hlist);
+                    if(log.isDebugEnabled())
+                        log.debug("[SET_LOCAL_ADDRESS]: adding my own address (" + local_addr +
+                                  ") to initial_hosts; initial_hosts=" + initial_hosts);
+                }
+            }
+            break;
+
+        default:
+            passUp(evt);            // Pass up to the layer above us
+            break;
         }
     }
 
@@ -266,115 +282,144 @@ public class PING extends Protocol {
 
         switch(evt.getType()) {
 
-            case Event.FIND_INITIAL_MBRS:   // sent by GMS layer, pass up a GET_MBRS_OK event
-                initial_members.removeAllElements();
+        case Event.FIND_INITIAL_MBRS:   // sent by GMS layer, pass up a GET_MBRS_OK event
+            initial_members.removeAllElements();
 
-                if(client != null) {
-                    gossip_rsps=client.getMembers(group_addr);
-                    if(gossip_rsps != null && gossip_rsps.size() > 0) {
-                        // Set a temporary membership in the UDP layer, so that the following multicast
-                        // will be sent to all of them
-                        Event view_event=new Event(Event.TMP_VIEW, makeView(gossip_rsps));
-                        passDown(view_event); // needed e.g. by failure detector or UDP
-                    }
-                    else {
-                        passUp(new Event(Event.FIND_INITIAL_MBRS_OK, null));
-                        return;
-                    }
-                    Util.sleep(500);
+            if(client != null) {
+                gossip_rsps=client.getMembers(group_addr);
+                if(gossip_rsps != null && gossip_rsps.size() > 0) {
+                    // Set a temporary membership in the UDP layer, so that the following multicast
+                    // will be sent to all of them
+                    Event view_event=new Event(Event.TMP_VIEW, makeView(gossip_rsps));
+                    passDown(view_event); // needed e.g. by failure detector or UDP
                 }
                 else {
-                    if(initial_hosts != null && initial_hosts.size() > 0) {
-                        IpAddress h;
-                        msg=new Message(null, null, null);
+                    passUp(new Event(Event.FIND_INITIAL_MBRS_OK, null));
+                    return;
+                }
+
+
+                if(gossip_rsps != null && gossip_rsps.size() > 0) {
+                    for(int i=0; i < gossip_rsps.size(); i++) {
+                        Address dest=(Address)gossip_rsps.elementAt(i);
+                        msg=new Message(dest, null, null);  // mcast msg
                         msg.putHeader(getName(), new PingHeader(PingHeader.GET_MBRS_REQ, null));
-
-                        for(Enumeration en=initial_hosts.elements(); en.hasMoreElements();) {
-                            h=(IpAddress)en.nextElement();
-
-                            for(int i=h.getPort(); i < h.getPort() + port_range; i++) { // send to next ports too
-                                msg.setDest(new IpAddress(h.getIpAddress(), i));
-                                if(Trace.trace)
-                                    Trace.info("PING.down()", "[FIND_INITIAL_MBRS] sending PING request to " +
-                                            msg.getDest());
-                                passDown(new Event(Event.MSG, msg.copy()));
-                            }
-                        }
-                    }
-                    else {
-
-                        // 1. Mcast GET_MBRS_REQ message
-                        if(Trace.trace) Trace.info("PING.down()", "FIND_INITIAL_MBRS");
-                        hdr=new PingHeader(PingHeader.GET_MBRS_REQ, null);
-                        msg=new Message(null, null, null);  // mcast msg
-                        msg.putHeader(getName(), hdr);
                         passDown(new Event(Event.MSG, msg));
                     }
                 }
 
+                Util.sleep(500);
+            }
+            else {
+                if(initial_hosts != null && initial_hosts.size() > 0) {
+                    IpAddress h;
+                    List hlist;
+                    msg=new Message(null, null, null);
+                    msg.putHeader(getName(), new PingHeader(PingHeader.GET_MBRS_REQ, null));
 
-
-                // 2. Wait 'timeout' ms or until 'num_initial_members' have been retrieved
-                synchronized(initial_members) {
-                    start_time=System.currentTimeMillis();
-                    time_to_wait=timeout;
-
-                    while(initial_members.size() < num_initial_members && time_to_wait > 0) {
-
-                        if(Trace.debug) // +++ remove
-                            Trace.info("PING.down()", "waiting for initial members: time_to_wait=" + time_to_wait +
-                                    ", got " + initial_members.size() + " rsps");
-
-                        try {
-                            initial_members.wait(time_to_wait);
-                        }
-                        catch(Exception e) {
-                        }
-                        time_to_wait-=System.currentTimeMillis() - start_time;
-                    }
-                }
-
-                // 3. Send response
-                if(Trace.trace)
-                    Trace.info("PING.down()", "initial mbrs are " + initial_members);
-                passUp(new Event(Event.FIND_INITIAL_MBRS_OK, initial_members));
-                break;
-
-
-            case Event.TMP_VIEW:
-            case Event.VIEW_CHANGE:
-                Vector tmp;
-                if((tmp=((View)evt.getArg()).getMembers()) != null) {
                     synchronized(members) {
-                        members.clear();
-                        members.addAll(tmp);
+                        int numMembers=members.size();
+                        int numMemberInitialHosts=0;
+                        Address coord=numMembers > 0 ? (Address)members.firstElement() : local_addr;
+                        for(Enumeration en=initial_hosts.elements(); en.hasMoreElements();) {
+                            hlist=(List)en.nextElement();
+                            boolean isMember=false;
+
+                            for(Enumeration hen=hlist.elements(); hen.hasMoreElements() && !isMember && numMemberInitialHosts < numMembers;) {
+                                h=(IpAddress)hen.nextElement();
+                                if(members_set.contains(h)) {
+                                    //update the initial_members list for this already connected member
+                                    initial_members.add(new PingRsp(h, coord));
+                                    isMember=true;
+                                    numMemberInitialHosts++;
+                                    if(log.isDebugEnabled())
+                                        log.debug("[FIND_INITIAL_MBRS] " + h + " is already a member");
+                                }
+                            }
+                            for(Enumeration hen=hlist.elements(); hen.hasMoreElements() && !isMember;) {
+                                h=(IpAddress)hen.nextElement();
+                                msg.setDest(h);
+                                if(log.isTraceEnabled())
+                                    log.trace("[FIND_INITIAL_MBRS] sending PING request to " + msg.getDest());
+                                passDown(new Event(Event.MSG, msg.copy()));
+                            }
+                        }
                     }
                 }
-                passDown(evt);
-                break;
+                else {
+                    // 1. Mcast GET_MBRS_REQ message
+                    if(log.isTraceEnabled()) log.trace("FIND_INITIAL_MBRS");
+                    hdr=new PingHeader(PingHeader.GET_MBRS_REQ, null);
+                    msg=new Message(null, null, null);  // mcast msg
+                    msg.putHeader(getName(), hdr);
+                    passDown(new Event(Event.MSG, msg));
+                }
+            }
 
-            case Event.BECOME_SERVER: // called after client has joined and is fully working group member
-                passDown(evt);
-                is_server=true;
-                // System.out.println("## down(BECOME_SERVER): is_server=" + is_server);
-                break;
 
-            case Event.CONNECT:
-                group_addr=(String)evt.getArg();
-                passDown(evt);
-                if(client != null)
-                    client.register(group_addr, local_addr);
-                break;
 
-            case Event.DISCONNECT:
-                if(client != null)
-                    client.stop();
-                passDown(evt);
-                break;
+            // 2. Wait 'timeout' ms or until 'num_initial_members' have been retrieved
+            synchronized(initial_members) {
+                start_time=System.currentTimeMillis();
+                time_to_wait=timeout;
 
-            default:
-                passDown(evt);          // Pass on to the layer below us
-                break;
+                while(initial_members.size() < num_initial_members && time_to_wait > 0) {
+                    if(log.isTraceEnabled()) // +++ remove
+                        log.trace("waiting for initial members: time_to_wait=" + time_to_wait +
+                                  ", got " + initial_members.size() + " rsps");
+
+                    try {
+                        initial_members.wait(time_to_wait);
+                    }
+                    catch(Exception e) {
+                    }
+                    time_to_wait=timeout - (System.currentTimeMillis() - start_time);
+                }
+            }
+
+            // 3. Send response
+            if(log.isDebugEnabled())
+                log.debug("initial mbrs are " + initial_members);
+            passUp(new Event(Event.FIND_INITIAL_MBRS_OK, initial_members));
+            break;
+
+
+        case Event.TMP_VIEW:
+        case Event.VIEW_CHANGE:
+            Vector tmp;
+            if((tmp=((View)evt.getArg()).getMembers()) != null) {
+                synchronized(members) {
+                    members.clear();
+                    members.addAll(tmp);
+                    members_set.clear();
+                    members_set.addAll(tmp);
+                }
+            }
+            passDown(evt);
+            break;
+
+        case Event.BECOME_SERVER: // called after client has joined and is fully working group member
+            passDown(evt);
+            is_server=true;
+            // System.out.println("## down(BECOME_SERVER): is_server=" + is_server);
+            break;
+
+        case Event.CONNECT:
+            group_addr=(String)evt.getArg();
+            passDown(evt);
+            if(client != null)
+                client.register(group_addr, local_addr);
+            break;
+
+        case Event.DISCONNECT:
+            if(client != null)
+                client.stop();
+            passDown(evt);
+            break;
+
+        default:
+            passDown(evt);          // Pass on to the layer below us
+            break;
         }
     }
 
@@ -401,21 +446,22 @@ public class PING extends Protocol {
         List tmp=new List();
         StringTokenizer tok=new StringTokenizer(l, ",");
         String t;
-        IpAddress h;
 
         while(tok.hasMoreTokens()) {
             try {
                 t=tok.nextToken();
                 String host=t.substring(0, t.indexOf('['));
-                int port=new Integer(t.substring(t.indexOf('[') + 1, t.indexOf(']'))).intValue();
-                h=new IpAddress(host, port);
-                tmp.add(h);
+                int port=Integer.parseInt(t.substring(t.indexOf('[') + 1, t.indexOf(']')));
+                List hosts=new List();
+                for(int i=port; i < port + port_range; i++) {
+                    hosts.add(new IpAddress(host, i));
+                }
+                tmp.add(hosts);
             }
             catch(NumberFormatException e) {
-                Trace.error("PING.createInitialHosts()", "exeption is " + e);
+                if(log.isErrorEnabled()) log.error("exeption is " + e);
             }
         }
-
         return tmp;
     }
 

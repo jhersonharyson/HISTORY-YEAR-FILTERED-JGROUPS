@@ -1,16 +1,22 @@
-// $Id: RouterStub.java,v 1.3 2003/10/29 16:03:44 ovidiuf Exp $
+// $Id: RouterStub.java,v 1.10 2004/12/13 15:30:06 belaban Exp $
 
 package org.jgroups.stack;
 
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jgroups.Address;
+import org.jgroups.Message;
+import org.jgroups.protocols.TunnelHeader;
+import org.jgroups.util.List;
+import org.jgroups.util.Util;
+import org.jgroups.util.ExposedByteArrayOutputStream;
+import org.jgroups.util.Buffer;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.ByteArrayInputStream;
 import java.net.Socket;
-
-import org.jgroups.*;
-import org.jgroups.util.*;
-import org.jgroups.log.Trace;
-import org.jgroups.protocols.TunnelHeader;
 
 
 
@@ -19,13 +25,16 @@ public class RouterStub {
     String router_host=null;       // name of the router host
     int router_port=0;          // port on which router listens on router_host
     Socket sock=null;              // socket connecting to the router
+    final ExposedByteArrayOutputStream out_stream=new ExposedByteArrayOutputStream(512);
     DataOutputStream output=null;            // output stream associated with sock
     DataInputStream input=null;             // input stream associated with sock
     Address local_addr=null;        // addr of group mbr. Once assigned, remains the same
-    final long RECONNECT_TIMEOUT=5000; // msecs to wait until next connection retry attempt
+    static final long RECONNECT_TIMEOUT=5000; // msecs to wait until next connection retry attempt
     private volatile boolean connected=false;
 
     private volatile boolean reconnect=false;   // controls reconnect() loop
+
+    protected static final Log log=LogFactory.getLog(RouterStub.class);
 
 
     /**
@@ -39,6 +48,10 @@ public class RouterStub {
     }
 
 
+    public boolean isConnected() {
+        return connected;
+    }
+
     /**
      * Establishes a connection to the router. The router will send my address (its peer address) back
      * as an Address, which is subsequently returned to the caller. The reason for not using
@@ -46,7 +59,7 @@ public class RouterStub {
      * with certain security managers (e.g if this code runs in an applet). Also, some network
      * address translation (NAT) (e.g IP Masquerading) may return the wrong address.
      */
-    public Address connect() throws Exception {
+    public synchronized Address connect() throws Exception {
         Address ret=null;
         int len=0;
         byte[] buf;
@@ -66,6 +79,8 @@ public class RouterStub {
         }
         catch(Exception e) {
             connected=false;
+            if(sock != null)
+                sock.close();
             throw e;
         }
 
@@ -82,7 +97,7 @@ public class RouterStub {
 
 
     /** Closes the socket and the input and output streams associated with it */
-    public void disconnect() {
+    public synchronized void disconnect() {
         if(output != null) {
             try {
                 output.close();
@@ -124,18 +139,18 @@ public class RouterStub {
         byte[] buf=null;
 
         if(sock == null || output == null || input == null) {
-            Trace.error("RouterStub", ".register(): No connection to router (groupname=" + groupname + ")");
+            if(log.isErrorEnabled()) log.error("no connection to router (groupname=" + groupname + ')');
             connected=false;
             return false;
         }
 
         if(groupname == null || groupname.length() == 0) {
-            Trace.error("RouterStub", "register(): groupname is null");
+            if(log.isErrorEnabled()) log.error("groupname is null");
             return false;
         }
 
         if(local_addr == null) {
-            Trace.error("RouterStub", "register(): local_addr is null");
+            if(log.isErrorEnabled()) log.error("local_addr is null");
             return false;
         }
 
@@ -148,7 +163,7 @@ public class RouterStub {
             output.flush();
         }
         catch(Exception e) {
-            Trace.error("RouterStub", "register(): "+Trace.getStackTrace(e));
+            if(log.isErrorEnabled()) log.error("failure: " + Util.getStackTrace(e));
             connected=false;
             return false;
         }
@@ -164,51 +179,51 @@ public class RouterStub {
     public List get(String groupname) {
         List ret=null;
         Socket tmpsock=null;
-        DataOutputStream output=null;
-        DataInputStream input=null;
+        DataOutputStream tmpOutput=null;
+        DataInputStream tmpInput=null;
         int len;
         byte[] buf;
 
 
         if(groupname == null || groupname.length() == 0) {
-            Trace.error("RouterStub", "get(): groupname is null");
+            if(log.isErrorEnabled()) log.error("groupname is null");
             return null;
         }
 
         try {
             tmpsock=new Socket(router_host, router_port);
             tmpsock.setSoLinger(true, 500);
-            input=new DataInputStream(tmpsock.getInputStream());
+            tmpInput=new DataInputStream(tmpsock.getInputStream());
 
-            len=input.readInt();     // discard my own address
+            len=tmpInput.readInt();     // discard my own address
             buf=new byte[len];       // (first thing returned by router on acept())
-            input.readFully(buf);
-            output=new DataOutputStream(tmpsock.getOutputStream());
+            tmpInput.readFully(buf);
+            tmpOutput=new DataOutputStream(tmpsock.getOutputStream());
 
             // request membership for groupname
-            output.writeInt(Router.GET);
-            output.writeUTF(groupname);
+            tmpOutput.writeInt(Router.GET);
+            tmpOutput.writeUTF(groupname);
 
             // wait for response (List)
-            len=input.readInt();
+            len=tmpInput.readInt();
             if(len == 0)
                 return null;
 
             buf=new byte[len];
-            input.readFully(buf);
+            tmpInput.readFully(buf);
             ret=(List)Util.objectFromByteBuffer(buf);
         }
         catch(Exception e) {
-            Trace.error("RouterStub", "get(): exception=" + e);
+            if(log.isErrorEnabled()) log.error("exception=" + e);
         }
         finally {
             try {
-                if(output != null) output.close();
+                if(tmpOutput != null) tmpOutput.close();
             }
             catch(Exception e) {
             }
             try {
-                if(input != null) input.close();
+                if(tmpInput != null) tmpInput.close();
             }
             catch(Exception e) {
             }
@@ -225,42 +240,41 @@ public class RouterStub {
     /** Sends a message to the router. Returns false if message cannot be sent (e.g. no connection to
      router, true otherwise. */
     public boolean send(Message msg, String groupname) {
-        byte[] msg_buf=null;
-        byte[] dst_buf=null;
-        Object dst_addr=null;
+        Address dst_addr=null;
 
         if(sock == null || output == null || input == null) {
-            Trace.error("RouterStub", "send(): No connection to router (groupname=" + groupname + ")");
+            if(log.isErrorEnabled()) log.error("no connection to router (groupname=" + groupname + ')');
             connected=false;
             return false;
         }
 
         if(msg == null) {
-            Trace.error("RouterStub", "send(): Message is null");
+            if(log.isErrorEnabled()) log.error("message is null");
             return false;
         }
 
         try {
             dst_addr=msg.getDest(); // could be null in case of mcast
-            if(dst_addr != null)
-                dst_buf=Util.objectToByteBuffer(dst_addr);
+            out_stream.reset();
+            DataOutputStream tmp=new DataOutputStream(out_stream);
+            msg.writeTo(tmp);
+            tmp.close();
+            Buffer buf=new Buffer(out_stream.getRawBuffer(), 0, out_stream.size());
 
-            msg_buf=Util.objectToByteBuffer(msg);
-
+            // 1. Group name
             output.writeUTF(groupname);
 
-            if(dst_buf != null && dst_buf.length > 0) {
-                output.writeInt(dst_buf.length);
-                output.write(dst_buf, 0, dst_buf.length);
-            }
-            else
-                output.writeInt(0);
+            // 2. Destination address
+            Util.writeAddress(dst_addr, output);
 
-            output.writeInt(msg_buf.length);
-            output.write(msg_buf, 0, msg_buf.length);
+            // 3. Length of byte buffer
+            output.writeInt(buf.getLength());
+
+            // 4. Byte buffer
+            output.write(buf.getBuf(), 0, buf.getLength());
         }
         catch(Exception e) {
-            Trace.error("RouterStub", "send(): "+Trace.getStackTrace(e));
+            if(log.isErrorEnabled()) log.error("failed sending message to " + dst_addr, e);
             connected=false;
             return false;
         }
@@ -276,7 +290,7 @@ public class RouterStub {
         int len;
 
         if(sock == null || output == null || input == null) {
-            Trace.error("RouterStub", "receive(): No connection to router");
+            if(log.isErrorEnabled()) log.error("no connection to router");
             connected=false;
             return null;
         }
@@ -288,56 +302,63 @@ public class RouterStub {
             else {
                 buf=new byte[len];
                 input.readFully(buf, 0, len);
-                ret=(Message)Util.objectFromByteBuffer(buf);
+                ret=new Message();
+                ByteArrayInputStream tmp=new ByteArrayInputStream(buf);
+                DataInputStream in=new DataInputStream(tmp);
+                ret.readFrom(in);
+                in.close();
             }
         }
         catch(Exception e) {
             if (connected) {
-                Trace.error("RouterStub", "receive(): "+Trace.getStackTrace(e));                
+                if(log.isErrorEnabled()) log.error("failed receiving message", e);
             }
             connected=false;
             return null;
         }
 
-        if (Trace.debug) {
-            Trace.debug("RouterStub", "received "+ret);
-        }
+        if(log.isTraceEnabled()) log.trace("received "+ret);
         return ret;
     }
 
 
     /** Tries to establish connection to router. Tries until router is up again. */
-    public synchronized boolean reconnect() {
+    public boolean reconnect(int max_attempts) {
         Address new_addr=null;
+        int num_atttempts=0;
 
         if(connected) return false;
-
         disconnect();
         reconnect=true;
-        while(reconnect) {
+        while(reconnect && (num_atttempts++ < max_attempts || max_attempts == -1)) {
             try {
                 if((new_addr=connect()) != null)
                     break;
             }
             catch(Exception ex) {
-                Trace.warn("RouterStub", "reconnect(): exception is " + ex);
+                if(log.isWarnEnabled()) log.warn("exception is " + ex);
             }
-            Util.sleep(RECONNECT_TIMEOUT);
+            if(max_attempts == -1)
+                Util.sleep(RECONNECT_TIMEOUT);
         }
         if(new_addr == null) {
             return false;
         }
-        Trace.warn("RouterStub", "reconnect(): Client reconnected, new addess is " + new_addr);
+        if(log.isWarnEnabled()) log.warn("client reconnected, new address is " + new_addr);
         return true;
     }
 
+
+     public boolean reconnect() {
+         return reconnect(-1);
+     }
 
     public static void main(String[] args) {
         if(args.length != 2) {
             System.out.println("RouterStub <host> <port>");
             return;
         }
-        RouterStub stub=new RouterStub(args[0], new Integer(args[1]).intValue());
+        RouterStub stub=new RouterStub(args[0], Integer.parseInt(args[1]));
         Address my_addr;
         boolean rc;
         final String groupname="BelaGroup";

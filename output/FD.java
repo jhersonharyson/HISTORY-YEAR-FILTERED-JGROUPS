@@ -1,21 +1,20 @@
-// $Id: FD.java,v 1.1 2003/09/09 01:24:10 belaban Exp $
+// $Id: FD.java,v 1.14 2004/10/08 13:59:59 belaban Exp $
 
 package org.jgroups.protocols;
 
 
-import java.io.IOException;
-import java.io.ObjectInput;
-import java.io.ObjectOutput;
+import org.jgroups.*;
+import org.jgroups.stack.Protocol;
+import org.jgroups.util.Marshaller;
+import org.jgroups.util.TimeScheduler;
+import org.jgroups.util.Streamable;
+import org.jgroups.util.Util;
+
+import java.io.*;
 import java.util.Hashtable;
+import java.util.Iterator;
 import java.util.Properties;
 import java.util.Vector;
-import java.util.Iterator;
-
-import org.jgroups.*;
-import org.jgroups.stack.*;
-import org.jgroups.util.*;
-import org.jgroups.log.Trace;
-import org.jgroups.util.Marshaller;
 
 
 
@@ -36,27 +35,28 @@ import org.jgroups.util.Marshaller;
  * NOT_MEMBER message. That member will then leave the group (and possibly rejoin). This is only done if
  * <code>shun</code> is true.
  * @author Bela Ban
- * @version $Revision: 1.1 $
+ * @version $Revision: 1.14 $
  */
 public class FD extends Protocol {
-    Address         ping_dest=null;
-    Address         local_addr=null;
-    long            timeout=3000;  // number of millisecs to wait for an are-you-alive msg
-    long            last_ack=System.currentTimeMillis();
-    int             num_tries=0;
-    int             max_tries=2;   // number of times to send a are-you-alive msg (tot time= max_tries*timeout)
-    Vector          members=new Vector();
-    Hashtable       invalid_pingers=new Hashtable();  // keys=Address, val=Integer (number of pings from suspected mbrs)
+    Address               ping_dest=null;
+    Address               local_addr=null;
+    long                  timeout=3000;  // number of millisecs to wait for an are-you-alive msg
+    long                  last_ack=System.currentTimeMillis();
+    int                   num_tries=0;
+    int                   max_tries=2;   // number of times to send a are-you-alive msg (tot time= max_tries*timeout)
+    final Vector          members=new Vector(11);
+    final Hashtable       invalid_pingers=new Hashtable(7);  // keys=Address, val=Integer (number of pings from suspected mbrs)
 
     /** Members from which we select ping_dest. may be subset of {@link #members} */
-    Vector          pingable_mbrs=new Vector();
+    final Vector          pingable_mbrs=new Vector(11);
 
-    boolean         shun=true;
-    TimeScheduler   timer=null;
-    Monitor         monitor=null;  // task that performs the actual monitoring for failure detection
+    boolean               shun=true;
+    TimeScheduler         timer=null;
+    Monitor               monitor=null;  // task that performs the actual monitoring for failure detection
+    private final Object  monitor_mutex=new Object();
 
     /** Transmits SUSPECT message until view change or UNSUSPECT is received */
-    BroadcastTask   bcast_task=new BroadcastTask();
+    final Broadcaster   bcast_task=new Broadcaster();
 
 
 
@@ -71,21 +71,22 @@ public class FD extends Protocol {
     public boolean setProperties(Properties props) {
         String str;
 
+        super.setProperties(props);
         str=props.getProperty("timeout");
         if(str != null) {
-            timeout=new Long(str).longValue();
+            timeout=Long.parseLong(str);
             props.remove("timeout");
         }
 
         str=props.getProperty("max_tries");  // before suspecting a member
         if(str != null) {
-            max_tries=new Integer(str).intValue();
+            max_tries=Integer.parseInt(str);
             props.remove("max_tries");
         }
 
         str=props.getProperty("shun");
         if(str != null) {
-            shun=new Boolean(str).booleanValue();
+            shun=Boolean.valueOf(str).booleanValue();
             props.remove("shun");
         }
 
@@ -107,10 +108,7 @@ public class FD extends Protocol {
 
 
     public void stop() {
-        if(monitor != null) {
-            monitor.stop();
-            monitor=null;
-        }
+        stopMonitor();
     }
 
 
@@ -133,15 +131,26 @@ public class FD extends Protocol {
     }
 
 
-    void startMonitor() {
-        if(monitor != null && monitor.started == false) {
-            monitor=null;
+    private void startMonitor() {
+        synchronized(monitor_mutex) {
+            if(monitor != null && monitor.started == false) {
+                monitor=null;
+            }
+            if(monitor == null) {
+                monitor=new Monitor();
+                last_ack=System.currentTimeMillis();  // start from scratch
+                timer.add(monitor, true);  // fixed-rate scheduling
+                num_tries=0;
+            }
         }
-        if(monitor == null) {
-            monitor=new Monitor();
-            last_ack=System.currentTimeMillis();  // start from scratch
-            timer.add(monitor, true);  // fixed-rate scheduling
-            num_tries=0;
+    }
+
+    private void stopMonitor() {
+        synchronized(monitor_mutex) {
+            if(monitor != null) {
+                monitor.stop();
+                monitor=null;
+            }
         }
     }
 
@@ -164,8 +173,8 @@ public class FD extends Protocol {
                     if(ping_dest != null && (sender=msg.getSrc()) != null) {
                         if(ping_dest.equals(sender)) {
                             last_ack=System.currentTimeMillis();
-                            if(Trace.debug)
-                                Trace.info("FD.up()", "received msg from " + sender + " (counts as ack)");
+                            if(log.isTraceEnabled())
+                                log.trace("received msg from " + sender + " (counts as ack)");
                             num_tries=0;
                         }
                     }
@@ -194,8 +203,7 @@ public class FD extends Protocol {
                         if(ping_dest != null && ping_dest.equals(hdr.from)) {
                             last_ack=System.currentTimeMillis();
                             num_tries=0;
-                            if(Trace.trace)
-                                Trace.info("FD.up()", "received ack from " + hdr.from);
+                            if(log.isDebugEnabled()) log.debug("received ack from " + hdr.from);
                         }
                         else {
                             stop();
@@ -205,7 +213,7 @@ public class FD extends Protocol {
                                     startMonitor();
                                 }
                                 catch(Exception ex) {
-                                    Trace.warn("FD.up()", "exception when calling startMonitor(): " + ex);
+                                    if(log.isWarnEnabled()) log.warn("exception when calling startMonitor(): " + ex);
                                 }
                             }
                         }
@@ -213,14 +221,13 @@ public class FD extends Protocol {
 
                     case FdHeader.SUSPECT:
                         if(hdr.mbrs != null) {
-                            if(Trace.trace)
-                                Trace.info("FD.up()", "[SUSPECT] suspect hdr is " + hdr);
-
+                            if(log.isDebugEnabled()) log.debug("[SUSPECT] suspect hdr is " + hdr);
                             for(int i=0; i < hdr.mbrs.size(); i++) {
                                 Address m=(Address)hdr.mbrs.elementAt(i);
                                 if(local_addr != null && m.equals(local_addr)) {
-                                    Trace.warn("FD.up()", "I was suspected, but will not remove myself from membership " +
-                                                          "(waiting for EXIT message)");
+                                    if(log.isWarnEnabled())
+                                        log.warn("I was suspected, but will not remove myself from membership " +
+                                                "(waiting for EXIT message)");
                                 }
                                 else {
                                     pingable_mbrs.remove(m);
@@ -234,8 +241,7 @@ public class FD extends Protocol {
 
                     case FdHeader.NOT_MEMBER:
                         if(shun) {
-                            if(Trace.trace)
-                                Trace.info("FD.up()", "[NOT_MEMBER] I'm being shunned; exiting");
+                            if(log.isDebugEnabled()) log.debug("[NOT_MEMBER] I'm being shunned; exiting");
                             passUp(new Event(Event.EXIT));
                         }
                         break;
@@ -266,7 +272,7 @@ public class FD extends Protocol {
                             startMonitor();
                         }
                         catch(Exception ex) {
-                            Trace.warn("FD.down()", "exception when calling startMonitor(): " + ex);
+                            if(log.isWarnEnabled()) log.warn("exception when calling startMonitor(): " + ex);
                         }
                     }
                 }
@@ -284,7 +290,6 @@ public class FD extends Protocol {
     }
 
 
-
     void unsuspect(Address mbr) {
         bcast_task.removeSuspectedMember(mbr);
         pingable_mbrs.removeAllElements();
@@ -294,7 +299,9 @@ public class FD extends Protocol {
     }
 
 
-    /** If sender is not a member, send a NOT_MEMBER to sender (after n pings received) */
+    /**
+     * If sender is not a member, send a NOT_MEMBER to sender (after n pings received)
+     */
     void shunInvalidHeartbeatSender(Address hb_sender) {
         int num_pings=0;
         Message shun_msg;
@@ -303,8 +310,8 @@ public class FD extends Protocol {
             if(invalid_pingers.containsKey(hb_sender)) {
                 num_pings=((Integer)invalid_pingers.get(hb_sender)).intValue();
                 if(num_pings >= max_tries) {
-                    Trace.info("FD.shunInvalidHeartbeatSender()", "sender " + hb_sender +
-                                                                  " is not member in " + members + " ! Telling it to leave group");
+                    if(log.isDebugEnabled())
+                        log.debug(hb_sender + " is not in " + members + " ! Telling it to leave group");
                     shun_msg=new Message(hb_sender, null, null);
                     shun_msg.putHeader(getName(), new FdHeader(FdHeader.NOT_MEMBER));
                     passDown(new Event(Event.MSG, shun_msg));
@@ -323,22 +330,23 @@ public class FD extends Protocol {
     }
 
 
-    public static class FdHeader extends Header {
-        static final int HEARTBEAT=0;
-        static final int HEARTBEAT_ACK=1;
-        static final int SUSPECT=2;
-        static final int NOT_MEMBER=3;  // received as response by pinged mbr when we are not a member
+    public static class FdHeader extends Header implements Streamable {
+        static final byte HEARTBEAT=0;
+        static final byte HEARTBEAT_ACK=1;
+        static final byte SUSPECT=2;
+        static final byte NOT_MEMBER=3;  // received as response by pinged mbr when we are not a member
 
 
-        int     type=HEARTBEAT;
+        byte    type=HEARTBEAT;
         Vector  mbrs=null;
         Address from=null;  // member who detected that suspected_mbr has failed
+
 
 
         public FdHeader() {
         } // used for externalization
 
-        FdHeader(int type) {
+        FdHeader(byte type) {
             this.type=type;
         }
 
@@ -359,7 +367,7 @@ public class FD extends Protocol {
         }
 
         public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeInt(type);
+            out.writeByte(type);
             if(mbrs == null)
                 out.writeBoolean(false);
             else {
@@ -374,17 +382,43 @@ public class FD extends Protocol {
         }
 
         public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-            type=in.readInt();
+            type=in.readByte();
             boolean mbrs_not_null=in.readBoolean();
             if(mbrs_not_null) {
                 int len=in.readInt();
-                mbrs=new Vector();
+                mbrs=new Vector(11);
                 for(int i=0; i < len; i++) {
                     Address addr=(Address)Marshaller.read(in);
                     mbrs.add(addr);
                 }
             }
             from=(Address)Marshaller.read(in);
+        }
+
+        public void writeTo(DataOutputStream out) throws IOException {
+            out.writeByte(type);
+            out.writeInt(mbrs != null? mbrs.size() : 0);
+            if(mbrs != null) {
+                for(Iterator it=mbrs.iterator(); it.hasNext();) {
+                    Address address=(Address)it.next();
+                    Util.writeAddress(address, out);
+                }
+            }
+            Util.writeAddress(from, out);
+        }
+
+        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+            type=in.readByte();
+            int size=in.readInt();
+            if(size > 0) {
+                if(mbrs == null)
+                    mbrs=new Vector();
+                for(int i=0; i < size; i++) {
+                    Address addr=Util.readAddress(in);
+                    mbrs.add(addr);
+                }
+            }
+            from=Util.readAddress(in);
         }
 
     }
@@ -395,31 +429,27 @@ public class FD extends Protocol {
 
         public void stop() {
             started=false;
-            //if(Trace.trace)
-              //  Trace.info("FD.Monitor.stop()", "started=" + started);
         }
 
 
         public boolean cancelled() {
-            //if(Trace.trace)
-              //  Trace.info("FD.Monitor.cancelled()", "cancelled=" + !started);
             return !started;
         }
 
 
         public long nextInterval() {
-            //if(Trace.trace)
-              //  Trace.info("FD.Monitor.nextInterval()", "interval=" + timeout);
             return timeout;
         }
 
 
         public void run() {
             Message hb_req;
-            long    not_heard_from=0; // time in msecs we haven't heard from ping_dest
+            long not_heard_from=0; // time in msecs we haven't heard from ping_dest
 
             if(ping_dest == null) {
-                Trace.error("FD.Monitor.run()", "ping_dest is null");
+                if(log.isWarnEnabled())
+                    log.warn("ping_dest is null: members=" + members + ", pingable_mbrs=" +
+                            pingable_mbrs + ", local_addr=" + local_addr);
                 return;
             }
 
@@ -427,33 +457,29 @@ public class FD extends Protocol {
             // 1. send heartbeat request
             hb_req=new Message(ping_dest, null, null);
             hb_req.putHeader(getName(), new FdHeader(FdHeader.HEARTBEAT));  // send heartbeat request
-            if(Trace.trace)
-                Trace.debug("FD.Monitor.run()", "sending are-you-alive msg to " + ping_dest +
-                        " (own address=" + local_addr + ")");
+            if(log.isDebugEnabled())
+                log.debug("sending are-you-alive msg to " + ping_dest + " (own address=" + local_addr + ')');
             passDown(new Event(Event.MSG, hb_req));
 
             // 2. If the time of the last heartbeat is > timeout and max_tries heartbeat messages have not been
             //    received, then broadcast a SUSPECT message. Will be handled by coordinator, which may install
             //    a new view
             not_heard_from=System.currentTimeMillis() - last_ack;
-            if(Trace.debug) // +++ remove
-                Trace.debug("FD.Monitor.run()", "not heard from " + ping_dest + " for " + not_heard_from + " ms");
             // quick & dirty fix: increase timeout by 500msecs to allow for latency (bela June 27 2003)
             if(not_heard_from > timeout + 500) { // no heartbeat ack for more than timeout msecs
                 if(num_tries >= max_tries) {
-                    if(Trace.trace)
-                        Trace.info("FD.Monitor.run()", "[" + local_addr +
-                                "]: received no heartbeat ack from " +
-                                ping_dest + " for " + num_tries+1 + " times, suspecting it");
+                    if(log.isDebugEnabled())
+                        log.debug("[" + local_addr + "]: received no heartbeat ack from " + ping_dest +
+                                " for " + (num_tries +1) + " times (" + ((num_tries+1) * timeout) +
+                                " milliseconds), suspecting it");
                     // broadcast a SUSPECT message to all members - loop until
                     // unsuspect or view change is received
                     bcast_task.addSuspectedMember(ping_dest);
+                    num_tries=0;
                 }
                 else {
-                    if(Trace.trace)
-                        Trace.debug("FD.Monitor.run()",
-                                    "heartbeat missing from " + ping_dest +
-                                    " (number=" + num_tries + ")");
+                    if(log.isDebugEnabled())
+                        log.debug("heartbeat missing from " + ping_dest + " (number=" + num_tries + ')');
                     num_tries++;
                 }
             }
@@ -466,19 +492,50 @@ public class FD extends Protocol {
 
     }
 
+
     /**
      * Task that periodically broadcasts a list of suspected members to the group. Goal is not to lose
      * a SUSPECT message: since these are bcast unreliably, they might get dropped. The BroadcastTask makes
      * sure they are retransmitted until a view has been received which doesn't contain the suspected members
      * any longer. Then the task terminates.
      */
-    private class BroadcastTask implements TimeScheduler.Task {
-        Vector  suspected_mbrs=new Vector();
-        boolean stopped=false;
+    private class Broadcaster {
+        final Vector suspected_mbrs=new Vector(7);
+        BroadcastTask task=null;
+        private final Object bcast_mutex=new Object();
 
 
         Vector getSuspectedMembers() {
             return suspected_mbrs;
+        }
+
+        /**
+         * Starts a new task, or - if already running - adds the argument to the running task.
+         * @param suspect
+         */
+        private void startBroadcastTask(Address suspect) {
+            synchronized(bcast_mutex) {
+                if(task == null || task.cancelled()) {
+                    task=new BroadcastTask((Vector)suspected_mbrs.clone());
+                    task.addSuspectedMember(suspect);
+                    task.run();      // run immediately the first time
+                    timer.add(task); // then every timeout milliseconds, until cancelled
+                    if(log.isTraceEnabled())
+                        log.trace("BroadcastTask started");
+                }
+                else {
+                    task.addSuspectedMember(suspect);
+                }
+            }
+        }
+
+        private void stopBroadcastTask() {
+            synchronized(bcast_mutex) {
+                if(task != null) {
+                    task.stop();
+                    task=null;
+                }
+            }
         }
 
         /** Adds a suspected member. Starts the task if not yet running */
@@ -488,97 +545,96 @@ public class FD extends Protocol {
             synchronized(suspected_mbrs) {
                 if(!suspected_mbrs.contains(mbr)) {
                     suspected_mbrs.addElement(mbr);
-                    if(Trace.trace)
-                        Trace.info("FD.BroadcastTask.addSuspectedMember()",
-                                   "mbr=" + mbr + " (size=" + suspected_mbrs.size() + ")");
-                }
-                if(stopped && suspected_mbrs.size() > 0) {
-                    stopped=false;
-                    timer.add(this, true);
+                    startBroadcastTask(mbr);
                 }
             }
         }
-
 
         void removeSuspectedMember(Address suspected_mbr) {
             if(suspected_mbr == null) return;
-            if(Trace.trace) Trace.info("FD.BroadcastTask.removeSuspectedMember()", "member is " + suspected_mbr);
+            if(log.isDebugEnabled()) log.debug("member is " + suspected_mbr);
             synchronized(suspected_mbrs) {
                 suspected_mbrs.removeElement(suspected_mbr);
                 if(suspected_mbrs.size() == 0)
-                    stopped=true;
+                    stopBroadcastTask();
             }
         }
-
 
         void removeAll() {
             synchronized(suspected_mbrs) {
                 suspected_mbrs.removeAllElements();
-                stopped=true;
+                stopBroadcastTask();
             }
         }
 
-
-        /**
-         * Removes all elements from suspected_mbrs that are <em>not</em> in the new membership
-         */
+        /** Removes all elements from suspected_mbrs that are <em>not</em> in the new membership */
         void adjustSuspectedMembers(Vector new_mbrship) {
-            Address suspected_mbr;
-
             if(new_mbrship == null || new_mbrship.size() == 0) return;
+            StringBuffer sb=new StringBuffer();
             synchronized(suspected_mbrs) {
-                for(Iterator it=suspected_mbrs.iterator(); it.hasNext();) {
-                    suspected_mbr=(Address)it.next();
-                    if(!new_mbrship.contains(suspected_mbr)) {
-                        it.remove();
-                        if(Trace.trace)
-                            Trace.info("FD.BroadcastTask.adjustSuspectedMembers()",
-                                       "removed " + suspected_mbr + " (size=" + suspected_mbrs.size() + ")");
-                    }
-                }
+                sb.append("suspected_mbrs: ").append(suspected_mbrs);
+                suspected_mbrs.retainAll(new_mbrship);
                 if(suspected_mbrs.size() == 0)
-                    stopped=true;
+                    stopBroadcastTask();
+                sb.append(", after adjustment: ").append(suspected_mbrs);
+                log.debug(sb.toString());
             }
-        }
-
-
-        public boolean cancelled() {
-            return stopped;
-        }
-
-
-        public long nextInterval() {
-            return timeout;
-        }
-
-
-        public void run() {
-            Message     suspect_msg;
-            FD.FdHeader hdr;
-
-            if(Trace.trace)
-                Trace.info("FD.BroadcastTask.run()",
-                           "broadcasting SUSPECT message [suspected_mbrs=" +
-                           suspected_mbrs + "] to group");
-
-            synchronized(suspected_mbrs) {
-                if(suspected_mbrs.size() == 0) {
-                    stopped=true;
-                    if(Trace.trace) Trace.info("FD.BroadcastTask.run()", "task done (no suspected members)");
-                    return;
-                }
-
-                hdr=new FdHeader(FdHeader.SUSPECT);
-                hdr.mbrs=(Vector)suspected_mbrs.clone();
-                hdr.from=local_addr;
-            }
-            suspect_msg=new Message();       // mcast SUSPECT to all members
-            suspect_msg.putHeader(getName(), hdr);
-            passDown(new Event(Event.MSG, suspect_msg));
-            if(Trace.trace) Trace.info("FD.BroadcastTask.run()", "task done");
         }
     }
 
 
+    private class BroadcastTask implements TimeScheduler.Task {
+        boolean cancelled=false;
+        private Vector suspected_members=null;
+
+
+        public BroadcastTask(Vector suspected_members) {
+            this.suspected_members=suspected_members;
+        }
+
+        public void stop() {
+            cancelled=true;
+            suspected_members.clear();
+            if(log.isTraceEnabled())
+                log.trace("BroadcastTask stopped");
+        }
+
+        public boolean cancelled() {
+            return cancelled;
+        }
+
+        public long nextInterval() {
+            return FD.this.timeout;
+        }
+
+        public void run() {
+            Message suspect_msg;
+            FD.FdHeader hdr;
+
+            synchronized(suspected_members) {
+                if(suspected_members.size() == 0) {
+                    stop();
+                    if(log.isDebugEnabled()) log.debug("task done (no suspected members)");
+                    return;
+                }
+
+                hdr=new FdHeader(FdHeader.SUSPECT);
+                hdr.mbrs=(Vector)suspected_members.clone();
+                hdr.from=local_addr;
+            }
+            suspect_msg=new Message();       // mcast SUSPECT to all members
+            suspect_msg.putHeader(getName(), hdr);
+            if(log.isDebugEnabled())
+                log.debug("broadcasting SUSPECT message [suspected_mbrs=" + suspected_members + "] to group");
+            passDown(new Event(Event.MSG, suspect_msg));
+            if(log.isDebugEnabled()) log.debug("task done");
+        }
+
+        public void addSuspectedMember(Address suspect) {
+            if(suspect != null && !suspected_members.contains(suspect)) {
+                suspected_members.add(suspect);
+            }
+        }
+    }
 
 }

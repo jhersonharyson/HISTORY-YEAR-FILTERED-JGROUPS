@@ -1,4 +1,4 @@
-// $Id: VERIFY_SUSPECT.java,v 1.1 2003/09/09 01:24:11 belaban Exp $
+// $Id: VERIFY_SUSPECT.java,v 1.10 2004/10/08 13:26:37 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -6,13 +6,11 @@ import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.Header;
 import org.jgroups.Message;
-import org.jgroups.log.Trace;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.Util;
+import org.jgroups.util.Streamable;
 
-import java.io.IOException;
-import java.io.ObjectInput;
-import java.io.ObjectOutput;
+import java.io.*;
 import java.util.Enumeration;
 import java.util.Hashtable;
 import java.util.Properties;
@@ -28,8 +26,8 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     Address local_addr=null;
     long timeout=2000;   // number of millisecs to wait for an are-you-dead msg
     int num_msgs=1;     // number of are-you-alive msgs and i-am-not-dead responses (for redundancy)
-    Vector members=null;
-    Hashtable suspects=new Hashtable();  // keys=Addresses, vals=time in mcses since added
+    final Vector members=null;
+    final Hashtable suspects=new Hashtable();  // keys=Addresses, vals=time in mcses since added
     Thread timer=null;
 
 
@@ -41,18 +39,19 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     public boolean setProperties(Properties props) {
         String str;
 
+        super.setProperties(props);
         str=props.getProperty("timeout");
         if(str != null) {
-            timeout=new Long(str).longValue();
+            timeout=Long.parseLong(str);
             props.remove("timeout");
         }
 
         str=props.getProperty("num_msgs");
         if(str != null) {
-            num_msgs=new Integer(str).intValue();
+            num_msgs=Integer.parseInt(str);
             if(num_msgs <= 0) {
-                Trace.warn("VERIFY_SUSPECT.setProperties()", "num_msgs is invalid (" +
-                                                             num_msgs + "): setting it to 1");
+                if(log.isWarnEnabled()) log.warn("num_msgs is invalid (" +
+                        num_msgs + "): setting it to 1");
                 num_msgs=1;
             }
             props.remove("num_msgs");
@@ -82,7 +81,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
             case Event.SUSPECT:  // it all starts here ...
                 suspected_mbr=(Address)evt.getArg();
                 if(suspected_mbr == null) {
-                    Trace.error("VERIFY_SUSPECT.up()", "suspected member is null");
+                    if(log.isErrorEnabled()) log.error("suspected member is null");
                     return;
                 }
                 suspect(suspected_mbr);
@@ -98,7 +97,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
                 switch(hdr.type) {
                     case VerifyHeader.ARE_YOU_DEAD:
                         if(hdr.from == null)
-                            Trace.error("VERIFY_SUSPECT.up()", "ARE_YOU_DEAD: hdr.from is null");
+                            if(log.isErrorEnabled()) log.error("ARE_YOU_DEAD: hdr.from is null");
                         else {
                             for(int i=0; i < num_msgs; i++) {
                                 rsp=new Message(hdr.from, null, null);
@@ -109,7 +108,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
                         return;
                     case VerifyHeader.I_AM_NOT_DEAD:
                         if(hdr.from == null) {
-                            Trace.error("VERIFY_SUSPECT.up()", "I_AM_NOT_DEAD: hdr.from is null");
+                            if(log.isErrorEnabled()) log.error("I_AM_NOT_DEAD: hdr.from is null");
                             return;
                         }
                         unsuspect(hdr.from);
@@ -142,9 +141,8 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
                     curr_time=System.currentTimeMillis();
                     diff=curr_time - val;
                     if(diff >= timeout) {  // haven't been unsuspected, pass up SUSPECT
-                        if(Trace.trace)
-                            Trace.info("VERIFY_SUSPECT.run()", "diff=" + diff + ", mbr " + mbr +
-                                                               " is dead (passing up SUSPECT event)");
+                        if(log.isTraceEnabled()) log.trace("diff=" + diff + ", mbr " + mbr +
+                                " is dead (passing up SUSPECT event)");
                         passUp(new Event(Event.SUSPECT, mbr));
                         suspects.remove(mbr);
                         continue;
@@ -175,8 +173,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
             if(suspects.containsKey(mbr))
                 return;
             suspects.put(mbr, new Long(System.currentTimeMillis()));
-            if(Trace.trace)
-                Trace.info("VERIFY_SUSPECT.suspect()", "verifying that " + mbr + " is dead");
+            if(log.isTraceEnabled()) log.trace("verifying that " + mbr + " is dead");
             for(int i=0; i < num_msgs; i++) {
                 msg=new Message(mbr, null, null);
                 msg.putHeader(getName(), new VerifyHeader(VerifyHeader.ARE_YOU_DEAD, local_addr));
@@ -191,8 +188,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
         if(mbr == null) return;
         synchronized(suspects) {
             if(suspects.containsKey(mbr)) {
-                if(Trace.trace)
-                    Trace.info("VERIFY_SUSPECT.unsuspect()", "member " + mbr + " is not dead !");
+                if(log.isTraceEnabled()) log.trace("member " + mbr + " is not dead !");
                 suspects.remove(mbr);
                 passDown(new Event(Event.UNSUSPECT, mbr));
                 passUp(new Event(Event.UNSUSPECT, mbr));
@@ -225,22 +221,22 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
 
 
-    public static class VerifyHeader extends Header {
-        static final int ARE_YOU_DEAD=1;  // 'from' is sender of verify msg
-        static final int I_AM_NOT_DEAD=2;  // 'from' is suspected member
+    public static class VerifyHeader extends Header implements Streamable {
+        static final short ARE_YOU_DEAD=1;  // 'from' is sender of verify msg
+        static final short I_AM_NOT_DEAD=2;  // 'from' is suspected member
 
-        int type=ARE_YOU_DEAD;
+        short type=ARE_YOU_DEAD;
         Address from=null;     // member who wants to verify that suspected_mbr is dead
 
 
         public VerifyHeader() {
         } // used for externalization
 
-        VerifyHeader(int type) {
+        VerifyHeader(short type) {
             this.type=type;
         }
 
-        VerifyHeader(int type, Address from) {
+        VerifyHeader(short type, Address from) {
             this(type);
             this.from=from;
         }
@@ -258,14 +254,24 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
         }
 
         public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeInt(type);
+            out.writeShort(type);
             out.writeObject(from);
         }
 
 
         public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-            type=in.readInt();
+            type=in.readShort();
             from=(Address)in.readObject();
+        }
+
+        public void writeTo(DataOutputStream out) throws IOException {
+            out.writeShort(type);
+            Util.writeAddress(from, out);
+        }
+
+        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+            type=in.readShort();
+            from=Util.readAddress(in);
         }
 
     }
