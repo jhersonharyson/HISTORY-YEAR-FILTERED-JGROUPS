@@ -1,4 +1,4 @@
-// $Id: JChannel.java,v 1.1 2003/09/09 01:24:07 belaban Exp $
+// $Id: JChannel.java,v 1.6 2003/12/15 23:29:56 belaban Exp $
 
 package org.jgroups;
 
@@ -14,6 +14,7 @@ import org.jgroups.util.Util;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Vector;
+import java.util.Map;
 
 /**
  * JChannel is a pure Java implementation of Channel
@@ -21,7 +22,7 @@ import java.util.Vector;
  * protocol stack
  * @author Bela Ban
  * @author Filip Hanik
- * @version $Revision: 1.1 $
+ * @version $Revision: 1.6 $
  */
 public class JChannel extends Channel {
 
@@ -49,6 +50,10 @@ public class JChannel extends Channel {
     private Queue mq=new Queue();
     /*the protocol stack, used to send and receive messages from the protocol stack*/
     private ProtocolStack prot_stack=null;
+
+    /** Thread responsible for closing a channel and potentially reconnecting to it (e.g. when shunned) */
+    protected CloserThread closer=null;
+
     /*lock objects*/
     private Object  local_addr_mutex=new Object();
     private Object  connect_mutex=new Object();
@@ -83,13 +88,20 @@ public class JChannel extends Channel {
     private boolean block_sending=false;  // block send()/down() if true (unlocked by UNBLOCK_SEND event)
     /*channel closed flag*/
     private boolean closed=false;      // close() has been called, channel is unusable
+
     /*the last state of the application-this is set by the up(Event) operation if the receive_get_states flag is true*/
     private Object state=null;
+
+    /** Indicates whether the state was retrieved correctly (even a null state if we are the first member) */
+    protected boolean state_received=false;
 
     /** True if a state transfer protocol is available, false otherwise */
     private boolean state_transfer_supported=false; // set by CONFIG event from STATE_TRANSFER protocol
 
-
+    /** Used to maintain additional data across channel disconnects/reconnects. This is a kludge and will be remove
+     * as soon as JGroups supports logical addresses
+     */
+    private byte[] additional_data=null;
 
 
     /**
@@ -217,7 +229,7 @@ public class JChannel extends Channel {
             this.channel_name=channel_name;
 
         try {
-            prot_stack.start(); // calls start() in all protocols, from top to bottom
+            prot_stack.startStack(); // calls start() in all protocols, from top to bottom
         }
         catch(Throwable e) {
             Trace.error("JChannel.connect()", "exception: " + e);
@@ -318,7 +330,7 @@ public class JChannel extends Channel {
 
             connected=false;
             try {
-                prot_stack.stop(); // calls stop() in all protocols, from top to bottom
+                prot_stack.stopStack(); // calls stop() in all protocols, from top to bottom
             }
             catch(Exception e) {
                 Trace.error("JChannel.disconnect()", "exception: " + e);
@@ -819,6 +831,7 @@ public class JChannel extends Channel {
 
                 synchronized(get_state_mutex) {
                     state=evt.getArg();
+                    state_received=true;
                     get_state_mutex.notify();
                 }
                 break;
@@ -892,6 +905,21 @@ public class JChannel extends Channel {
                     }
             }
         }
+
+        // handle setting of additional data (kludge, will be removed soon)
+        if(evt.getType() == Event.CONFIG) {
+            try {
+                Map m=(Map)evt.getArg();
+                if(m != null && m.containsKey("additional_data")) {
+                    additional_data=(byte[])m.get("additional_data");
+                }
+            }
+            catch(Throwable t) {
+                Trace.error("JChannel.down()", "CONFIG event did not contain a hashmap: " + t);
+            }
+
+        }
+
         if(prot_stack != null)
             prot_stack.down(evt);
         else
@@ -936,8 +964,10 @@ public class JChannel extends Channel {
         local_addr=null;
         channel_name=null;
         my_view=null;
-        if(mq != null && mq.closed())
-            mq.reset();
+
+        // changed by Bela Sept 25 2003
+        //if(mq != null && mq.closed())
+          //  mq.reset();
 
         connect_ok_event_received=false;
         disconnect_ok_event_received=false;
@@ -1008,7 +1038,7 @@ public class JChannel extends Channel {
     }
 
 
-       /**
+    /**
      * Receives the state from the group and modifies the JChannel.state object<br>
      * This method initializes the local state variable to null, and then sends the state
      * event down the stack. It waits for a GET_STATE_OK event to bounce back
@@ -1020,27 +1050,33 @@ public class JChannel extends Channel {
         checkClosed();
         checkNotConnected();
         if(!state_transfer_supported)
-            Trace.warn(
-                    "JChannel._getState()",
-                    "fetching state will fail as state transfer is not supported. "
-                    + "Add one of the STATE_TRANSFER protocols to your protocol specification");
+            Trace.warn("JChannel._getState()", "fetching state will fail as state transfer is not supported. "
+                       + "Add one of the STATE_TRANSFER protocols to your protocol specification");
         synchronized(get_state_mutex) {
             state=null;
+            state_received=false;
             down(evt);
-            try {
-                if(timeout <= 0)
-                    get_state_mutex.wait(); // waits until notified by GET_STATE_OK event
-                else
-                    get_state_mutex.wait(timeout); // waits until notified by GET_STATE_OK event or timeout msecs
+
+            // down() might run on *our* thread, so state_received might get changed to true, therefore the check !
+            if(!state_received) {
+                try {
+                    if(timeout <= 0)
+                        get_state_mutex.wait(); // waits until notified by GET_STATE_OK event
+                    else
+                        get_state_mutex.wait(timeout); // waits until notified by GET_STATE_OK event or timeout msecs
+                }
+                catch(Exception e) {
+                    ;
+                }
             }
-            catch(Exception e) {
-            }
+
             if(state != null) // 'state' set by GET_STATE_OK event
                 return true;
             else
                 return false;
         }
     }
+
 
     /**
      * Disconnects and closes the channel.
@@ -1070,7 +1106,7 @@ public class JChannel extends Channel {
 
         if(prot_stack != null) {
             try {
-                prot_stack.stop();
+                prot_stack.stopStack();
                 prot_stack.destroy();
             }
             catch(Exception e) {
@@ -1095,34 +1131,33 @@ public class JChannel extends Channel {
         if(channel_listener != null)
             channel_listener.channelShunned();
 
-        new CloserThread(evt);
+        if(closer != null && !closer.isAlive())
+            closer=null;
+        if(closer == null) {
+            closer=new CloserThread(evt);
+            closer.start();
+        }
     }
 
     /* ------------------------------- End of Private Methods ---------------------------------- */
 
 
-    class CloserThread implements Runnable {
+    class CloserThread extends Thread {
         Event evt;
         Thread t=null;
 
 
         CloserThread(Event evt) {
             this.evt=evt;
-            start();
-        }
-
-
-        public void start() {
-            t=new Thread(this, "CloserThread");
-            t.setDaemon(true);
-            t.start();
+            setName("CloserThread");
+            setDaemon(true);
         }
 
 
         public void run() {
             try {
                 String old_channel_name=channel_name; // remember because close() will null it
-                _close(false, false); // do not disconnect before closing channel, do not close mq
+                _close(false, false); // do not disconnect before closing channel, do not close mq (yet !)
 
                 if(up_handler != null)
                     up_handler.up(this.evt);
@@ -1144,11 +1179,16 @@ public class JChannel extends Channel {
                     }
                 }
 
-
                 if(auto_reconnect) {
                     try {
                         Trace.info("JChannel.CloserThread.run()", "reconnecting to group " + old_channel_name);
                         open();
+                        if(additional_data != null) {
+                            // set previously set additional data
+                            Map m=new HashMap();
+                            m.put("additional_data", additional_data);
+                            down(new Event(Event.CONFIG, m));
+                        }
                         connect(old_channel_name);
                         if(channel_listener != null)
                             channel_listener.channelReconnected(local_addr);
@@ -1170,6 +1210,9 @@ public class JChannel extends Channel {
             }
             catch(Exception ex) {
                 Trace.error("JChannel.CloserThread.run()", "exception: " + ex);
+            }
+            finally {
+                closer=null;
             }
         }
     }

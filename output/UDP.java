@@ -1,4 +1,4 @@
-// $Id: UDP.java,v 1.1 2003/09/09 01:24:11 belaban Exp $
+// $Id: UDP.java,v 1.6 2003/12/15 23:52:04 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -299,9 +299,13 @@ public class UDP extends Protocol implements Runnable {
      *
      */
     public boolean setProperties(Properties props) {
-        String str;
+        String str, tmp;
 
-        str=props.getProperty("bind_addr");
+        tmp=System.getProperty("UDP.bind_addr");
+        if(tmp != null)
+            str=tmp;
+        else
+            str=props.getProperty("bind_addr");
         if(str != null) {
             try {
                 bind_addr=InetAddress.getByName(str);
@@ -634,6 +638,7 @@ public class UDP extends Protocol implements Runnable {
         else {                                         // unicast message
             if(send_sock != null) {
                 try {
+                    // System.out.println("packet size is " + packet.getData().length);
                     send_sock.send(packet);
                 }
                 catch(Throwable e) {
@@ -729,6 +734,8 @@ public class UDP extends Protocol implements Runnable {
 			}
         }
 		//ucast_recv_sock=new DatagramSocket(bind_port, bind_addr);
+        if(ucast_recv_sock == null)
+            throw new Exception("UDP.createSocket(): ucast_recv_sock is null");
 
         local_addr=new IpAddress(ucast_recv_sock.getLocalAddress(), ucast_recv_sock.getLocalPort());
         if(additional_data != null)
@@ -1011,6 +1018,7 @@ public class UDP extends Protocol implements Runnable {
             case Event.DISCONNECT:
                 passUp(new Event(Event.DISCONNECT_OK));
                 break;
+
             case Event.CONFIG:
                 if(Trace.trace) Trace.info("UDP.down()", "received CONFIG event: " + evt.getArg());
                 handleConfigEvent((HashMap)evt.getArg());

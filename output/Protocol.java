@@ -1,4 +1,4 @@
-// $Id: Protocol.java,v 1.1 2003/09/09 01:24:12 belaban Exp $
+// $Id: Protocol.java,v 1.7 2003/12/26 23:50:44 belaban Exp $
 
 package org.jgroups.stack;
 
@@ -106,6 +106,12 @@ class DownHandler extends Thread {
                         continue;
                     }
                 }
+
+                int type=evt.getType();
+                if(type == Event.ACK || type == Event.START || type == Event.STOP) {
+                    if(handler.handleSpecialDownEvent(evt) == false)
+                        continue;
+                }
                 handler.down(evt);
                 evt=null;
             }
@@ -212,6 +218,7 @@ public abstract class Protocol {
 
     public void setObserver(ProtocolObserver observer) {
         this.observer=observer;
+	observer.setProtocol(this);
         if(up_handler != null)
             up_handler.setObserver(observer);
         if(down_handler != null)
@@ -370,14 +377,14 @@ public abstract class Protocol {
             }
             catch(Exception ex) {
             }
-            if(up_handler.isAlive()) {
+            if(up_handler != null && up_handler.isAlive()) {
                 up_handler.interrupt();  // still alive ? let's just kill it without mercy...
                 try {
                     up_handler.join(THREAD_JOIN_TIMEOUT);
                 }
                 catch(Exception ex) {
                 }
-                if(up_handler.isAlive())
+                if(up_handler != null && up_handler.isAlive())
                     Trace.error("Protocol.stopInternal()", "up_handler thread for " + getName() +
                                                            " was interrupted (in order to be terminated), but is still alive");
             }
@@ -391,14 +398,14 @@ public abstract class Protocol {
             }
             catch(Exception ex) {
             }
-            if(down_handler.isAlive()) {
+            if(down_handler != null && down_handler.isAlive()) {
                 down_handler.interrupt(); // still alive ? let's just kill it without mercy...
                 try {
                     down_handler.join(THREAD_JOIN_TIMEOUT);
                 }
                 catch(Exception ex) {
                 }
-                if(down_handler.isAlive())
+                if(down_handler != null && down_handler.isAlive())
                     Trace.error("Protocol.stopInternal()", "down_handler thread for " + getName() +
                                                            " was interrupted (in order to be terminated), but is is still alive");
             }
@@ -443,6 +450,11 @@ public abstract class Protocol {
                 if(observer.down(evt, down_queue.size()) == false) {  // false means discard event
                     return;
                 }
+            }
+            int type=evt.getType();
+            if(type == Event.ACK || type == Event.START || type == Event.STOP) {
+                if(handleSpecialDownEvent(evt) == false)
+                    return;
             }
             down(evt);
             return;
@@ -517,4 +529,43 @@ public abstract class Protocol {
     }
 
 
+    /**  These are special internal events that should not be handled by protocols
+     * @return boolean True: the event should be passed further down the stack. False: the event should
+     * be discarded (not passed down the stack)
+     */
+    protected boolean handleSpecialDownEvent(Event evt) {
+        switch(evt.getType()) {
+            case Event.ACK:
+                if(down_prot == null) {
+                    passUp(new Event(Event.ACK_OK));
+                    return false; // don't pass down the stack
+                }
+            case Event.START:
+                try {
+                    start();
+
+                    // if we're the transport protocol, reply with a START_OK up the stack
+                    if(down_prot == null) {
+                        passUp(new Event(Event.START_OK, Boolean.TRUE));
+                        return false; // don't pass down the stack
+                    }
+                    else
+                        return true; // pass down the stack
+                }
+                catch(Exception e) {
+                    passUp(new Event(Event.START_OK, new Exception("exception caused by " + getName() + ".start(): " + e)));
+                    return false;
+                }
+            case Event.STOP:
+                stop();
+                if(down_prot == null) {
+                    passUp(new Event(Event.STOP_OK, Boolean.TRUE));
+                    return false; // don't pass down the stack
+                }
+                else
+                    return true; // pass down the stack
+            default:
+                return true; // pass down by default
+        }
+    }
 }

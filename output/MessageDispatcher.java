@@ -1,4 +1,4 @@
-// $Id: MessageDispatcher.java,v 1.1 2003/09/09 01:24:08 belaban Exp $
+// $Id: MessageDispatcher.java,v 1.6 2003/12/11 06:58:55 belaban Exp $
 
 package org.jgroups.blocks;
 
@@ -35,6 +35,12 @@ public class MessageDispatcher implements RequestHandler {
     protected PullPushAdapter     adapter=null;
     protected Serializable        id=null;
 
+    /** Process items on the queue concurrently (RequestCorrelator). The default is to wait until the
+     * processing of an item has completed before fetching the next item from the queue. Note that setting
+     * this to true may destroy the properties of a protocol stack, e.g total or causal order may not be
+     * guaranteed. Set this to true only if you know what you're doing ! */
+    protected boolean             concurrent_processing=false;
+
 
 
 
@@ -43,7 +49,7 @@ public class MessageDispatcher implements RequestHandler {
         prot_adapter=new ProtocolAdapter();
         if(channel != null) {
             local_addr=channel.getLocalAddress();
-            channel.setOpt(Channel.GET_STATE_EVENTS, new Boolean(true));
+            channel.setOpt(Channel.GET_STATE_EVENTS, Boolean.TRUE);
         }
         setMessageListener(l);
         setMembershipListener(l2);
@@ -59,7 +65,24 @@ public class MessageDispatcher implements RequestHandler {
         prot_adapter=new ProtocolAdapter();
         if(channel != null) {
             local_addr=channel.getLocalAddress();
-            channel.setOpt(Channel.GET_STATE_EVENTS, new Boolean(true));
+            channel.setOpt(Channel.GET_STATE_EVENTS, Boolean.TRUE);
+        }
+        setMessageListener(l);
+        setMembershipListener(l2);
+        if(channel != null)
+            channel.setUpHandler(prot_adapter);
+        start();
+    }
+
+    public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2,
+                             boolean deadlock_detection, boolean concurrent_processing) {
+        this.channel=channel;
+        this.deadlock_detection=deadlock_detection;
+        this.concurrent_processing=concurrent_processing;
+        prot_adapter=new ProtocolAdapter();
+        if(channel != null) {
+            local_addr=channel.getLocalAddress();
+            channel.setOpt(Channel.GET_STATE_EVENTS, Boolean.TRUE);
         }
         setMessageListener(l);
         setMembershipListener(l2);
@@ -84,6 +107,14 @@ public class MessageDispatcher implements RequestHandler {
         setRequestHandler(req_handler);
     }
 
+    public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2, RequestHandler req_handler,
+                             boolean deadlock_detection, boolean concurrent_processing) {
+        this(channel, l, l2);
+        this.deadlock_detection=deadlock_detection;
+        this.concurrent_processing=concurrent_processing;
+        setRequestHandler(req_handler);
+    }
+
 
     
     /*
@@ -99,6 +130,7 @@ public class MessageDispatcher implements RequestHandler {
     public MessageDispatcher(PullPushAdapter adapter, Serializable id,
                              MessageListener l, MembershipListener l2) {
         this.adapter=adapter; this.id=id;
+        setMembers (((Channel) adapter.getTransport()).getView().getMembers());
         setMessageListener(l);
         setMembershipListener(l2);
         PullPushHandler handler=new PullPushHandler();
@@ -112,7 +144,7 @@ public class MessageDispatcher implements RequestHandler {
             adapter.registerListener(id, handler);
 
         if((tp=adapter.getTransport()) instanceof Channel) {
-            ((Channel)tp).setOpt(Channel.GET_STATE_EVENTS, new Boolean(true));
+            ((Channel)tp).setOpt(Channel.GET_STATE_EVENTS, Boolean.TRUE);
             local_addr=((Channel)tp).getLocalAddress();
         }
 
@@ -138,6 +170,7 @@ public class MessageDispatcher implements RequestHandler {
                              MessageListener l, MembershipListener l2,
                              RequestHandler req_handler) {
         this.adapter=adapter; this.id=id;
+        setMembers (((Channel) adapter.getTransport()).getView().getMembers());
         setRequestHandler(req_handler);
         setMessageListener(l);
         setMembershipListener(l2);
@@ -152,7 +185,7 @@ public class MessageDispatcher implements RequestHandler {
             adapter.registerListener(id, handler);
 
         if((tp=adapter.getTransport()) instanceof Channel) {
-            ((Channel)tp).setOpt(Channel.GET_STATE_EVENTS, new Boolean(true));
+            ((Channel)tp).setOpt(Channel.GET_STATE_EVENTS, Boolean.TRUE);
             local_addr=((Channel)tp).getLocalAddress(); // fixed bug #800774
         }
 
@@ -160,11 +193,55 @@ public class MessageDispatcher implements RequestHandler {
     }
 
 
+    public MessageDispatcher(PullPushAdapter adapter, Serializable id,
+                             MessageListener l, MembershipListener l2,
+                             RequestHandler req_handler, boolean concurrent_processing) {
+        this.concurrent_processing=concurrent_processing;
+        this.adapter=adapter; this.id=id;
+        setMembers (((Channel) adapter.getTransport()).getView().getMembers());
+        setRequestHandler(req_handler);
+        setMessageListener(l);
+        setMembershipListener(l2);
+        PullPushHandler handler=new PullPushHandler();
+        Transport       tp;
+
+        transport_adapter=new TransportAdapter();
+        adapter.addMembershipListener(handler);
+        if(id == null) // no other building block around, let's become the main consumer of this PullPushAdapter
+            adapter.setListener(handler);
+        else
+            adapter.registerListener(id, handler);
+
+        if((tp=adapter.getTransport()) instanceof Channel) {
+            ((Channel)tp).setOpt(Channel.GET_STATE_EVENTS, Boolean.TRUE);
+            local_addr=((Channel)tp).getLocalAddress(); // fixed bug #800774
+        }
+
+        start();
+    }
+
+
+    /**
+     * If this dispatcher is using a user-provided PullPushAdapter, then need to set the members
+     * from the adapter initially since viewChange has most likely already been called in PullPushAdapter. 
+     */
+    private void setMembers (Vector new_mbrs)
+    {
+        if(new_mbrs != null) {
+            members.removeAllElements();
+            for(int i=0; i < new_mbrs.size(); i++)
+                members.addElement(new_mbrs.elementAt(i));
+        }
+    }
+    
     public void setDeadlockDetection(boolean flag) {
         deadlock_detection=flag;
         corr.setDeadlockDetection(flag);
     }
 
+    public void setConcurrentProcessing(boolean flag) {
+        this.concurrent_processing=flag;
+    }
 
     public void finalize() {
         stop();
@@ -175,12 +252,16 @@ public class MessageDispatcher implements RequestHandler {
         if(corr == null) {
             if(transport_adapter != null)
                 corr=new RequestCorrelator("MessageDispatcher", transport_adapter, 
-                                           this, deadlock_detection, local_addr);
+                                           this, deadlock_detection, local_addr, concurrent_processing);
             else {
                 corr=new RequestCorrelator("MessageDispatcher", prot_adapter, 
-                                           this, deadlock_detection, local_addr);
+                                           this, deadlock_detection, local_addr, concurrent_processing);
             }
             corr.start();
+        }
+        if(channel != null) {
+            Vector tmp_mbrs=channel.getView() != null? channel.getView().getMembers() : null;
+            setMembers(tmp_mbrs);
         }
     }
 
@@ -269,7 +350,7 @@ public class MessageDispatcher implements RequestHandler {
                 tmp=(Channel)adapter.getTransport();
         }
 
-        if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(new Boolean(false))) {
+        if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(Boolean.FALSE)) {
             if(local_addr == null)
                 local_addr=tmp.getLocalAddress();
             if(local_addr != null && real_dests != null)
@@ -330,7 +411,7 @@ public class MessageDispatcher implements RequestHandler {
                 tmp=(Channel)adapter.getTransport();
         }
 
-        if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(new Boolean(false))) {
+        if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(Boolean.FALSE)) {
             if(local_addr == null)
                 local_addr=tmp.getLocalAddress();
             if(local_addr != null)
@@ -535,7 +616,22 @@ public class MessageDispatcher implements RequestHandler {
     class TransportAdapter implements Transport {
 
         public void send(Message msg) throws Exception {
-            // @todo: implement
+            if(channel != null)
+                channel.send(msg);
+            else if(adapter != null) {
+                try {
+                    if(id != null)
+                        adapter.send(id, msg);
+                    else
+                        adapter.send(msg);
+                }
+                catch(Throwable ex) {
+                    Trace.error("MessageDispatcher.send()", "exception=" + Util.print(ex));
+                }
+            }
+            else {
+                Trace.error("MessageDispatcher.send()", "channel == null");
+            }
         }
 
         public Object receive(long timeout) throws Exception {
