@@ -1,4 +1,4 @@
-// $Id: ProtocolStack.java,v 1.15 2004/10/04 20:43:34 belaban Exp $
+// $Id: ProtocolStack.java,v 1.24 2005/09/29 12:10:03 belaban Exp $
 
 package org.jgroups.stack;
 
@@ -7,10 +7,7 @@ import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.util.Promise;
 import org.jgroups.util.TimeScheduler;
 
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Vector;
+import java.util.*;
 
 
 
@@ -27,12 +24,12 @@ import java.util.Vector;
 public class ProtocolStack extends Protocol implements Transport {
     private Protocol                top_prot=null;
     private Protocol                bottom_prot=null;
-    private final Configurator            conf=new Configurator();
-    private final String                  setup_string;
+    private final Configurator      conf=new Configurator();
+    private String                  setup_string;
     private JChannel                channel=null;
     private boolean                 stopped=true;
-    public final  TimeScheduler           timer=new TimeScheduler(5000);
-    final Promise                         ack_promise=new Promise();
+    public final  TimeScheduler     timer=new TimeScheduler(60000);
+    // final Promise                   ack_promise=new Promise();
 
     /** Used to sync on START/START_OK events for start()*/
     Promise                         start_promise=null;
@@ -51,8 +48,15 @@ public class ProtocolStack extends Protocol implements Transport {
         ClassConfigurator.getInstance(true); // will create the singleton
     }
 
+    /** Only used by Simulator; don't use */
+    public ProtocolStack() {
+
+    }
 
 
+    public Channel getChannel() {
+        return channel;
+    }
 
     /** Returns all protocols in a list, from top to bottom. <em>These are not copies of protocols,
      so modifications will affect the actual instances !</em> */
@@ -68,6 +72,29 @@ public class ProtocolStack extends Protocol implements Transport {
         return v;
     }
 
+    /**
+     *
+     * @return Map<String,Map<key,val>>
+     */
+    public Map dumpStats() {
+        Protocol p;
+        Map retval=new HashMap(), tmp;
+        String prot_name;
+
+        p=top_prot;
+        while(p != null) {
+            prot_name=p.getName();
+            tmp=p.dumpStats();
+            if(prot_name != null && tmp != null)
+                retval.put(prot_name, tmp);
+            p=p.getDownProtocol();
+        }
+        return retval;
+    }
+
+    public String dumpTimerQueue() {
+        return timer.dumpTaskQueue();
+    }
 
     /**
      * Prints the names of the protocols, from the bottom to top. If include_properties is true,
@@ -76,7 +103,7 @@ public class ProtocolStack extends Protocol implements Transport {
     public String printProtocolSpec(boolean include_properties) {
         StringBuffer sb=new StringBuffer();
         Protocol     prot=top_prot;
-        Properties   props;
+        Properties   tmpProps;
         String       name;
         Map.Entry    entry;
 
@@ -87,10 +114,10 @@ public class ProtocolStack extends Protocol implements Transport {
                     break;
                 sb.append(name);
                 if(include_properties) {
-                    props=prot.getProperties();
-                    if(props != null) {
+                    tmpProps=prot.getProperties();
+                    if(tmpProps != null) {
                         sb.append('\n');
-                        for(Iterator it=props.entrySet().iterator(); it.hasNext();) {
+                        for(Iterator it=tmpProps.entrySet().iterator(); it.hasNext();) {
                             entry=(Map.Entry)it.next();
                             sb.append(entry + "\n");
                         }
@@ -105,10 +132,49 @@ public class ProtocolStack extends Protocol implements Transport {
         return sb.toString();
     }
 
+    public String printProtocolSpecAsXML() {
+        StringBuffer sb=new StringBuffer();
+        Protocol     prot=bottom_prot;
+        Properties   tmpProps;
+        String       name;
+        Map.Entry    entry;
+        int len, max_len=30;
+
+        sb.append("<config>\n");
+        while(prot != null) {
+            name=prot.getName();
+            if(name != null) {
+                if("ProtocolStack".equals(name))
+                    break;
+                sb.append("  <").append(name).append(" ");
+                tmpProps=prot.getProperties();
+                if(tmpProps != null) {
+                    len=name.length();
+                    String s;
+                    for(Iterator it=tmpProps.entrySet().iterator(); it.hasNext();) {
+                        entry=(Map.Entry)it.next();
+                        s=entry.getKey() + "=\"" + entry.getValue() + "\" ";
+                        if(len + s.length() > max_len) {
+                            sb.append("\n       ");
+                            len=8;
+                        }
+                        sb.append(s);
+                        len+=s.length();
+                    }
+                }
+                sb.append("/>\n");
+                prot=prot.getUpProtocol();
+            }
+        }
+        sb.append("</config>");
+
+        return sb.toString();
+    }
+
 
     public void setup() throws Exception {
         if(top_prot == null) {
-            top_prot=conf.setupProtocolStack(setup_string, this);
+            top_prot=conf.setupProtocolStack(setup_string, this); // calls init() on each protocol
             if(top_prot == null)
                 throw new Exception("ProtocolStack.setup(): couldn't create protocol stack");
             top_prot.setUpProtocol(this);
@@ -259,23 +325,16 @@ public class ProtocolStack extends Protocol implements Transport {
         stopped=true;
     }
 
-    public void stopInternal() {
-        // do nothing, DON'T REMOVE !!!!
-    }
-
-
     /**
-     * Flushes all events currently in the <em>down</em> queues and returns when done. This guarantees
-     * that all events sent <em>before</em> this call will have been handled.
+     * Not needed anymore, just left in here for backwards compatibility with JBoss AS
+     * @deprecated
      */
     public void flushEvents() {
-        long start, stop;
-        ack_promise.reset();
-        start=System.currentTimeMillis();
-        down(new Event(Event.ACK));
-        ack_promise.getResult(0);
-        stop=System.currentTimeMillis();
-        if(log.isDebugEnabled()) log.debug("flushing took " + (stop-start) + " msecs");
+
+    }
+
+    public void stopInternal() {
+        // do nothing, DON'T REMOVE !!!!
     }
 
 
@@ -303,9 +362,6 @@ public class ProtocolStack extends Protocol implements Transport {
 
     public void up(Event evt) {
         switch(evt.getType()) {
-            case Event.ACK_OK:
-                ack_promise.setResult(Boolean.TRUE);
-                return;
             case Event.START_OK:
                 if(start_promise != null)
                     start_promise.setResult(evt.getArg());

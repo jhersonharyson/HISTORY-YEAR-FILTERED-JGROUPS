@@ -1,4 +1,4 @@
-// $Id: MessageDispatcher.java,v 1.33 2004/12/28 15:57:01 belaban Exp $
+// $Id: MessageDispatcher.java,v 1.44 2005/11/12 06:39:02 belaban Exp $
 
 package org.jgroups.blocks;
 
@@ -10,11 +10,26 @@ import org.jgroups.util.*;
 
 import java.io.Serializable;
 import java.util.Vector;
+import java.util.Collection;
+import java.util.TreeSet;
 
 
 /**
- * Used on top of channel to implement group requests. Client's <code>handle()</code> method is called when request is
- * received. Is the equivalent of RpcProtocol on the application instead of protocol level.
+ * Provides synchronous and asynchronous message sending with request-response 
+ * correlation; i.e., matching responses with the original request. 
+ * It also offers push-style message reception (by internally using the PullPushAdapter). 
+ * <p>
+ * Channels are simple patterns to asynchronously send a receive messages. 
+ * However, a significant number of communication patterns in group communication 
+ * require synchronous communication. For example, a sender would like to send a 
+ * message to the group and wait for all responses. Or another application would 
+ * like to send a message to the group and wait only until the majority of the 
+ * receivers have sent a response, or until a timeout occurred.  MessageDispatcher 
+ * offers a combination of the above pattern with other patterns.
+ * <p>
+ * Used on top of channel to implement group requests. Client's <code>handle()</code> 
+ * method is called when request is received. Is the equivalent of RpcProtocol on 
+ * the application instead of protocol level.
  *
  * @author Bela Ban
  */
@@ -26,7 +41,7 @@ public class MessageDispatcher implements RequestHandler {
     protected RequestHandler req_handler=null;
     protected ProtocolAdapter prot_adapter=null;
     protected TransportAdapter transport_adapter=null;
-    protected final Vector members=new Vector();
+    protected final Collection members=new TreeSet();
     protected Address local_addr=null;
     protected boolean deadlock_detection=false;
     protected PullPushAdapter adapter=null;
@@ -234,9 +249,9 @@ public class MessageDispatcher implements RequestHandler {
      */
     private void setMembers(Vector new_mbrs) {
         if(new_mbrs != null) {
-            members.removeAllElements();
-            for(int i=0; i < new_mbrs.size(); i++) {
-                members.addElement(new_mbrs.elementAt(i));
+            synchronized(members) {
+                members.clear();
+                members.addAll(new_mbrs);
             }
         }
     }
@@ -256,31 +271,24 @@ public class MessageDispatcher implements RequestHandler {
         if(corr == null) {
             if(transport_adapter != null) {
                 corr=new RequestCorrelator("MessageDispatcher", transport_adapter,
-                        this, deadlock_detection, local_addr, concurrent_processing);
+                                           this, deadlock_detection, local_addr, concurrent_processing);
             }
             else {
                 corr=new RequestCorrelator("MessageDispatcher", prot_adapter,
-                        this, deadlock_detection, local_addr, concurrent_processing);
+                                           this, deadlock_detection, local_addr, concurrent_processing);
             }
-            corr.start();
         }
+        corr.start();
         if(channel != null) {
             Vector tmp_mbrs=channel.getView() != null ? channel.getView().getMembers() : null;
             setMembers(tmp_mbrs);
-        }
-        if(null != prot_adapter) { // null if called from the constructor that uses PullPushAdapter
-            prot_adapter.resume();
         }
     }
 
 
     public void stop() {
-        if(null != prot_adapter) {
-            prot_adapter.suspend();
-        }
         if(corr != null) {
             corr.stop();
-            corr=null;
         }
     }
 
@@ -289,6 +297,13 @@ public class MessageDispatcher implements RequestHandler {
         msg_listener=l;
     }
 
+    /**
+     * Gives access to the currently configured MessageListener. Returns null if there is no
+     * configured MessageListener.
+     */
+    public MessageListener getMessageListener() {
+        return msg_listener;
+    }
 
     public void setMembershipListener(MembershipListener l) {
         membership_listener=l;
@@ -296,6 +311,14 @@ public class MessageDispatcher implements RequestHandler {
 
     public void setRequestHandler(RequestHandler rh) {
         req_handler=rh;
+    }
+
+    /**
+     * Offers access to the underlying Channel. 
+     * @return a reference to the underlying Channel.
+     */
+    public Channel getChannel() {
+        return channel;
     }
 
 
@@ -350,7 +373,15 @@ public class MessageDispatcher implements RequestHandler {
 
         // we need to clone because we don't want to modify the original
         // (we remove ourselves if LOCAL is false, see below) !
-        real_dests=dests != null ? (Vector) dests.clone() : (members != null ? (Vector) members.clone() : null);
+        // real_dests=dests != null ? (Vector) dests.clone() : (members != null ? new Vector(members) : null);
+        if(dests != null) {
+            real_dests=(Vector)dests.clone();
+        }
+        else {
+            synchronized(members) {
+                real_dests=new Vector(members);
+            }
+        }
 
         // if local delivery is off, then we should not wait for the message from the local member.
         // therefore remove it from the membership
@@ -381,6 +412,7 @@ public class MessageDispatcher implements RequestHandler {
         }
 
         _req=new GroupRequest(msg, corr, real_dests, mode, timeout, 0);
+        _req.setCaller(this.local_addr);
         _req.execute();
 
         return _req.getResults();
@@ -414,10 +446,18 @@ public class MessageDispatcher implements RequestHandler {
                 log.error("response collector is null (must be non-null)");
             return;
         }
-            
+
         // we need to clone because we don't want to modify the original
         // (we remove ourselves if LOCAL is false, see below) !
-        real_dests=dests != null ? (Vector) dests.clone() : (Vector) members.clone();
+        //real_dests=dests != null ? (Vector) dests.clone() : (Vector) members.clone();
+        if(dests != null) {
+            real_dests=(Vector)dests.clone();
+        }
+        else {
+            synchronized(members) {
+                real_dests=new Vector(members);
+            }
+        }
 
         // if local delivery is off, then we should not wait for the message from the local member.
         // therefore remove it from the membership
@@ -436,7 +476,7 @@ public class MessageDispatcher implements RequestHandler {
                 real_dests.removeElement(local_addr);
             }
         }
-        
+
         // don't even send the message if the destination list is empty
         if(real_dests.size() == 0) {
             if(log.isDebugEnabled())
@@ -474,12 +514,12 @@ public class MessageDispatcher implements RequestHandler {
         mbrs.addElement(dest);   // dummy membership (of destination address)
 
         _req=new GroupRequest(msg, corr, mbrs, mode, timeout, 0);
+        _req.setCaller(local_addr);
         _req.execute();
 
         if(mode == GroupRequest.GET_NONE) {
             return null;
         }
-
 
         rsp_list=_req.getResults();
 
@@ -552,10 +592,6 @@ public class MessageDispatcher implements RequestHandler {
 
 
     class ProtocolAdapter extends Protocol implements UpHandler {
-        private Thread upProcessingThread=null;
-        private final Queue upQueue=new Queue();
-        private final ReentrantLatch m_upLatch=new ReentrantLatch(false);
-
 
 
         /* ------------------------- Protocol Interface --------------------------- */
@@ -624,20 +660,15 @@ public class MessageDispatcher implements RequestHandler {
                 case Event.VIEW_CHANGE:
                     View v=(View) evt.getArg();
                     Vector new_mbrs=v.getMembers();
-
-                    if(new_mbrs != null) {
-                        members.removeAllElements();
-                        for(int i=0; i < new_mbrs.size(); i++) {
-                            members.addElement(new_mbrs.elementAt(i));
-                        }
-                    }
-
+                    setMembers(new_mbrs);
                     if(membership_listener != null) {
                         membership_listener.viewAccepted(v);
                     }
                     break;
 
                 case Event.SET_LOCAL_ADDRESS:
+                    if(log.isTraceEnabled())
+                        log.trace("setting local_addr (" + local_addr + ") to " + evt.getArg());
                     local_addr=(Address)evt.getArg();
                     break;
 
@@ -662,79 +693,29 @@ public class MessageDispatcher implements RequestHandler {
 
 
 
-        synchronized void suspend() {
-            m_upLatch.lock();
-            if(upProcessingThread != null) {
-                Thread t=upProcessingThread;
-                upProcessingThread=null;
-                t.interrupt();
-            }
-        }
-
-        synchronized void resume() {
-            m_upLatch.unlock();
-            if(upProcessingThread == null) {
-                startProcessingThread();
-            }
-        }
-
-
-        private void startProcessingThread() {
-            upProcessingThread=new Thread(new Runnable() {
-                public void run() {
-                    Event event=null;
-                    // while(upProcessingThread != null) {
-                    while(Thread.currentThread() == upProcessingThread) { // changed, see bug 998920
-                        try {
-                            event=(Event)upQueue.remove();
-                            m_upLatch.passThrough();
-                            handleUp(event);
-                        }
-                        catch(QueueClosedException ex1) {
-                            break;
-                        }
-                        catch(InterruptedException ex2) {
-                            //this is ok, the 'interrupted' flag is cleared
-                        }
-                    }
-                }
-            });
-            upProcessingThread.setName("MessageDispatcher thread " + upProcessingThread.hashCode());
-            upProcessingThread.setDaemon(true);
-            upProcessingThread.start();
-        }
-
-
         /**
          * Called by channel (we registered before) when event is received. This is the UpHandler interface.
          */
         public void up(Event evt) {
-            try {
-                upQueue.add(evt);
-            }
-            catch(QueueClosedException ex) {
-                // this is ok
-            }
-        }
-
-        private void handleUp(Event evt) {
             if(corr != null) {
-                corr.receive(evt);
+                corr.receive(evt); // calls passUp()
             }
             else {
-                if(this.log.isErrorEnabled()) { //Something is seriously wrong, correlator should not be null since latch is not locked!
-                    this.log.error("correlator is null, but latch is not locked! Event ignored.");
+                if(log.isErrorEnabled()) { //Something is seriously wrong, correlator should not be null since latch is not locked!
+                    log.error("correlator is null, event will be ignored (evt=" + evt + ")");
                 }
             }
         }
+
+
 
         public void down(Event evt) {
             if(channel != null) {
                 channel.down(evt);
             }
             else
-                if(this.log.isErrorEnabled()) {
-                    this.log.error("channel == null");
+                if(this.log.isWarnEnabled()) {
+                    this.log.warn("channel is null, discarding event " + evt);
                 }
         }
         /* ----------------------- End of Protocol Interface ------------------------ */
@@ -814,13 +795,7 @@ public class MessageDispatcher implements RequestHandler {
             }
 
             Vector new_mbrs=v.getMembers();
-            if(new_mbrs != null) {
-                members.removeAllElements();
-                for(int i=0; i < new_mbrs.size(); i++) {
-                    members.addElement(new_mbrs.elementAt(i));
-                }
-            }
-
+            setMembers(new_mbrs);
             if(membership_listener != null) {
                 membership_listener.viewAccepted(v);
             }

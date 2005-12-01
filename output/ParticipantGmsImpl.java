@@ -1,11 +1,8 @@
-// $Id: ParticipantGmsImpl.java,v 1.9 2004/09/23 16:29:38 belaban Exp $
+// $Id: ParticipantGmsImpl.java,v 1.17 2005/12/23 14:57:06 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Message;
-import org.jgroups.View;
+import org.jgroups.*;
 import org.jgroups.util.Promise;
 
 import java.util.Vector;
@@ -17,7 +14,7 @@ public class ParticipantGmsImpl extends GmsImpl {
 
 
     public ParticipantGmsImpl(GMS g) {
-        gms=g;
+        super(g);
     }
 
 
@@ -49,11 +46,12 @@ public class ParticipantGmsImpl extends GmsImpl {
         while((coord=gms.determineCoordinator()) != null && max_tries-- > 0) {
             if(gms.local_addr.equals(coord)) {            // I'm the coordinator
                 gms.becomeCoordinator();
-                gms.getImpl().handleLeave(mbr, false);    // regular leave
+                // gms.getImpl().handleLeave(mbr, false);    // regular leave
+                gms.getImpl().leave(mbr);    // regular leave
                 return;
             }
 
-            if(log.isDebugEnabled()) log.debug("sending LEAVE request to " + coord);
+            if(log.isDebugEnabled()) log.debug("sending LEAVE request to " + coord + " (local_addr=" + gms.local_addr + ")");
             sendLeaveMessage(coord, mbr);
             synchronized(leave_promise) {
                 result=leave_promise.getResult(gms.leave_timeout);
@@ -66,7 +64,7 @@ public class ParticipantGmsImpl extends GmsImpl {
 
 
     public void handleJoinResponse(JoinRsp join_rsp) {
-        wrongMethod("handleJoinResponse");
+        // wrongMethod("handleJoinResponse");
     }
 
     public void handleLeaveResponse() {
@@ -92,14 +90,11 @@ public class ParticipantGmsImpl extends GmsImpl {
     }
 
 
-    public JoinRsp handleJoin(Address mbr) {
-        wrongMethod("handleJoin");
-        return null;
+    public void handleJoin(Address mbr) {
     }
 
 
     public void handleLeave(Address mbr, boolean suspected) {
-        wrongMethod("handleLeave");
     }
 
 
@@ -122,8 +117,6 @@ public class ParticipantGmsImpl extends GmsImpl {
 
 
     public void handleSuspect(Address mbr) {
-        Vector suspects=null;
-
         if(mbr == null) return;
         if(!suspected_mbrs.contains(mbr))
             suspected_mbrs.addElement(mbr);
@@ -134,13 +127,18 @@ public class ParticipantGmsImpl extends GmsImpl {
             if(log.isDebugEnabled()) log.debug("suspected mbr=" + mbr + "), members are " +
                     gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
 
-            suspects=(Vector)suspected_mbrs.clone();
             suspected_mbrs.removeAllElements();
             gms.becomeCoordinator();
-            gms.castViewChange(null, null, suspects);
+            // gms.getImpl().suspect(mbr);
+            gms.view_handler.add(new GMS.Request(GMS.Request.SUSPECT, mbr, true, null));
+            gms.ack_collector.suspect(mbr);
         }
     }
 
+    public void handleMergeRequest(Address sender, ViewId merge_id) {
+        // only coords handle this method; reject it if we're not coord
+        sendMergeRejectedResponse(sender, merge_id);
+    }
 
     /* ---------------------------------- Private Methods --------------------------------------- */
 
@@ -153,7 +151,7 @@ public class ParticipantGmsImpl extends GmsImpl {
      * local_addr. Therefore, true is returned.
      */
     boolean wouldIBeCoordinator() {
-        Address new_coord=null;
+        Address new_coord;
         Vector mbrs=gms.members.getMembers(); // getMembers() returns a *copy* of the membership vector
 
         for(int i=0; i < suspected_mbrs.size(); i++)

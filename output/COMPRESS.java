@@ -1,14 +1,13 @@
 package org.jgroups.protocols;
 
 import org.jgroups.Event;
+import org.jgroups.Global;
 import org.jgroups.Header;
 import org.jgroups.Message;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.Util;
+import org.jgroups.util.Streamable;
 
-import java.io.IOException;
-import java.io.ObjectInput;
-import java.io.ObjectOutput;
+import java.io.*;
 import java.util.Properties;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
@@ -18,7 +17,7 @@ import java.util.zip.Inflater;
  * Compresses the payload of a message. Goal is to reduce the number of messages sent across the wire.
  * Should ideally be layered somewhere above a fragmentation protocol (e.g. FRAG).
  * @author Bela Ban
- * @version $Id: COMPRESS.java,v 1.5 2004/05/14 13:33:56 belaban Exp $
+ * @version $Id: COMPRESS.java,v 1.10 2005/11/03 11:42:59 belaban Exp $
  */
 public class COMPRESS extends Protocol {
 
@@ -68,8 +67,7 @@ public class COMPRESS extends Protocol {
         }
 
         if(props.size() > 0) {
-            System.err.println("COMPRESS.setProperties(): the following properties are not recognized:");
-            props.list(System.out);
+            log.error("COMPRESS.setProperties(): the following properties are not recognized: " + props);
             return false;
         }
         return true;
@@ -86,20 +84,20 @@ public class COMPRESS extends Protocol {
             CompressHeader hdr=(CompressHeader)msg.removeHeader(name);
             if(hdr != null) {
                 byte[] compressed_payload=msg.getRawBuffer();
-                if(compressed_payload != null) {
+                if(compressed_payload != null && compressed_payload.length > 0) {
                     int original_size=hdr.original_size;
                     byte[] uncompressed_payload=new byte[original_size];
                     inflater.reset();
                     inflater.setInput(compressed_payload, msg.getOffset(), msg.getLength());
                     try {
                         inflater.inflate(uncompressed_payload);
-                        if(log.isTraceEnabled())
+                        if(trace)
                             log.trace("uncompressed " + compressed_payload.length + " bytes to " +
                                     original_size + " bytes");
                         msg.setBuffer(uncompressed_payload);
                     }
                     catch(DataFormatException e) {
-                        if(log.isErrorEnabled()) log.error("exception on uncompression: " + Util.printStackTrace(e));
+                        if(log.isErrorEnabled()) log.error("exception on uncompression: " + e);
                     }
                 }
             }
@@ -132,7 +130,7 @@ public class COMPRESS extends Protocol {
                 System.arraycopy(compressed_payload, 0, new_payload, 0, compressed_size);
                 msg.setBuffer(new_payload);
                 msg.putHeader(name, new CompressHeader(length));
-                if(log.isTraceEnabled())
+                if(trace)
                     log.trace("compressed payload from " + length + " bytes to " + compressed_size + " bytes");
             }
         }
@@ -142,7 +140,7 @@ public class COMPRESS extends Protocol {
 
 
 
-    public static class CompressHeader extends Header {
+    public static class CompressHeader extends Header implements Streamable {
         int original_size=0;
 
         public CompressHeader() {
@@ -155,7 +153,7 @@ public class COMPRESS extends Protocol {
 
 
         public long size() {
-            return 16;
+            return Global.INT_SIZE;
         }
 
         public void writeExternal(ObjectOutput out) throws IOException {
@@ -163,6 +161,14 @@ public class COMPRESS extends Protocol {
         }
 
         public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+            original_size=in.readInt();
+        }
+
+        public void writeTo(DataOutputStream out) throws IOException {
+            out.writeInt(original_size);
+        }
+
+        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
             original_size=in.readInt();
         }
     }

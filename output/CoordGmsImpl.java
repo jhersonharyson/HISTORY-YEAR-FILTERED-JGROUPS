@@ -1,4 +1,4 @@
-// $Id: CoordGmsImpl.java,v 1.17 2004/10/05 15:30:06 belaban Exp $
+// $Id: CoordGmsImpl.java,v 1.40 2005/12/23 14:57:06 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
@@ -6,7 +6,6 @@ package org.jgroups.protocols.pbcast;
 import org.jgroups.*;
 import org.jgroups.util.TimeScheduler;
 
-import java.io.Serializable;
 import java.util.Iterator;
 import java.util.Vector;
 
@@ -23,35 +22,40 @@ public class CoordGmsImpl extends GmsImpl {
     private final MergeTask  merge_task=new MergeTask();
     private final Vector     merge_rsps=new Vector(11);
     // for MERGE_REQ/MERGE_RSP correlation, contains MergeData elements
-    private Serializable     merge_id=null;
+    private ViewId           merge_id=null;
 
     private Address          merge_leader=null;
 
     private MergeCanceller   merge_canceller=null;
 
+    private final Object     merge_canceller_mutex=new Object();
 
 
     public CoordGmsImpl(GMS g) {
-        gms=g;
+        super(g);
     }
 
 
-    void setMergeId(Serializable merge_id) {
+    private void setMergeId(ViewId merge_id) {
         this.merge_id=merge_id;
-        if(this.merge_id != null) {
-            stopMergeCanceller();
-            merge_canceller=new MergeCanceller(this.merge_id, gms.merge_timeout);
-            gms.timer.add(merge_canceller);
-        }
-        else { // merge completed
-            stopMergeCanceller();
+        synchronized(merge_canceller_mutex) {
+            if(this.merge_id != null) {
+                stopMergeCanceller();
+                merge_canceller=new MergeCanceller(this.merge_id, gms.merge_timeout);
+                gms.timer.add(merge_canceller);
+            }
+            else { // merge completed
+                stopMergeCanceller();
+            }
         }
     }
 
     private void stopMergeCanceller() {
-        if(merge_canceller != null) {
-            merge_canceller.cancel();
-            merge_canceller=null;
+        synchronized(merge_canceller_mutex) {
+            if(merge_canceller != null) {
+                merge_canceller.cancel();
+                merge_canceller=null;
+            }
         }
     }
 
@@ -72,7 +76,10 @@ public class CoordGmsImpl extends GmsImpl {
         }
         if(mbr.equals(gms.local_addr))
             leaving=true;
-        handleLeave(mbr, false); // regular leave
+        // handleLeave(mbr, false); // regular leave
+        gms.view_handler.add(new GMS.Request(GMS.Request.LEAVE, mbr, false, null));
+        gms.view_handler.stop(true); // wait until all requests have been processed, then close the queue and leave
+        gms.view_handler.waitUntilCompleted(gms.leave_timeout);
     }
 
     public void handleJoinResponse(JoinRsp join_rsp) {
@@ -80,7 +87,6 @@ public class CoordGmsImpl extends GmsImpl {
     }
 
     public void handleLeaveResponse() {
-        ; // safely ignore this
     }
 
     public void suspect(Address mbr) {
@@ -100,18 +106,18 @@ public class CoordGmsImpl extends GmsImpl {
         Membership tmp;
 
         if(merging) {
-            if(log.isWarnEnabled()) log.warn("merge already in progress, discarded MERGE event");
+            if(warn) log.warn("merge already in progress, discarded MERGE event (I am " + gms.local_addr + ")");
             return;
         }
         merge_leader=null;
         if(other_coords == null) {
-            if(log.isWarnEnabled()) log.warn("list of other coordinators is null. Will not start merge.");
+            if(warn) log.warn("list of other coordinators is null. Will not start merge.");
             return;
         }
 
         if(other_coords.size() <= 1) {
-            if(log.isErrorEnabled()) log.error("number of coordinators found is "
-                                               + other_coords.size() + "; will not perform merge");
+            if(log.isErrorEnabled())
+                log.error("number of coordinators found is " + other_coords.size() + "; will not perform merge");
             return;
         }
 
@@ -119,10 +125,15 @@ public class CoordGmsImpl extends GmsImpl {
         tmp=new Membership(other_coords);
         tmp.sort();
         merge_leader=(Address)tmp.elementAt(0);
-        if(log.isDebugEnabled()) log.debug("coordinators in merge protocol are: " + tmp);
-        if(merge_leader.equals(gms.local_addr)) {
-            if(log.isDebugEnabled()) log.debug("I (" + merge_leader + ") will be the leader. Starting the merge task");
+        // if(log.isDebugEnabled()) log.debug("coordinators in merge protocol are: " + tmp);
+        if(merge_leader.equals(gms.local_addr) || gms.merge_leader) {
+            if(trace)
+                log.trace("I (" + gms.local_addr + ") will be the leader. Starting the merge task");
             startMergeTask(other_coords);
+        }
+        else {
+            if(trace) log.trace("I (" + gms.local_addr + ") am not the merge leader, " +
+                    "waiting for merge leader (" + merge_leader + ")to initiate merge");
         }
     }
 
@@ -130,7 +141,7 @@ public class CoordGmsImpl extends GmsImpl {
      * Get the view and digest and send back both (MergeData) in the form of a MERGE_RSP to the sender.
      * If a merge is already in progress, send back a MergeData with the merge_rejected field set to true.
      */
-    public void handleMergeRequest(Address sender, Object merge_id) {
+    public void handleMergeRequest(Address sender, ViewId merge_id) {
         Digest digest;
         View view;
 
@@ -140,19 +151,24 @@ public class CoordGmsImpl extends GmsImpl {
         }
         if(merging) {
             if(log.isErrorEnabled()) log.error("merge already in progress");
-            sendMergeRejectedResponse(sender);
+            sendMergeRejectedResponse(sender, merge_id);
             return;
         }
         merging=true;
-        setMergeId((Serializable)merge_id);
+
+        /* Clears the view handler queue and discards all JOIN/LEAVE/MERGE requests until after the MERGE  */
+        gms.view_handler.suspend(merge_id);
+
+        setMergeId(merge_id);
         if(log.isDebugEnabled()) log.debug("sender=" + sender + ", merge_id=" + merge_id);
         digest=gms.getDigest();
         view=new View(gms.view_id.copy(), gms.members.getMembers());
+        gms.passDown(new Event(Event.ENABLE_UNICASTS_TO, sender));
         sendMergeResponse(sender, view, digest);
     }
 
 
-    MergeData getMergeResponse(Address sender, Object merge_id) {
+    private MergeData getMergeResponse(Address sender, ViewId merge_id) {
         Digest         digest;
         View           view;
         MergeData      retval;
@@ -168,29 +184,35 @@ public class CoordGmsImpl extends GmsImpl {
             return retval;
         }
         merging=true;
-        setMergeId((Serializable)merge_id);
+        setMergeId(merge_id);
         if(log.isDebugEnabled()) log.debug("sender=" + sender + ", merge_id=" + merge_id);
 
-        digest=gms.getDigest();
-        view=new View(gms.view_id.copy(), gms.members.getMembers());
-        retval=new MergeData(sender, view, digest);
-        retval.view=view;
-        retval.digest=digest;
+        try {
+            digest=gms.getDigest();
+            view=new View(gms.view_id.copy(), gms.members.getMembers());
+            retval=new MergeData(sender, view, digest);
+            retval.view=view;
+            retval.digest=digest;
+        }
+        catch(NullPointerException null_ex) {
+            return null;
+        }
         return retval;
     }
 
 
-    public void handleMergeResponse(MergeData data, Object merge_id) {
+    public void handleMergeResponse(MergeData data, ViewId merge_id) {
         if(data == null) {
             if(log.isErrorEnabled()) log.error("merge data is null");
             return;
         }
         if(merge_id == null || this.merge_id == null) {
-            if(log.isErrorEnabled()) log.error("merge_id ("
+            if(log.isErrorEnabled())
+                log.error("merge_id ("
                     + merge_id
                     + ") or this.merge_id ("
                     + this.merge_id
-                    + ") == null (sender="
+                    + ") is null (sender="
                     + data.getSender()
                     + ").");
             return;
@@ -214,34 +236,46 @@ public class CoordGmsImpl extends GmsImpl {
     }
 
     /**
-     * If merge_id != this.merge_id --> discard
+     * If merge_id is not equal to this.merge_id then discard.
      * Else cast the view/digest to all members of this group.
      */
-    public void handleMergeView(MergeData data, Object merge_id) {
+    public void handleMergeView(MergeData data, ViewId merge_id) {
         if(merge_id == null
                 || this.merge_id == null
                 || !this.merge_id.equals(merge_id)) {
             if(log.isErrorEnabled()) log.error("merge_ids don't match (or are null); merge view discarded");
             return;
         }
-        gms.castViewChange(data.view, data.digest);
+        java.util.List my_members=gms.view != null? gms.view.getMembers() : null;
+
+        // only send to our *current* members, if we have A and B being merged (we are B), then we would *not*
+        // receive a VIEW_ACK from A because A doesn't see us in the pre-merge view yet and discards the view
+
+        GMS.Request req=new GMS.Request(GMS.Request.VIEW);
+        req.view=data.view;
+        req.digest=data.digest;
+        req.target_members=my_members;
+        gms.view_handler.add(req, true, // at head so it is processed next
+                             true);     // un-suspend the queue
         merging=false;
-        merge_id=null;
     }
 
-    public void handleMergeCancelled(Object merge_id) {
+    public void handleMergeCancelled(ViewId merge_id) {
         if(merge_id != null
                 && this.merge_id != null
                 && this.merge_id.equals(merge_id)) {
-            if(log.isDebugEnabled()) log.debug("merge was cancelled (merge_id=" + merge_id + ')');
+            if(log.isDebugEnabled()) log.debug("merge was cancelled (merge_id=" + merge_id + ", local_addr=" +
+                    gms.local_addr +")");
             setMergeId(null);
             this.merge_leader=null;
             merging=false;
+            gms.view_handler.resume(merge_id);
         }
     }
 
 
     private void cancelMerge() {
+        Object tmp=merge_id;
         if(merge_id != null && log.isDebugEnabled()) log.debug("cancelling merge (merge_id=" + merge_id + ')');
         setMergeId(null);
         this.merge_leader=null;
@@ -250,77 +284,100 @@ public class CoordGmsImpl extends GmsImpl {
         synchronized(merge_rsps) {
             merge_rsps.clear();
         }
+        gms.view_handler.resume(tmp);
     }
 
     /**
      * Computes the new view (including the newly joined member) and get the digest from PBCAST.
      * Returns both in the form of a JoinRsp
      */
-    public synchronized JoinRsp handleJoin(Address mbr) {
-        Vector new_mbrs=new Vector(1);
-        View v=null;
+    public synchronized void handleJoin(Address mbr) {
+        View v;
         Digest d, tmp;
+        JoinRsp join_rsp;
 
-        if(log.isDebugEnabled()) log.debug("mbr=" + mbr);
+        if(mbr == null) {
+            if(log.isErrorEnabled()) log.error("mbr is null");
+            return;
+        }
         if(gms.local_addr.equals(mbr)) {
             if(log.isErrorEnabled()) log.error("cannot join myself !");
-            return null;
+            return;
         }
-
-        if(gms.members.contains(mbr)) {
-            if(log.isErrorEnabled())
-                log.error("member " + mbr + " already present; returning existing view " + gms.members.getMembers());
-            return new JoinRsp(new View(gms.view_id, gms.members.getMembers()), gms.getDigest());
-            // already joined: return current digest and membership
+        if(log.isDebugEnabled()) log.debug("mbr=" + mbr);
+        if(gms.members.contains(mbr)) { // already joined: return current digest and membership
+            if(log.isWarnEnabled())
+                log.warn(mbr + " already present; returning existing view " + gms.view);
+            join_rsp=new JoinRsp(new View(gms.view_id, gms.members.getMembers()), gms.getDigest());
+            sendJoinResponse(join_rsp, mbr);
+            return;
         }
+        Vector new_mbrs=new Vector(1);
         new_mbrs.addElement(mbr);
         tmp=gms.getDigest(); // get existing digest
         if(tmp == null) {
             if(log.isErrorEnabled()) log.error("received null digest from GET_DIGEST: will cause JOIN to fail");
-            return null;
+            return;
         }
-        if(log.isDebugEnabled()) log.debug("got digest=" + tmp);
 
-        d=new Digest(tmp.size() + 1);
-        // create a new digest, which contains 1 more member
+        d=new Digest(tmp.size() + 1); // create a new digest, which contains 1 more member
         d.add(tmp); // add the existing digest to the new one
-        d.add(mbr, 0, 0);
-        // ... and add the new member. it's first seqno will be 1
+        d.add(mbr, 0, 0); // ... and add the new member. it's first seqno will be 1
         v=gms.getNextView(new_mbrs, null, null);
         if(log.isDebugEnabled()) log.debug("joined member " + mbr + ", view is " + v);
-        return new JoinRsp(v, d);
+        join_rsp=new JoinRsp(v, d);
+
+        // 2. Send down a local TMP_VIEW event. This is needed by certain layers (e.g. NAKACK) to compute correct digest
+        //    in case client's next request (e.g. getState()) reaches us *before* our own view change multicast.
+        // Check NAKACK's TMP_VIEW handling for details
+        if(join_rsp.getView() != null)
+            gms.passDown(new Event(Event.TMP_VIEW, join_rsp.getView()));
+
+        // 3. Return result to client
+        sendJoinResponse(join_rsp, mbr);
+
+        // 4. Broadcast the new view
+        gms.castViewChange(join_rsp.getView(), null);
     }
+
+
+
+
 
     /**
-     Exclude <code>mbr</code> from the membership. If <code>suspected</code> is true, then
-     this member crashed and therefore is forced to leave, otherwise it is leaving voluntarily.
-     */
-    public synchronized void handleLeave(Address mbr, boolean suspected) {
-        Vector v=new Vector(1);
-        // contains either leaving mbrs or suspected mbrs
-        if(log.isDebugEnabled()) log.debug("mbr=" + mbr);
-        if(!gms.members.contains(mbr)) {
-            if(log.isErrorEnabled()) log.error("mbr " + mbr + " is not a member !");
-            return;
-        }
+      Exclude <code>mbr</code> from the membership. If <code>suspected</code> is true, then
+      this member crashed and therefore is forced to leave, otherwise it is leaving voluntarily.
+      */
+     public void handleLeave(Address mbr, boolean suspected) {
+         Vector v=new Vector(1);
+         // contains either leaving mbrs or suspected mbrs
+         if(log.isDebugEnabled()) log.debug("mbr=" + mbr);
+         if(!gms.members.contains(mbr)) {
+             if(trace) log.trace("mbr " + mbr + " is not a member !");
+             return;
+         }
 
-        if(gms.view_id == null) {
-            // we're probably not the coord anymore (we just left ourselves), let someone else do it
-            // (client will retry when it doesn't get a response
-            if(log.isDebugEnabled())
-                log.debug("gms.view_id is null, I'm not the coordinator anymore (leaving=" + leaving +
-                          "); the new coordinator will handle the leave request");
-            return;
-        }
+         if(gms.view_id == null) {
+             // we're probably not the coord anymore (we just left ourselves), let someone else do it
+             // (client will retry when it doesn't get a response
+             if(log.isDebugEnabled())
+                 log.debug("gms.view_id is null, I'm not the coordinator anymore (leaving=" + leaving +
+                           "); the new coordinator will handle the leave request");
+             return;
+         }
 
-        sendLeaveResponse(mbr); // send an ack to the leaving member
+         sendLeaveResponse(mbr); // send an ack to the leaving member
 
-        v.addElement(mbr);
-        if(suspected)
-            gms.castViewChange(null, null, v);
-        else
-            gms.castViewChange(null, v, null);
-    }
+         v.addElement(mbr);
+
+         if(suspected)
+             gms.castViewChange(null, null, v);
+         else
+             gms.castViewChange(null, v, null);
+     }
+
+
+
 
     void sendLeaveResponse(Address mbr) {
         Message msg=new Message(mbr, null, null);
@@ -351,7 +408,7 @@ public class CoordGmsImpl extends GmsImpl {
 
     public void handleSuspect(Address mbr) {
         if(mbr.equals(gms.local_addr)) {
-            if(log.isWarnEnabled()) log.warn("I am the coord and I'm being am suspected -- will probably leave shortly");
+            if(warn) log.warn("I am the coord and I'm being am suspected -- will probably leave shortly");
             return;
         }
         handleLeave(mbr, true); // irregular leave - forced
@@ -380,6 +437,13 @@ public class CoordGmsImpl extends GmsImpl {
         }
     }
 
+    private void sendJoinResponse(JoinRsp rsp, Address dest) {
+        Message m=new Message(dest, null, null);
+        GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP, rsp);
+        m.putHeader(gms.getName(), hdr);
+        gms.passDown(new Event(Event.MSG, m));
+    }
+
     /**
      * Sends a MERGE_REQ to all coords and populates a list of MergeData (in merge_rsps). Returns after coords.size()
      * response have been received, or timeout msecs have elapsed (whichever is first).<p>
@@ -388,29 +452,35 @@ public class CoordGmsImpl extends GmsImpl {
      * @param coords A list of Addresses of subgroup coordinators (inluding myself)
      * @param timeout Max number of msecs to wait for the merge responses from the subgroup coords
      */
-    void getMergeDataFromSubgroupCoordinators(Vector coords, long timeout) {
+    private void getMergeDataFromSubgroupCoordinators(Vector coords, long timeout) {
         Message msg;
         GMS.GmsHeader hdr;
-        Address coord;
-        long curr_time, time_to_wait=0, end_time;
-        int num_rsps_expected=0;
+
+        long curr_time, time_to_wait, end_time, start, stop;
+        int num_rsps_expected;
 
         if(coords == null || coords.size() <= 1) {
             if(log.isErrorEnabled()) log.error("coords == null or size <= 1");
             return;
         }
 
+        start=System.currentTimeMillis();
+        MergeData tmp;
         synchronized(merge_rsps) {
             merge_rsps.removeAllElements();
-
             if(log.isDebugEnabled()) log.debug("sending MERGE_REQ to " + coords);
+            Address coord;
             for(int i=0; i < coords.size(); i++) {
                 coord=(Address)coords.elementAt(i);
-
                 if(gms.local_addr != null && gms.local_addr.equals(coord)) {
-                    merge_rsps.add(getMergeResponse(gms.local_addr, merge_id));
+                    tmp=getMergeResponse(gms.local_addr, merge_id);
+                    if(tmp != null)
+                        merge_rsps.add(tmp);
                     continue;
                 }
+
+                // this allows UNICAST to remove coord from previous_members in case of a merge
+                gms.passDown(new Event(Event.ENABLE_UNICASTS_TO, coord));
 
                 msg=new Message(coord, null, null);
                 hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_REQ);
@@ -441,13 +511,16 @@ public class CoordGmsImpl extends GmsImpl {
                     break;
                 curr_time=System.currentTimeMillis();
             }
+            stop=System.currentTimeMillis();
+            if(trace)
+                log.trace("collected " + merge_rsps.size() + " merge response(s) in " + (stop-start) + "ms");
         }
     }
 
     /**
      * Generates a unique merge id by taking the local address and the current time
      */
-    Serializable generateMergeId() {
+    private ViewId generateMergeId() {
         return new ViewId(gms.local_addr, System.currentTimeMillis());
         // we're (ab)using ViewId as a merge id
     }
@@ -462,16 +535,16 @@ public class CoordGmsImpl extends GmsImpl {
      * @param v A list of MergeData items. Elements with merge_rejected=true were removed before. Is guaranteed
      *          not to be null and to contain at least 1 member.
      */
-    MergeData consolidateMergeData(Vector v) {
-        MergeData ret=null;
+    private MergeData consolidateMergeData(Vector v) {
+        MergeData ret;
         MergeData tmp_data;
         long logical_time=0; // for new_vid
         ViewId new_vid, tmp_vid;
         MergeView new_view;
         View tmp_view;
         Membership new_mbrs=new Membership();
-        int num_mbrs=0;
-        Digest new_digest=null;
+        int num_mbrs;
+        Digest new_digest;
         Address new_coord;
         Vector subgroups=new Vector(11);
         // contains a list of Views, each View is a subgroup
@@ -522,7 +595,7 @@ public class CoordGmsImpl extends GmsImpl {
      * Merge all digests into one. For each sender, the new value is min(low_seqno), max(high_seqno),
      * max(high_seqno_seen)
      */
-    Digest consolidateDigests(Vector v, int num_mbrs) {
+    private Digest consolidateDigests(Vector v, int num_mbrs) {
         MergeData data;
         Digest tmp_digest, retval=new Digest(num_mbrs);
 
@@ -546,7 +619,7 @@ public class CoordGmsImpl extends GmsImpl {
      *     the new view
      * </ol>
      */
-    void sendMergeView(Vector coords, MergeData combined_merge_data) {
+    private void sendMergeView(Vector coords, MergeData combined_merge_data) {
         Message msg;
         GMS.GmsHeader hdr;
         Address coord;
@@ -555,6 +628,7 @@ public class CoordGmsImpl extends GmsImpl {
 
         if(coords == null || combined_merge_data == null)
             return;
+
         v=combined_merge_data.view;
         d=combined_merge_data.digest;
         if(v == null || d == null) {
@@ -562,12 +636,15 @@ public class CoordGmsImpl extends GmsImpl {
             return;
         }
 
+        if(trace)
+            log.trace("sending merge view " + v.getVid() + " to coordinators " + coords);
+
         for(int i=0; i < coords.size(); i++) {
             coord=(Address)coords.elementAt(i);
             msg=new Message(coord, null, null);
             hdr=new GMS.GmsHeader(GMS.GmsHeader.INSTALL_MERGE_VIEW);
             hdr.view=v;
-            hdr.digest=d;
+            hdr.my_digest=d;
             hdr.merge_id=merge_id;
             msg.putHeader(gms.getName(), hdr);
             gms.passDown(new Event(Event.MSG, msg));
@@ -577,28 +654,19 @@ public class CoordGmsImpl extends GmsImpl {
     /**
      * Send back a response containing view and digest to sender
      */
-    void sendMergeResponse(Address sender, View view, Digest digest) {
+    private void sendMergeResponse(Address sender, View view, Digest digest) {
         Message msg=new Message(sender, null, null);
         GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP);
         hdr.merge_id=merge_id;
         hdr.view=view;
-        hdr.digest=digest;
+        hdr.my_digest=digest;
         msg.putHeader(gms.getName(), hdr);
         if(log.isDebugEnabled()) log.debug("response=" + hdr);
         gms.passDown(new Event(Event.MSG, msg));
     }
 
-    void sendMergeRejectedResponse(Address sender) {
-        Message msg=new Message(sender, null, null);
-        GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP);
-        hdr.merge_rejected=true;
-        hdr.merge_id=merge_id;
-        msg.putHeader(gms.getName(), hdr);
-        if(log.isDebugEnabled()) log.debug("response=" + hdr);
-        gms.passDown(new Event(Event.MSG, msg));
-    }
 
-    void sendMergeCancelledMessage(Vector coords, Serializable merge_id) {
+    private void sendMergeCancelledMessage(Vector coords, ViewId merge_id) {
         Message msg;
         GMS.GmsHeader hdr;
         Address coord;
@@ -618,7 +686,7 @@ public class CoordGmsImpl extends GmsImpl {
     }
 
     /** Removed rejected merge requests from merge_rsps and coords */
-    void removeRejectedMergeRequests(Vector coords) {
+    private void removeRejectedMergeRequests(Vector coords) {
         MergeData data;
         for(Iterator it=merge_rsps.iterator(); it.hasNext();) {
             data=(MergeData)it.next();
@@ -645,9 +713,9 @@ public class CoordGmsImpl extends GmsImpl {
         Vector coords=null; // list of subgroup coordinators to be contacted
 
         public void start(Vector coords) {
-            if(t == null) {
+            if(t == null || !t.isAlive()) {
                 this.coords=(Vector)(coords != null? coords.clone() : null);
-                t=new Thread(this, "MergeTask thread");
+                t=new Thread(this, "MergeTask");
                 t.setDaemon(true);
                 t.start();
             }
@@ -671,14 +739,14 @@ public class CoordGmsImpl extends GmsImpl {
          * Runs the merge protocol as a leader
          */
         public void run() {
-            MergeData combined_merge_data=null;
+            MergeData combined_merge_data;
 
             if(merging == true) {
-                if(log.isWarnEnabled()) log.warn("merge is already in progress, terminating");
+                if(warn) log.warn("merge is already in progress, terminating");
                 return;
             }
 
-            if(log.isDebugEnabled()) log.debug("merge task started");
+            if(log.isDebugEnabled()) log.debug("merge task started, coordinators are " + this.coords);
             try {
 
                 /* 1. Generate a merge_id that uniquely identifies the merge in progress */
@@ -692,7 +760,7 @@ public class CoordGmsImpl extends GmsImpl {
                 removeRejectedMergeRequests(coords);
 
                 if(merge_rsps.size() <= 1) {
-                    if(log.isWarnEnabled())
+                    if(warn)
                         log.warn("merge responses from subgroup coordinators <= 1 (" + merge_rsps + "). Cancelling merge");
                     sendMergeCancelledMessage(coords, merge_id);
                     return;
@@ -706,14 +774,20 @@ public class CoordGmsImpl extends GmsImpl {
                     return;
                 }
 
-                /* 5. Send the new View/Digest to all coordinators (including myself). On reception, they will
+                /* 5. Don't allow JOINs or LEAVEs until we are done with the merge. Suspend() will clear the
+                      view handler queue, so no requests beyond this current MERGE request will be processed */
+                gms.view_handler.suspend(merge_id);
+
+                /* 6. Send the new View/Digest to all coordinators (including myself). On reception, they will
                    install the digest and view in all of their subgroup members */
                 sendMergeView(coords, combined_merge_data);
             }
             catch(Throwable ex) {
-                if(log.isErrorEnabled()) log.error("exception=" + ex);
+                if(log.isErrorEnabled()) log.error("exception while merging", ex);
             }
             finally {
+                sendMergeCancelledMessage(coords, merge_id);
+                stopMergeCanceller(); // this is probably not necessary
                 merging=false;
                 merge_leader=null;
                 if(log.isDebugEnabled()) log.debug("merge task terminated");
@@ -728,7 +802,7 @@ public class CoordGmsImpl extends GmsImpl {
         private long timeout;
         private boolean cancelled=false;
 
-        public MergeCanceller(Object my_merge_id, long timeout) {
+        MergeCanceller(Object my_merge_id, long timeout) {
             this.my_merge_id=my_merge_id;
             this.timeout=timeout;
         }
@@ -747,13 +821,13 @@ public class CoordGmsImpl extends GmsImpl {
 
         public void run() {
             if(merge_id != null && my_merge_id.equals(merge_id)) {
-                if(log.isTraceEnabled())
+                if(trace)
                     log.trace("cancelling merge due to timer timeout (" + timeout + " ms)");
                 cancelMerge();
                 cancelled=true;
             }
             else {
-                if(log.isTraceEnabled())
+                if(trace)
                     log.trace("timer kicked in after " + timeout + " ms, but no (or different) merge was in progress: " +
                               "merge_id=" + merge_id + ", my_merge_id=" + my_merge_id);
             }

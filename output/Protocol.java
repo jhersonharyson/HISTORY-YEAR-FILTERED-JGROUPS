@@ -1,4 +1,4 @@
-// $Id: Protocol.java,v 1.20 2004/09/23 16:29:53 belaban Exp $
+// $Id: Protocol.java,v 1.34 2005/10/27 16:05:04 belaban Exp $
 
 package org.jgroups.stack;
 
@@ -8,8 +8,8 @@ import org.apache.commons.logging.LogFactory;
 import org.jgroups.Event;
 import org.jgroups.util.Queue;
 import org.jgroups.util.QueueClosedException;
-import org.jgroups.util.Util;
 
+import java.util.Map;
 import java.util.Properties;
 import java.util.Vector;
 
@@ -57,14 +57,12 @@ class UpHandler extends Thread {
                     }
                 }
                 handler.up(evt);
-                evt=null;
             }
             catch(QueueClosedException queue_closed) {
                 break;
             }
             catch(Throwable e) {
-                if(log.isWarnEnabled()) log.warn(getName() + " exception: " + e);
-                e.printStackTrace();
+                if(log.isWarnEnabled()) log.warn(getName() + " caught exception", e);
             }
         }
     }
@@ -115,19 +113,17 @@ class DownHandler extends Thread {
                 }
 
                 int type=evt.getType();
-                if(type == Event.ACK || type == Event.START || type == Event.STOP) {
+                if(type == Event.START || type == Event.STOP) {
                     if(handler.handleSpecialDownEvent(evt) == false)
                         continue;
                 }
                 handler.down(evt);
-                evt=null;
             }
             catch(QueueClosedException queue_closed) {
                 break;
             }
             catch(Throwable e) {
-                if(log.isWarnEnabled()) log.warn(getName() + " exception is " + e);
-                e.printStackTrace();
+                if(log.isWarnEnabled()) log.warn(getName() + " caught exception", e);
             }
         }
     }
@@ -157,11 +153,11 @@ class DownHandler extends Thread {
  * constructor !</b>
  */
 public abstract class Protocol {
-    protected final Properties       props=new Properties();
+    protected final Properties props=new Properties();
     protected Protocol         up_prot=null, down_prot=null;
     protected ProtocolStack    stack=null;
-    protected final Queue            up_queue=new Queue();
-    protected final Queue down_queue=new Queue();
+    protected final Queue      up_queue=new Queue();
+    protected final Queue      down_queue=new Queue();
     protected UpHandler        up_handler=null;
     protected int              up_thread_prio=-1;
     protected DownHandler      down_handler=null;
@@ -170,7 +166,10 @@ public abstract class Protocol {
     private final static long  THREAD_JOIN_TIMEOUT=1000;
     protected boolean          down_thread=true;  // determines whether the down_handler thread should be started
     protected boolean          up_thread=true;    // determines whether the up_handler thread should be started
+    protected boolean          stats=true;  // determines whether to collect statistics (and expose them via JMX)
     protected final Log        log=LogFactory.getLog(this.getClass());
+    protected boolean          trace=log.isTraceEnabled();
+    protected boolean          warn=log.isWarnEnabled();
 
 
     /**
@@ -217,12 +216,63 @@ public abstract class Protocol {
             props.remove("up_thread_prio");
         }
 
+        str=props.getProperty("stats");
+        if(str != null) {
+            stats=Boolean.valueOf(str).booleanValue();
+            props.remove("stats");
+        }
+
         return setProperties(props);
     }
 
 
     public Properties getProperties() {
         return props;
+    }
+
+
+    public boolean isTrace() {
+        return trace;
+    }
+
+    public void setTrace(boolean trace) {
+        this.trace=trace;
+    }
+
+    public boolean isWarn() {
+        return warn;
+    }
+
+    public void setWarn(boolean warn) {
+        this.warn=warn;
+    }
+
+    public boolean upThreadEnabled() {
+        return up_thread;
+    }
+
+    public boolean downThreadEnabled() {
+        return down_thread;
+    }
+
+    public boolean statsEnabled() {
+        return stats;
+    }
+
+    public void enableStats(boolean flag) {
+        stats=flag;
+    }
+
+    public void resetStats() {
+        ;
+    }
+
+    public String printStats() {
+        return null;
+    }
+
+    public Map dumpStats() {
+        return null;
     }
 
 
@@ -345,7 +395,7 @@ public abstract class Protocol {
                     }
                     catch(Throwable t) {
                         if(log.isErrorEnabled()) log.error("priority " + up_thread_prio +
-                                    " could not be set for thread: " + Util.getStackTrace(t));
+                                " could not be set for thread", t);
                     }
                 }
                 up_handler.start();
@@ -366,7 +416,7 @@ public abstract class Protocol {
                     }
                     catch(Throwable t) {
                         if(log.isErrorEnabled()) log.error("priority " + down_thread_prio +
-                                    " could not be set for thread: " + Util.getStackTrace(t));
+                                " could not be set for thread", t);
                     }
                 }
                 down_handler.start();
@@ -440,7 +490,6 @@ public abstract class Protocol {
         }
         try {
             up_queue.add(evt);
-            evt=null;
         }
         catch(Exception e) {
             if(log.isWarnEnabled()) log.warn("exception: " + e);
@@ -461,7 +510,7 @@ public abstract class Protocol {
                 }
             }
             int type=evt.getType();
-            if(type == Event.ACK || type == Event.START || type == Event.STOP) {
+            if(type == Event.START || type == Event.STOP) {
                 if(handleSpecialDownEvent(evt) == false)
                     return;
             }
@@ -470,7 +519,6 @@ public abstract class Protocol {
         }
         try {
             down_queue.add(evt);
-            evt=null;
         }
         catch(Exception e) {
             if(log.isWarnEnabled()) log.warn("exception: " + e);
@@ -487,13 +535,7 @@ public abstract class Protocol {
                 return;
             }
         }
-
-        if(up_prot != null) {
-            up_prot.receiveUpEvent(evt);
-            evt=null; // give the garbage collector a hand
-        }
-        else
-            if(log.isErrorEnabled()) log.error("no upper layer available");
+        up_prot.receiveUpEvent(evt);
     }
 
     /**
@@ -506,13 +548,7 @@ public abstract class Protocol {
                 return;
             }
         }
-
-        if(down_prot != null) {
-            down_prot.receiveDownEvent(evt);
-            evt=null; // give the garbage collector a hand
-        }
-        else
-            if(log.isErrorEnabled()) log.error("no lower layer available");
+        down_prot.receiveDownEvent(evt);
     }
 
 
@@ -548,11 +584,6 @@ public abstract class Protocol {
      */
     protected boolean handleSpecialDownEvent(Event evt) {
         switch(evt.getType()) {
-            case Event.ACK:
-                if(down_prot == null) {
-                    passUp(new Event(Event.ACK_OK));
-                    return false; // don't pass down the stack
-                }
             case Event.START:
                 try {
                     start();

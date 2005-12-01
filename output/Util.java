@@ -1,21 +1,22 @@
-// $Id: Util.java,v 1.25 2004/11/29 09:29:32 belaban Exp $
+// $Id: Util.java,v 1.62 2005/11/07 08:05:54 belaban Exp $
 
 package org.jgroups.util;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.jgroups.*;
 import org.jgroups.conf.ClassConfigurator;
+import org.jgroups.protocols.FD;
+import org.jgroups.protocols.PingHeader;
+import org.jgroups.protocols.UdpHeader;
+import org.jgroups.protocols.pbcast.NakAckHeader;
 import org.jgroups.stack.IpAddress;
 
 import java.io.*;
-import java.net.BindException;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.util.ArrayList;
-import java.util.StringTokenizer;
-import java.util.Vector;
+import java.net.*;
+import java.nio.ByteBuffer;
+import java.nio.channels.WritableByteChannel;
+import java.text.NumberFormat;
+import java.util.*;
+import java.util.List;
 
 
 /**
@@ -25,11 +26,39 @@ public class Util {
     private static final Object mutex=new Object();
     private static final ByteArrayOutputStream out_stream=new ByteArrayOutputStream(512);
 
-    protected static final Log log=LogFactory.getLog(Util.class);
+    private static  NumberFormat f;
 
     // constants
     public static final int MAX_PORT=65535; // highest port allocatable
     public static final String DIAG_GROUP="DIAG_GROUP-BELA-322649"; // unique
+    static boolean resolve_dns=false;
+    static final String IGNORE_BIND_ADDRESS_PROPERTY="ignore.bind.address";
+
+    static {
+        /* Trying to get value of resolve_dns. PropertyPermission not granted if
+        * running in an untrusted environment  with JNLP */
+        try {
+            resolve_dns=Boolean.valueOf(System.getProperty("resolve.dns", "false")).booleanValue();
+        }
+        catch (SecurityException ex){
+            resolve_dns=false;
+        }
+        f=NumberFormat.getNumberInstance();
+        f.setGroupingUsed(false);
+        f.setMaximumFractionDigits(2);
+    }
+
+
+    public static void closeInputStream(InputStream inp) {
+        if(inp != null)
+            try {inp.close();} catch(IOException e) {}
+    }
+
+    public static void closeOutputStream(OutputStream out) {
+        if(out != null) {
+            try {out.close();} catch(IOException e) {}
+        }
+    }
 
 
     /**
@@ -66,53 +95,79 @@ public class Util {
     }
 
 
+     public static Streamable streamableFromByteBuffer(Class cl, byte[] buffer) throws Exception {
+        synchronized(mutex) {
+            if(buffer == null) return null;
+            Streamable retval=null;
+            ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer);
+            DataInputStream in=new DataInputStream(in_stream); // changed Nov 29 2004 (bela)
+            retval=(Streamable)cl.newInstance();
+            retval.readFrom(in);
+            in.close();
+            if(retval == null)
+                return null;
+            return retval;
+        }
+    }
+
+    public static byte[] streamableToByteBuffer(Streamable obj) throws Exception {
+        byte[] result=null;
+        synchronized(out_stream) {
+            out_stream.reset();
+            DataOutputStream out=new DataOutputStream(out_stream);
+            obj.writeTo(out);
+            result=out_stream.toByteArray();
+            out.close();
+        }
+        return result;
+    }
+
+
+    public static byte[] collectionToByteBuffer(Collection c) throws Exception {
+        byte[] result=null;
+        synchronized(out_stream) {
+            out_stream.reset();
+            DataOutputStream out=new DataOutputStream(out_stream);
+            Util.writeAddresses(c, out);
+            result=out_stream.toByteArray();
+            out.close();
+        }
+        return result;
+    }
+
+    public static int size(Address addr) {
+        int retval=Global.BYTE_SIZE; // presence byte
+        if(addr != null)
+            retval+=addr.size() + Global.BYTE_SIZE; // plus type of address
+        return retval;
+    }
+
+
     public static void writeAddress(Address addr, DataOutputStream out) throws IOException {
         if(addr == null) {
-            out.write(0);
+            out.writeBoolean(false);
             return;
         }
 
-        out.write(1);
+        out.writeBoolean(true);
         if(addr instanceof IpAddress) {
             // regular case, we don't need to include class information about the type of Address, e.g. JmsAddress
-            out.write(1);
+            out.writeBoolean(true);
             addr.writeTo(out);
         }
         else {
-            out.write(0);
+            out.writeBoolean(false);
             writeOtherAddress(addr, out);
         }
     }
 
 
 
-
-    private static void writeOtherAddress(Address addr, DataOutputStream out) throws IOException {
-        ClassConfigurator conf=null;
-        try {conf=ClassConfigurator.getInstance(false);} catch(Exception e) {}
-        int magic_number=conf != null? conf.getMagicNumber(addr.getClass()) : -1;
-
-        // write the class info
-        if(magic_number == -1) {
-            out.write(0);
-            out.writeUTF(addr.getClass().getName());
-        }
-        else {
-            out.write(1);
-            out.writeInt(magic_number);
-        }
-
-        // write the data itself
-        addr.writeTo(out);
-    }
-
     public static Address readAddress(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
         Address addr=null;
-        int b=in.read();
-        if(b == 0)
+        if(in.readBoolean() == false)
             return null;
-        b=in.read();
-        if(b == 1) {
+        if(in.readBoolean()) {
             addr=new IpAddress();
             addr.readFrom(in);
         }
@@ -143,21 +198,97 @@ public class Util {
         return addr;
     }
 
+    private static void writeOtherAddress(Address addr, DataOutputStream out) throws IOException {
+        ClassConfigurator conf=null;
+        try {conf=ClassConfigurator.getInstance(false);} catch(Exception e) {}
+        int magic_number=conf != null? conf.getMagicNumber(addr.getClass()) : -1;
+
+        // write the class info
+        if(magic_number == -1) {
+            out.write(0);
+            out.writeUTF(addr.getClass().getName());
+        }
+        else {
+            out.write(1);
+            out.writeInt(magic_number);
+        }
+
+        // write the data itself
+        addr.writeTo(out);
+    }
+
+    /**
+     * Writes a Vector of Addresses. Can contain 65K addresses at most
+     * @param v A Collection<Address>
+     * @param out
+     * @throws IOException
+     */
+    public static void writeAddresses(Collection v, DataOutputStream out) throws IOException {
+        if(v == null) {
+            out.writeShort(-1);
+            return;
+        }
+        out.writeShort(v.size());
+        Address addr;
+        for(Iterator it=v.iterator(); it.hasNext();) {
+            addr=(Address)it.next();
+            Util.writeAddress(addr, out);
+        }
+    }
+
+    /**
+     *
+     * @param in
+     * @param cl The type of Collection, e.g. Vector.class
+     * @return Collection of Address objects
+     * @throws IOException
+     * @throws IllegalAccessException
+     * @throws InstantiationException
+     */
+    public static Collection readAddresses(DataInputStream in, Class cl) throws IOException, IllegalAccessException, InstantiationException {
+        short length=in.readShort();
+        if(length < 0) return null;
+        Collection retval=(Collection)cl.newInstance();
+        Address addr;
+        for(int i=0; i < length; i++) {
+            addr=Util.readAddress(in);
+            retval.add(addr);
+        }
+        return retval;
+    }
+
+
+    /**
+     * Returns the marshalled size of a Collection of Addresses.
+     * <em>Assumes elements are of the same type !</em>
+     * @param addrs Collection<Address>
+     * @return long size
+     */
+    public static long size(Collection addrs) {
+        int retval=Global.SHORT_SIZE; // number of elements
+        if(addrs != null && addrs.size() > 0) {
+            Address addr=(Address)addrs.iterator().next();
+            retval+=size(addr) * addrs.size();
+        }
+        return retval;
+    }
+
+
+
 
     public static void writeStreamable(Streamable obj, DataOutputStream out) throws IOException {
         if(obj == null) {
-            out.write(0);
+            out.writeBoolean(false);
             return;
         }
-        out.write(1);
+        out.writeBoolean(true);
         obj.writeTo(out);
     }
 
 
     public static Streamable readStreamable(Class clazz, DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
         Streamable retval=null;
-        int b=in.read();
-        if(b == 0)
+        if(in.readBoolean() == false)
             return null;
         retval=(Streamable)clazz.newInstance();
         retval.readFrom(in);
@@ -227,6 +358,33 @@ public class Util {
         }
     }
 
+    public static void writeObject(Object obj, DataOutputStream out) throws Exception {
+       if(obj == null || !(obj instanceof Streamable)) {
+           byte[] buf=objectToByteBuffer(obj);
+           out.writeShort(buf.length);
+           out.write(buf, 0, buf.length);
+       }
+       else {
+           out.writeShort(-1);
+           writeGenericStreamable((Streamable)obj, out);
+       }
+    }
+
+    public static Object readObject(DataInputStream in) throws Exception {
+        short len=in.readShort();
+        Object retval=null;
+        if(len == -1) {
+            retval=readGenericStreamable(in);
+        }
+        else {
+            byte[] buf=new byte[len];
+            in.readFully(buf, 0, len);
+            retval=objectFromByteBuffer(buf);
+        }
+        return retval;
+    }
+
+
 
     public static void writeString(String s, DataOutputStream out) throws IOException {
         if(s != null) {
@@ -266,6 +424,53 @@ public class Util {
         }
         return null;
     }
+
+
+    /**
+       * Marshalls a list of messages.
+       * @param xmit_list LinkedList<Message>
+       * @return Buffer
+       * @throws IOException
+       */
+    public static Buffer msgListToByteBuffer(LinkedList xmit_list) throws IOException {
+        ExposedByteArrayOutputStream output=new ExposedByteArrayOutputStream(512);
+        DataOutputStream out=new DataOutputStream(output);
+        Message msg;
+        Buffer retval=null;
+
+        out.writeInt(xmit_list.size());
+        for(Iterator it=xmit_list.iterator(); it.hasNext();) {
+            msg=(Message)it.next();
+            msg.writeTo(out);
+        }
+        out.flush();
+        retval=new Buffer(output.getRawBuffer(), 0, output.size());
+        out.close();
+        output.close();
+        return retval;
+    }
+
+    public static LinkedList byteBufferToMessageList(byte[] buffer, int offset, int length) throws Exception {
+        LinkedList retval=null;
+        ByteArrayInputStream input=new ByteArrayInputStream(buffer, offset, length);
+        DataInputStream in=new DataInputStream(input);
+        int size=in.readInt();
+
+        if(size == 0)
+            return null;
+
+        Message msg;
+        retval=new LinkedList();
+        for(int i=0; i < size; i++) {
+            msg=new Message(false); // don't create headers, readFrom() will do this
+            msg.readFrom(in);
+            retval.add(msg);
+        }
+
+        return retval;
+    }
+
+
 
 
 
@@ -338,7 +543,6 @@ public class Util {
     /** Sleeps between 1 and timeout milliseconds, chosen randomly. Timeout must be > 1 */
     public static void sleepRandom(long timeout) {
         if(timeout <= 0) {
-            log.error("timeout must be > 0 !");
             return;
         }
 
@@ -384,6 +588,76 @@ public class Util {
 
 
     /**
+     * Debugging method used to dump the content of a protocol queue in a condensed form. Useful
+     * to follow the evolution of the queue's content in time.
+     */
+    public static String dumpQueue(Queue q) {
+        StringBuffer sb=new StringBuffer();
+        LinkedList values=q.values();
+        if(values.size() == 0) {
+            sb.append("empty");
+        }
+        else {
+            for(Iterator it=values.iterator(); it.hasNext();) {
+                Object o=it.next();
+                String s=null;
+                if(o instanceof Event) {
+                    Event event=(Event)o;
+                    int type=event.getType();
+                    s=Event.type2String(type);
+                    if(type == Event.VIEW_CHANGE)
+                        s+=" " + event.getArg();
+                    if(type == Event.MSG)
+                        s+=" " + event.getArg();
+
+                    if(type == Event.MSG) {
+                        s+="[";
+                        Message m=(Message)event.getArg();
+                        Map headers=m.getHeaders();
+                        for(Iterator i=headers.keySet().iterator(); i.hasNext();) {
+                            Object headerKey=i.next();
+                            Object value=headers.get(headerKey);
+                            String headerToString=null;
+                            if(value instanceof FD.FdHeader) {
+                                headerToString=value.toString();
+                            }
+                            else
+                                if(value instanceof PingHeader) {
+                                    headerToString=headerKey + "-";
+                                    if(((PingHeader)value).type == PingHeader.GET_MBRS_REQ) {
+                                        headerToString+="GMREQ";
+                                    }
+                                    else
+                                        if(((PingHeader)value).type == PingHeader.GET_MBRS_RSP) {
+                                            headerToString+="GMRSP";
+                                        }
+                                        else {
+                                            headerToString+="UNKNOWN";
+                                        }
+                                }
+                                else {
+                                    headerToString=headerKey + "-" + (value == null ? "null" : value.toString());
+                                }
+                            s+=headerToString;
+
+                            if(i.hasNext()) {
+                                s+=",";
+                            }
+                        }
+                        s+="]";
+                    }
+                }
+                else {
+                    s=o.toString();
+                }
+                sb.append(s).append("\n");
+            }
+        }
+        return sb.toString();
+    }
+
+
+    /**
      * Use with caution: lots of overhead
      */
     public static String printStackTrace(Throwable t) {
@@ -397,20 +671,7 @@ public class Util {
         return printStackTrace(t);
     }
 
-    /**
-     * Use with caution: lots of overhead
-     */
-    public static String printStackTrace() {
-        try {
-            throw new Exception("Dumping stack:");
-        }
-        catch(Throwable t) {
-            StringWriter s=new StringWriter();
-            PrintWriter p=new PrintWriter(s);
-            t.printStackTrace(p);
-            return s.toString();
-        }
-    }
+
 
     public static String print(Throwable t) {
         return printStackTrace(t);
@@ -492,10 +753,29 @@ public class Util {
         Thread.enumerate(threads);
         sb.append("------- Threads -------\n");
         for(int i=0; i < threads.length; i++) {
-            sb.append("#" + i + ": " + threads[i] + '\n');
+            sb.append("#").append(i).append(": ").append(threads[i]).append('\n');
         }
         sb.append("------- Threads -------\n");
         return sb.toString();
+    }
+
+    public static String printBytes(long bytes) {
+        double tmp;
+
+        if(bytes < 1000)
+            return bytes + "b";
+        if(bytes < 1000000) {
+            tmp=bytes / 1000.0;
+            return f.format(tmp) + "KB";
+        }
+        if(bytes < 1000000000) {
+            tmp=bytes / 1000000.0;
+            return f.format(tmp) + "MB";
+        }
+        else {
+            tmp=bytes / 1000000000.0;
+            return f.format(tmp) + "GB";
+        }
     }
 
 
@@ -505,23 +785,22 @@ public class Util {
      of 248 bytes each and 1 fragment of 32 bytes.
      @return An array of byte buffers (<code>byte[]</code>).
      */
-    public static byte[][] fragmentBuffer(byte[] buf, int frag_size) {
+    public static byte[][] fragmentBuffer(byte[] buf, int frag_size, final int length) {
         byte[] retval[];
-        long total_size=buf.length;
         int accumulated_size=0;
         byte[] fragment;
         int tmp_size=0;
         int num_frags;
         int index=0;
 
-        num_frags=buf.length % frag_size == 0 ? buf.length / frag_size : buf.length / frag_size + 1;
+        num_frags=length % frag_size == 0 ? length / frag_size : length / frag_size + 1;
         retval=new byte[num_frags][];
 
-        while(accumulated_size < total_size) {
-            if(accumulated_size + frag_size <= total_size)
+        while(accumulated_size < length) {
+            if(accumulated_size + frag_size <= length)
                 tmp_size=frag_size;
             else
-                tmp_size=(int)(total_size - accumulated_size);
+                tmp_size=length - accumulated_size;
             fragment=new byte[tmp_size];
             System.arraycopy(buf, accumulated_size, fragment, 0, tmp_size);
             retval[index++]=fragment;
@@ -529,6 +808,11 @@ public class Util {
         }
         return retval;
     }
+
+    public static byte[][] fragmentBuffer(byte[] buf, int frag_size) {
+        return fragmentBuffer(buf, frag_size, buf.length);
+    }
+
 
 
     /**
@@ -663,7 +947,7 @@ public class Util {
 
         if(array != null) {
             for(int i=0; i < array.length; i++)
-                ret.append(array[i] + " ");
+                ret.append(array[i]).append(" ");
         }
 
         ret.append(']');
@@ -675,7 +959,7 @@ public class Util {
 
         if(array != null) {
             for(int i=0; i < array.length; i++)
-                ret.append(array[i] + " ");
+                ret.append(array[i]).append(" ");
         }
 
         ret.append(']');
@@ -687,7 +971,7 @@ public class Util {
 
         if(array != null) {
             for(int i=0; i < array.length; i++)
-                ret.append(array[i] + " ");
+                ret.append(array[i]).append(" ");
         }
         ret.append(']');
         return ret.toString();
@@ -714,6 +998,14 @@ public class Util {
         }
 
         return ret;
+    }
+
+
+    public static Object pickRandomElement(Vector list) {
+        if(list == null) return null;
+        int size=list.size();
+        int index=(int)((Math.random() * size * 10) % size);
+        return list.get(index);
     }
 
 
@@ -763,7 +1055,7 @@ public class Util {
 
     /**
      Makes sure that we detect when a peer connection is in the closed state (not closed while we send data,
-     but before we send data). 2 writes ensure that, if the peer closed the connection, the first write
+     but before we send data). Two writes ensure that, if the peer closed the connection, the first write
      will send the peer from FIN to RST state, and the second will cause a signal (IOException).
      */
     public static void doubleWrite(byte[] buf, OutputStream out) throws Exception {
@@ -778,21 +1070,72 @@ public class Util {
     }
 
 
+    /**
+     Makes sure that we detect when a peer connection is in the closed state (not closed while we send data,
+     but before we send data). Two writes ensure that, if the peer closed the connection, the first write
+     will send the peer from FIN to RST state, and the second will cause a signal (IOException).
+     */
+    public static void doubleWrite(byte[] buf, int offset, int length, OutputStream out) throws Exception {
+        if(length > 1) {
+            out.write(buf, offset, 1);
+            out.write(buf, offset+1, length - 1);
+        }
+        else {
+            out.write(buf, offset, 0);
+            out.write(buf, offset, length);
+        }
+    }
+
+    /**
+    * if we were to register for OP_WRITE and send the remaining data on
+    * readyOps for this channel we have to either block the caller thread or
+    * queue the message buffers that may arrive while waiting for OP_WRITE.
+    * Instead of the above approach this method will continuously write to the
+    * channel until the buffer sent fully.
+    */
+    public static void writeFully(ByteBuffer buf, WritableByteChannel out) throws IOException {
+        int written = 0;
+        int toWrite = buf.limit();
+        while (written < toWrite) {
+            written += out.write(buf);
+        }
+    }
+
+//    /* double writes are not required.*/
+//	public static void doubleWriteBuffer(
+//		ByteBuffer buf,
+//		WritableByteChannel out)
+//		throws Exception
+//	{
+//		if (buf.limit() > 1)
+//		{
+//			int actualLimit = buf.limit();
+//			buf.limit(1);
+//			writeFully(buf,out);
+//			buf.limit(actualLimit);
+//			writeFully(buf,out);
+//		}
+//		else
+//		{
+//			buf.limit(0);
+//			writeFully(buf,out);
+//			buf.limit(1);
+//			writeFully(buf,out);
+//		}
+//	}
+
+
     public static long sizeOf(String classname) {
         Object inst;
         byte[] data;
 
         try {
-// use thread context class loader
-//
-            ClassLoader loader=Thread.currentThread().getContextClassLoader();
-            inst=loader.loadClass(classname).newInstance();
+            inst=Util.loadClass(classname, null).newInstance();
             data=Util.objectToByteBuffer(inst);
             return data.length;
         }
         catch(Exception ex) {
-            if(log.isErrorEnabled()) log.error("exception=" + ex);
-            return 0;
+            return -1;
         }
     }
 
@@ -805,9 +1148,106 @@ public class Util {
             return data.length;
         }
         catch(Exception ex) {
-            if(log.isErrorEnabled()) log.error("exception+" + ex);
-            return 0;
+            return -1;
         }
+    }
+
+    public static long sizeOf(Streamable inst) {
+        byte[] data;
+        ByteArrayOutputStream output;
+        DataOutputStream out;
+
+        try {
+            output=new ByteArrayOutputStream();
+            out=new DataOutputStream(output);
+            inst.writeTo(out);
+            out.flush();
+            data=output.toByteArray();
+            return data.length;
+        }
+        catch(Exception ex) {
+            return -1;
+        }
+    }
+
+
+
+    /**
+     * Tries to load the class from the current thread's context class loader. If
+     * not successful, tries to load the class from the current instance.
+     * @param classname Desired class.
+     * @param clazz Class object used to obtain a class loader
+     * 				if no context class loader is available.
+     * @return Class, or null on failure.
+     */
+    public static Class loadClass(String classname, Class clazz) throws ClassNotFoundException {
+        ClassLoader loader;
+
+        try {
+            loader=Thread.currentThread().getContextClassLoader();
+            if(loader != null) {
+                return loader.loadClass(classname);
+            }
+        }
+        catch(Throwable t) {
+        }
+
+        if(clazz != null) {
+            try {
+                loader=clazz.getClassLoader();
+                if(loader != null) {
+                    return loader.loadClass(classname);
+                }
+            }
+            catch(Throwable t) {
+            }
+        }
+
+        try {
+            loader=ClassLoader.getSystemClassLoader();
+            if(loader != null) {
+                return loader.loadClass(classname);
+            }
+        }
+        catch(Throwable t) {
+        }
+
+        throw new ClassNotFoundException(classname);
+    }
+
+
+    public static InputStream getResourceAsStream(String name, Class clazz) {
+        ClassLoader loader;
+
+        try {
+            loader=Thread.currentThread().getContextClassLoader();
+            if(loader != null) {
+                return loader.getResourceAsStream(name);
+            }
+        }
+        catch(Throwable t) {
+        }
+
+        if(clazz != null) {
+            try {
+                loader=clazz.getClassLoader();
+                if(loader != null) {
+                    return loader.getResourceAsStream(name);
+                }
+            }
+            catch(Throwable t) {
+            }
+        }
+        try {
+            loader=ClassLoader.getSystemClassLoader();
+            if(loader != null) {
+                return loader.getResourceAsStream(name);
+            }
+        }
+        catch(Throwable t) {
+        }
+
+        return null;
     }
 
 
@@ -818,7 +1258,6 @@ public class Util {
 
         if(one == null || two == null) return false;
         if(!(one instanceof IpAddress) || !(two instanceof IpAddress)) {
-            if(log.isErrorEnabled()) log.error("addresses have to be of type IpAddress to be compared");
             return false;
         }
 
@@ -833,16 +1272,6 @@ public class Util {
     }
 
 
-    public static void removeFile(String fname) {
-        if(fname == null) return;
-        try {
-            new File(fname).delete();
-        }
-        catch(Exception ex) {
-            if(log.isErrorEnabled()) log.error("exception=" + ex);
-        }
-    }
-
 
     public static boolean fileExists(String fname) {
         return (new File(fname)).exists();
@@ -850,7 +1279,8 @@ public class Util {
 
 
     /**
-     E.g. 2000,4000,8000
+     * Parses comma-delimited longs; e.g., 2000,4000,8000.
+     * Returns array of long, or null.
      */
     public static long[] parseCommaDelimitedLongs(String s) {
         StringTokenizer tok;
@@ -886,6 +1316,7 @@ public class Util {
     }
 
 
+
     public static String shortName(String hostname) {
         int index;
         StringBuffer sb=new StringBuffer();
@@ -897,6 +1328,16 @@ public class Util {
             sb.append(hostname.substring(0, index));
         else
             sb.append(hostname);
+        return sb.toString();
+    }
+
+    public static String shortName(InetAddress hostname) {
+        if(hostname == null) return null;
+        StringBuffer sb=new StringBuffer();
+        if(resolve_dns)
+            sb.append(hostname.getHostName());
+        else
+            sb.append(hostname.getHostAddress());
         return sb.toString();
     }
 
@@ -914,7 +1355,6 @@ public class Util {
                 continue;
             }
             catch(IOException io_ex) {
-                if(log.isErrorEnabled()) log.error("exception is " + io_ex);
             }
             break;
         }
@@ -933,7 +1373,6 @@ public class Util {
                 continue;
             }
             catch(IOException io_ex) {
-                if(log.isErrorEnabled()) log.error("exception is " + io_ex);
             }
             break;
         }
@@ -963,7 +1402,6 @@ public class Util {
                     }
                     catch(BindException bind_ex) { // port already used
                         port++;
-                        continue;
                     }
                     catch(Exception ex) {
                         throw ex;
@@ -979,7 +1417,6 @@ public class Util {
                 }
                 catch(BindException bind_ex) { // port already used
                     port++;
-                    continue;
                 }
                 catch(Exception ex) {
                     throw ex;
@@ -1018,6 +1455,29 @@ public class Util {
         }
     }
 
+
+    public static int getJavaVersion() {
+        String version=System.getProperty("java.version");
+        int retval=0;
+        if(version != null) {
+            if(version.startsWith("1.2"))
+                return 12;
+            if(version.startsWith("1.3"))
+                return 13;
+            if(version.startsWith("1.4"))
+                return 14;
+            if(version.startsWith("1.5"))
+                return 15;
+            if(version.startsWith("5"))
+                return 15;
+            if(version.startsWith("1.6"))
+                return 16;
+            if(version.startsWith("6"))
+                return 16;
+        }
+        return retval;
+    }
+
     public static String memStats(boolean gc) {
         StringBuffer sb=new StringBuffer();
         Runtime rt=Runtime.getRuntime();
@@ -1030,6 +1490,71 @@ public class Util {
         sb.append("Free mem: ").append(free_mem).append("\nUsed mem: ").append(used_mem);
         sb.append("\nTotal mem: ").append(total_mem);
         return sb.toString();
+    }
+
+
+//    public static InetAddress getFirstNonLoopbackAddress() throws SocketException {
+//        Enumeration en=NetworkInterface.getNetworkInterfaces();
+//        while(en.hasMoreElements()) {
+//            NetworkInterface i=(NetworkInterface)en.nextElement();
+//            for(Enumeration en2=i.getInetAddresses(); en2.hasMoreElements();) {
+//                InetAddress addr=(InetAddress)en2.nextElement();
+//                if(!addr.isLoopbackAddress())
+//                    return addr;
+//            }
+//        }
+//        return null;
+//    }
+
+
+    public static InetAddress getFirstNonLoopbackAddress() throws SocketException {
+        Enumeration en=NetworkInterface.getNetworkInterfaces();
+        boolean preferIpv4=Boolean.getBoolean("java.net.preferIPv4Stack");
+        boolean preferIPv6=Boolean.getBoolean("java.net.preferIPv6Addresses");
+        while(en.hasMoreElements()) {
+            NetworkInterface i=(NetworkInterface)en.nextElement();
+            for(Enumeration en2=i.getInetAddresses(); en2.hasMoreElements();) {
+                InetAddress addr=(InetAddress)en2.nextElement();
+                if(!addr.isLoopbackAddress()) {
+                    if(addr instanceof Inet4Address) {
+                        if(preferIPv6)
+                            continue;
+                        return addr;
+                    }
+                    if(addr instanceof Inet6Address) {
+                        if(preferIpv4)
+                            continue;
+                        return addr;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    public static List getAllAvailableInterfaces() throws SocketException {
+        List retval=new ArrayList(10);
+        NetworkInterface intf;
+        for(Enumeration en=NetworkInterface.getNetworkInterfaces(); en.hasMoreElements();) {
+            intf=(NetworkInterface)en.nextElement();
+            retval.add(intf);
+        }
+        return retval;
+    }
+
+
+    public static boolean isBindAddressPropertyIgnored() {
+        String tmp=System.getProperty(IGNORE_BIND_ADDRESS_PROPERTY);
+        if(tmp == null)
+            return false;
+
+        tmp=tmp.trim().toLowerCase();
+        if(tmp.equals("false") ||
+                tmp.equals("no") ||
+                tmp.equals("off"))
+            return false;
+
+        return true;
     }
 
 
@@ -1050,7 +1575,7 @@ public class Util {
 		    continue;
 		}
 		catch(Exception ex) {
-		    System.err.println(ex);
+		    log.error(ex);
 		    return;
 		}
 	    }
@@ -1069,15 +1594,39 @@ public class Util {
 	    System.in.read();
 	}
 	catch(Exception ex) {
-	    System.err.println(ex);
+	    log.error(ex);
 	}
     }
     */
 
-    public static void main(String args[]) {
-        System.out.println("Check for Linux:   " + checkForLinux());
-        System.out.println("Check for Solaris: " + checkForSolaris());
-        System.out.println("Check for Windows: " + checkForWindows());
+    public static void main(String args[]) throws Exception {
+        ClassConfigurator.getInstance(true);
+
+        Message msg=new Message(null, new IpAddress("127.0.0.1", 4444), "Bela");
+        long    size=Util.sizeOf(msg);
+        System.out.println("size=" + msg.size() + ", streamable size=" + size);
+
+        msg.putHeader("belaban", new NakAckHeader((byte)1, 23, 34));
+        size=Util.sizeOf(msg);
+        System.out.println("size=" + msg.size() + ", streamable size=" + size);
+
+        msg.putHeader("bla", new UdpHeader("groupname"));
+        size=Util.sizeOf(msg);
+        System.out.println("size=" + msg.size() + ", streamable size=" + size);
+
+
+        IpAddress a1=new IpAddress(1234), a2=new IpAddress("127.0.0.1", 3333);
+        a1.setAdditionalData("Bela".getBytes());
+        size=Util.sizeOf(a1);
+        System.out.println("size=" + a1.size() + ", streamable size of a1=" + size);
+        size=Util.sizeOf(a2);
+        System.out.println("size=" + a2.size() + ", streamable size of a2=" + size);
+
+
+//        System.out.println("Check for Linux:   " + checkForLinux());
+//        System.out.println("Check for Solaris: " + checkForSolaris());
+//        System.out.println("Check for Windows: " + checkForWindows());
+//        System.out.println("version: " + getJavaVersion());
     }
 
 

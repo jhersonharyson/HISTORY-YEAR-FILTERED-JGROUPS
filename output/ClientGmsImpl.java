@@ -1,4 +1,4 @@
-// $Id: ClientGmsImpl.java,v 1.16 2004/09/23 16:29:38 belaban Exp $
+// $Id: ClientGmsImpl.java,v 1.29 2005/11/22 11:58:28 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
@@ -8,9 +8,7 @@ import org.jgroups.protocols.PingRsp;
 import org.jgroups.util.Promise;
 import org.jgroups.util.Util;
 
-import java.util.Enumeration;
-import java.util.Hashtable;
-import java.util.Vector;
+import java.util.*;
 
 
 /**
@@ -21,7 +19,7 @@ import java.util.Vector;
  * <code>ViewChange</code> which is called by the coordinator that was contacted by this client, to
  * tell the client what its initial membership is.
  * @author Bela Ban
- * @version $Revision: 1.16 $
+ * @version $Revision: 1.29 $
  */
 public class ClientGmsImpl extends GmsImpl {
     private final Vector  initial_mbrs=new Vector(11);
@@ -30,7 +28,7 @@ public class ClientGmsImpl extends GmsImpl {
 
 
     public ClientGmsImpl(GMS g) {
-        gms=g;
+        super(g);
     }
 
     public void init() throws Exception {
@@ -57,9 +55,9 @@ public class ClientGmsImpl extends GmsImpl {
      * @param mbr Our own address (assigned through SET_LOCAL_ADDRESS)
      */
     public void join(Address mbr) {
-        Address coord=null;
-        JoinRsp rsp=null;
-        Digest tmp_digest=null;
+        Address coord;
+        JoinRsp rsp;
+        Digest tmp_digest;
         leaving=false;
 
         join_promise.reset();
@@ -68,9 +66,9 @@ public class ClientGmsImpl extends GmsImpl {
             if(log.isDebugEnabled()) log.debug("initial_mbrs are " + initial_mbrs);
             if(initial_mbrs.size() == 0) {
                 if(gms.disable_initial_coord) {
-                    if(log.isDebugEnabled())
-                        log.debug("received an initial membership of 0, but cannot become coordinator (disable_initial_coord=" +
-                                gms.disable_initial_coord + "), will retry fetching the initial membership");
+                    if(trace)
+                        log.trace("received an initial membership of 0, but cannot become coordinator " +
+                                "(disable_initial_coord=true), will retry fetching the initial membership");
                     continue;
                 }
                 if(log.isDebugEnabled())
@@ -80,9 +78,41 @@ public class ClientGmsImpl extends GmsImpl {
             }
 
             coord=determineCoord(initial_mbrs);
-            if(coord == null) {
-                if(log.isErrorEnabled())
-                    log.error("could not determine coordinator from responses " + initial_mbrs);
+            if(coord == null) { // e.g. because we have all clients only
+                if(gms.handle_concurrent_startup == false) {
+                    if(trace)
+                        log.trace("handle_concurrent_startup is false; ignoring responses of initial clients");
+                    becomeSingletonMember(mbr);
+                    return;
+                }
+
+                if(trace)
+                    log.trace("could not determine coordinator from responses " + initial_mbrs);
+
+                // so the member to become singleton member (and thus coord) is the first of all clients
+                Set clients=new TreeSet(); // sorted
+                clients.add(mbr); // add myself again (was removed by findInitialMembers())
+                for(int i=0; i < initial_mbrs.size(); i++) {
+                    PingRsp pingRsp=(PingRsp)initial_mbrs.elementAt(i);
+                    Address client_addr=pingRsp.getAddress();
+                    if(client_addr != null)
+                        clients.add(client_addr);
+                }
+                if(trace)
+                    log.trace("clients to choose new coord from are: " + clients);
+                Address new_coord=(Address)clients.iterator().next();
+                if(new_coord.equals(mbr)) {
+                    if(trace)
+                        log.trace("I (" + mbr + ") am the first of the clients, will become coordinator");
+                    becomeSingletonMember(mbr);
+                    return;
+                }
+                else {
+                    if(trace)
+                        log.trace("I (" + mbr + ") am not the first of the clients, " +
+                                "waiting for another client to become coordinator");
+                    Util.sleep(500);
+                }
                 continue;
             }
 
@@ -93,14 +123,14 @@ public class ClientGmsImpl extends GmsImpl {
                 rsp=(JoinRsp)join_promise.getResult(gms.join_timeout);
 
                 if(rsp == null) {
-                    if(log.isWarnEnabled()) log.warn("handleJoin(" + mbr + ") failed, retrying");
+                    if(warn) log.warn("join(" + mbr + ") sent to " + coord + " timed out, retrying");
                 }
                 else {
                     // 1. Install digest
                     tmp_digest=rsp.getDigest();
                     if(tmp_digest != null) {
                         tmp_digest.incrementHighSeqno(coord); 	// see DESIGN for an explanantion
-                        if(log.isDebugEnabled()) log.debug("digest is " + tmp_digest);
+                        // if(log.isDebugEnabled()) log.debug("digest is " + tmp_digest);
                         gms.setDigest(tmp_digest);
                     }
                     else
@@ -115,6 +145,13 @@ public class ClientGmsImpl extends GmsImpl {
                             if(log.isErrorEnabled()) log.error("view installation failed, retrying to join group");
                             continue;
                         }
+
+                        // send VIEW_ACK to sender of view
+                        Message view_ack=new Message(coord, null, null);
+                        GMS.GmsHeader tmphdr=new GMS.GmsHeader(GMS.GmsHeader.VIEW_ACK, rsp.getView());
+                        view_ack.putHeader(GMS.name, tmphdr);
+                        gms.passDown(new Event(Event.MSG, view_ack));
+
                         gms.passUp(new Event(Event.BECOME_SERVER));
                         gms.passDown(new Event(Event.BECOME_SERVER));
                         return;
@@ -143,28 +180,22 @@ public class ClientGmsImpl extends GmsImpl {
     }
 
     public void handleLeaveResponse() {
-        ; // safely ignore this
     }
 
 
     public void suspect(Address mbr) {
-        ;
     }
 
     public void unsuspect(Address mbr) {
-        wrongMethod("unsuspect");
     }
 
 
-    public JoinRsp handleJoin(Address mbr) {
-        wrongMethod("handleJoin");
-        return null;
+    public void handleJoin(Address mbr) {
     }
 
 
     /** Returns false. Clients don't handle leave() requests */
     public void handleLeave(Address mbr, boolean suspected) {
-        wrongMethod("handleLeave");
     }
 
 
@@ -172,8 +203,8 @@ public class ClientGmsImpl extends GmsImpl {
      * Does nothing. Discards all views while still client.
      */
     public synchronized void handleViewChange(View new_view, Digest digest) {
-        if(log.isDebugEnabled()) log.debug("view " + new_view.getMembers() +
-                                           " is discarded as we are not a participant");
+        if(log.isTraceEnabled())
+            log.trace("view " + new_view.getVid() + " is discarded as we are not a participant");
     }
 
 
@@ -199,8 +230,6 @@ public class ClientGmsImpl extends GmsImpl {
 
     /** Returns immediately. Clients don't handle suspect() requests */
     public void handleSuspect(Address mbr) {
-        wrongMethod("handleSuspect");
-        return;
     }
 
 
@@ -212,9 +241,9 @@ public class ClientGmsImpl extends GmsImpl {
             case Event.FIND_INITIAL_MBRS_OK:
                 tmp=(Vector)evt.getArg();
                 synchronized(initial_mbrs) {
-                    if(tmp != null && tmp.size() > 0)
-                        for(int i=0; i < tmp.size(); i++)
-                            initial_mbrs.addElement(tmp.elementAt(i));
+                    if(tmp != null && tmp.size() > 0) {
+                        initial_mbrs.addAll(tmp);
+                    }
                     initial_mbrs_received=true;
                     initial_mbrs.notifyAll();
                 }
@@ -280,7 +309,7 @@ public class ClientGmsImpl extends GmsImpl {
      The coordinator is determined by a majority vote. If there are an equal number of votes for
      more than 1 candidate, we determine the winner randomly.
      */
-    Address determineCoord(Vector mbrs) {
+    private Address determineCoord(Vector mbrs) {
         PingRsp mbr;
         Hashtable votes;
         int count, most_votes;
@@ -294,7 +323,7 @@ public class ClientGmsImpl extends GmsImpl {
         // count *all* the votes (unlike the 2000 election)
         for(int i=0; i < mbrs.size(); i++) {
             mbr=(PingRsp)mbrs.elementAt(i);
-            if(mbr.coord_addr != null) {
+            if(mbr.is_server && mbr.coord_addr != null) {
                 if(!votes.containsKey(mbr.coord_addr))
                     votes.put(mbr.coord_addr, new Integer(1));
                 else {
@@ -304,13 +333,12 @@ public class ClientGmsImpl extends GmsImpl {
             }
         }
 
-        if(log.isDebugEnabled()) {
-            if(votes.size() > 1)
-                if(log.isWarnEnabled()) log.warn("there was more than 1 candidate for coordinator: " + votes);
-                else
-                    if(log.isDebugEnabled()) log.debug("election results: " + votes);
+        if(votes.size() > 1) {
+            if(warn) log.warn("there was more than 1 candidate for coordinator: " + votes);
         }
-
+        else {
+            if(log.isDebugEnabled()) log.debug("election results: " + votes);
+        }
 
         // determine who got the most votes
         most_votes=0;
@@ -330,7 +358,7 @@ public class ClientGmsImpl extends GmsImpl {
 
     void becomeSingletonMember(Address mbr) {
         Digest initial_digest;
-        ViewId view_id=null;
+        ViewId view_id;
         Vector mbrs=new Vector(1);
 
         // set the initial digest (since I'm the first member)

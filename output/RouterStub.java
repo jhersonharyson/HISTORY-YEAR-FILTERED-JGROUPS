@@ -1,4 +1,4 @@
-// $Id: RouterStub.java,v 1.10 2004/12/13 15:30:06 belaban Exp $
+// $Id: RouterStub.java,v 1.15 2005/12/08 09:34:47 belaban Exp $
 
 package org.jgroups.stack;
 
@@ -294,7 +294,9 @@ public class RouterStub {
             connected=false;
             return null;
         }
+        Address dest;
         try {
+            dest=Util.readAddress(input);
             len=input.readInt();
             if(len == 0) {
                 ret=null;
@@ -302,16 +304,17 @@ public class RouterStub {
             else {
                 buf=new byte[len];
                 input.readFully(buf, 0, len);
-                ret=new Message();
+                ret=new Message(false);
                 ByteArrayInputStream tmp=new ByteArrayInputStream(buf);
                 DataInputStream in=new DataInputStream(tmp);
                 ret.readFrom(in);
+                ret.setDest(dest);
                 in.close();
             }
         }
         catch(Exception e) {
             if (connected) {
-                if(log.isErrorEnabled()) log.error("failed receiving message", e);
+                if(log.isTraceEnabled()) log.trace("failed receiving message", e);
             }
             connected=false;
             return null;
@@ -335,8 +338,8 @@ public class RouterStub {
                 if((new_addr=connect()) != null)
                     break;
             }
-            catch(Exception ex) {
-                if(log.isWarnEnabled()) log.warn("exception is " + ex);
+            catch(Exception ex) { // this is a normal case
+                if(log.isTraceEnabled()) log.trace("failed reconnecting", ex);
             }
             if(max_attempts == -1)
                 Util.sleep(RECONNECT_TIMEOUT);
@@ -344,7 +347,7 @@ public class RouterStub {
         if(new_addr == null) {
             return false;
         }
-        if(log.isWarnEnabled()) log.warn("client reconnected, new address is " + new_addr);
+        if(log.isTraceEnabled()) log.trace("client reconnected, new address is " + new_addr);
         return true;
     }
 
@@ -394,7 +397,7 @@ public class RouterStub {
 
         }
         catch(Exception ex) {
-            System.err.println(ex);
+            log.error(ex);
         }
         finally {
             stub.disconnect();

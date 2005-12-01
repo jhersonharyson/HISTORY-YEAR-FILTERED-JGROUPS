@@ -1,4 +1,4 @@
-// $Id: MERGE3.java,v 1.5 2004/09/23 16:29:41 belaban Exp $
+// $Id: MERGE3.java,v 1.8 2005/08/08 12:45:43 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -17,7 +17,7 @@ import java.util.*;
 
 
 /**
- * Protocol to discover subgroups, e.g. existing due to a network partition (that healed). Example: group
+ * Protocol to discover subgroups; e.g., existing due to a network partition (that healed). Example: group
  * {p,q,r,s,t,u,v,w} is split into 3 subgroups {p,q}, {r,s,t,u} and {v,w}. This protocol will eventually send
  * a MERGE event with the coordinators of each subgroup up the stack: {p,r,v}. Note that - depending on the time
  * of subgroup discovery - there could also be 2 MERGE events, which first join 2 of the subgroups, and then the
@@ -85,8 +85,8 @@ public class MERGE3 extends Protocol {
         }
 
         if(props.size() > 0) {
-            System.err.println("MERGE2.setProperties(): the following properties are not recognized:");
-            props.list(System.out);
+            log.error("MERGE2.setProperties(): the following properties are not recognized: " + props);
+
             return false;
         }
         return true;
@@ -98,18 +98,18 @@ public class MERGE3 extends Protocol {
 
 
     /**
-     * DON'T REMOVE ! This prevents the up-handler thread to be created, which is not needed in the protocol.
+     * This prevents the up-handler thread to be created, which is not needed in the protocol.
+     * DON'T REMOVE ! 
      */
     public void startUpHandler() {
-        ;
     }
 
 
     /**
-     * DON'T REMOVE ! This prevents the down-handler thread to be created, which is not needed in the protocol.
+     * This prevents the down-handler thread to be created, which is not needed in the protocol.
+     * DON'T REMOVE ! 
      */
     public void startDownHandler() {
-        ;
     }
 
 
@@ -154,7 +154,7 @@ public class MERGE3 extends Protocol {
 
 
     public void down(Event evt) {
-        Vector tmp=null;
+        Vector tmp;
         Address coord;
 
         switch(evt.getType()) {
@@ -212,8 +212,7 @@ public class MERGE3 extends Protocol {
      * Returns a random value within [min_interval - max_interval]
      */
     long computeInterval() {
-        long retval=min_interval + Util.random(max_interval - min_interval);
-        return retval;
+        return min_interval + Util.random(max_interval - min_interval);
     }
 
 

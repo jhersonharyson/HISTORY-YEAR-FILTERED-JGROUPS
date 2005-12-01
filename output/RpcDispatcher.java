@@ -1,47 +1,70 @@
-// $Id: RpcDispatcher.java,v 1.13 2004/08/14 01:46:25 belaban Exp $
+// $Id: RpcDispatcher.java,v 1.20 2005/11/12 06:39:21 belaban Exp $
 
 package org.jgroups.blocks;
 
 
-import org.jgroups.*;
 import org.jgroups.util.RspList;
 import org.jgroups.util.Util;
+import org.jgroups.ChannelListener;
+import org.jgroups.Channel;
+import org.jgroups.MessageListener;
+import org.jgroups.MembershipListener;
+import org.jgroups.Transport;
+import org.jgroups.Message;
+import org.jgroups.TimeoutException;
+import org.jgroups.SuspectedException;
+import org.jgroups.Address;
 
 import java.io.Serializable;
 import java.util.Vector;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.lang.reflect.Method;
 
 
 
 
 /**
- * Dispatches and receives remote group method calls. Is the equivalent of RpcProtocol
- * on the application rather than protocol level.
+ * This class allows a programmer to invoke remote methods in all (or single) 
+ * group members and optionally wait for the return value(s). 
+ * An application will typically create a channel and layer the
+ * RpcDispatcher building block on top of it, which allows it to 
+ * dispatch remote methods (client role) and at the same time be 
+ * called by other members (server role).
+ * This class is derived from MessageDispatcher. 
+*  Is the equivalent of RpcProtocol on the application rather than protocol level.
  * @author Bela Ban
  */
 public class RpcDispatcher extends MessageDispatcher implements ChannelListener {
-    protected Object     server_obj=null;
-    protected Marshaller marshaller=null;
+    protected Object        server_obj=null;
+    protected Marshaller    marshaller=null;
+    protected List          additionalChannelListeners=null;
+    protected MethodLookup  method_lookup=null;
 
 
     public RpcDispatcher(Channel channel, MessageListener l, MembershipListener l2, Object server_obj) {
         super(channel, l, l2);
-        channel.setChannelListener(this);
+        channel.addChannelListener(this);
         this.server_obj=server_obj;
+        additionalChannelListeners = new ArrayList();
     }
 
 
     public RpcDispatcher(Channel channel, MessageListener l, MembershipListener l2, Object server_obj,
                          boolean deadlock_detection) {
         super(channel, l, l2, deadlock_detection);
-        channel.setChannelListener(this);
+        channel.addChannelListener(this);
         this.server_obj=server_obj;
+        additionalChannelListeners = new ArrayList();
     }
 
     public RpcDispatcher(Channel channel, MessageListener l, MembershipListener l2, Object server_obj,
                          boolean deadlock_detection, boolean concurrent_processing) {
         super(channel, l, l2, deadlock_detection, concurrent_processing);
-        channel.setChannelListener(this);
+        channel.addChannelListener(this);
         this.server_obj=server_obj;
+        additionalChannelListeners = new ArrayList();
     }
 
 
@@ -55,11 +78,12 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         if(this.adapter != null) {
             Transport t=this.adapter.getTransport();
             if(t != null && t instanceof Channel) {
-                ((Channel)t).setChannelListener(this);
+                ((Channel)t).addChannelListener(this);
             }
         }
 
         this.server_obj=server_obj;
+        additionalChannelListeners = new ArrayList();
     }
 
 
@@ -76,6 +100,14 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
     public Marshaller getMarshaller()             {return marshaller;}
 
     public Object getServerObject() {return server_obj;}
+
+    public MethodLookup getMethodLookup() {
+        return method_lookup;
+    }
+
+    public void setMethodLookup(MethodLookup method_lookup) {
+        this.method_lookup=method_lookup;
+    }
 
 
     public RspList castMessage(Vector dests, Message msg, int mode, long timeout) {
@@ -108,20 +140,19 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
 
     public RspList callRemoteMethods(Vector dests, MethodCall method_call, int mode, long timeout) {
-        byte[]   buf=null;
-        Message  msg=null;
-        RspList  retval=null;
-
-        if(log.isTraceEnabled())
-            log.trace("dests=" + dests + ", method_call=" + method_call + ", mode=" + mode + ", timeout=" + timeout);
-
         if(dests != null && dests.size() == 0) {
             // don't send if dest list is empty
             if(log.isTraceEnabled())
-                log.trace("destination list is non-null and empty: no need to send message");
+                log.trace(new StringBuffer("destination list of ").append(method_call.getName()).
+                          append("() is empty: no need to send message"));
             return new RspList();
         }
 
+        if(log.isTraceEnabled())
+            log.trace(new StringBuffer("dests=").append(dests).append(", method_call=").append(method_call).
+                      append(", mode=").append(mode).append(", timeout=").append(timeout));
+
+        byte[] buf;
         try {
             buf=marshaller != null? marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
         }
@@ -130,13 +161,11 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             return null;
         }
 
-        msg=new Message(null, null, buf);
-        retval=super.castMessage(dests, msg, mode, timeout);
+        Message msg=new Message(null, null, buf);
+        RspList  retval=super.castMessage(dests, msg, mode, timeout);
         if(log.isTraceEnabled()) log.trace("responses: " + retval);
         return retval;
     }
-
-
 
 
 
@@ -217,6 +246,16 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         try {
             if(log.isTraceEnabled())
                 log.trace("[sender=" + req.getSrc() + "], method_call: " + method_call);
+
+            if(method_call.getMode() == MethodCall.ID) {
+                if(method_lookup == null)
+                    throw new Exception("MethodCall uses ID=" + method_call.getId() + ", but method_lookup has not been set");
+                Method m=method_lookup.findMethod(method_call.getId());
+                if(m == null)
+                    throw new Exception("no method foudn for " + method_call.getId());
+                method_call.setMethod(m);
+            }
+            
             return method_call.invoke(server_obj);
         }
         catch(Throwable x) {
@@ -225,27 +264,119 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         }
     }
 
+    /**
+     * Add a new channel listener to be notified on the channel's state change.
+     *
+     * @return true if the listener was added or false if the listener was already in the list.
+     */
+    public boolean addChannelListener(ChannelListener l) {
+
+        synchronized(additionalChannelListeners) {
+            if (additionalChannelListeners.contains(l)) {
+               return false;
+            }
+            additionalChannelListeners.add(l);
+            return true;
+        }
+    }
+
+
+    /**
+     *
+     * @return true if the channel was removed indeed.
+     */
+    public boolean removeChannelListener(ChannelListener l) {
+
+        synchronized(additionalChannelListeners) {
+            return additionalChannelListeners.remove(l);
+        }
+    }
+
+
 
     /* --------------------- Interface ChannelListener ---------------------- */
 
     public void channelConnected(Channel channel) {
-        start();
+
+        synchronized(additionalChannelListeners) {
+            for(Iterator i = additionalChannelListeners.iterator(); i.hasNext(); ) {
+                ChannelListener l = (ChannelListener)i.next();
+                try {
+                    l.channelConnected(channel);
+                }
+                catch(Throwable t) {
+                    log.warn("channel listener failed", t);
+                }
+            }
+        }
     }
 
     public void channelDisconnected(Channel channel) {
+
         stop();
+
+        synchronized(additionalChannelListeners) {
+            for(Iterator i = additionalChannelListeners.iterator(); i.hasNext(); ) {
+                ChannelListener l = (ChannelListener)i.next();
+                try {
+                    l.channelDisconnected(channel);
+                }
+                catch(Throwable t) {
+                    log.warn("channel listener failed", t);
+                }
+            }
+        }
     }
 
     public void channelClosed(Channel channel) {
+
         stop();
+
+        synchronized(additionalChannelListeners) {
+            for(Iterator i = additionalChannelListeners.iterator(); i.hasNext(); ) {
+                ChannelListener l = (ChannelListener)i.next();
+                try {
+                    l.channelClosed(channel);
+                }
+                catch(Throwable t) {
+                    log.warn("channel listener failed", t);
+                }
+            }
+        }
     }
 
     public void channelShunned() {
-        
+
+        synchronized(additionalChannelListeners) {
+            for(Iterator i = additionalChannelListeners.iterator(); i.hasNext(); ) {
+                ChannelListener l = (ChannelListener)i.next();
+                try {
+                    l.channelShunned();
+                }
+                catch(Throwable t) {
+                    log.warn("channel listener failed", t);
+                }
+            }
+        }
     }
 
     public void channelReconnected(Address new_addr) {
-        
+        if(log.isTraceEnabled())
+            log.trace("channel has been rejoined, old local_addr=" + local_addr + ", new local_addr=" + new_addr);
+        this.local_addr=new_addr;
+        start();
+
+        synchronized(additionalChannelListeners) {
+            for(Iterator i = additionalChannelListeners.iterator(); i.hasNext(); ) {
+                ChannelListener l = (ChannelListener)i.next();
+                try {
+                    l.channelReconnected(new_addr);
+                }
+                catch(Throwable t) {
+                   log.warn("channel listener failed", t);
+                }
+            }
+        }
     }
     /* ----------------------------------------------------------------------- */
 

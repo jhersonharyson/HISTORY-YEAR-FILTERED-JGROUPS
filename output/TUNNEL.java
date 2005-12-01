@@ -1,4 +1,4 @@
-// $Id: TUNNEL.java,v 1.9 2004/10/07 10:10:37 belaban Exp $
+// $Id: TUNNEL.java,v 1.20 2005/12/08 09:35:28 belaban Exp $
 
 
 package org.jgroups.protocols;
@@ -8,12 +8,13 @@ import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.Message;
 import org.jgroups.View;
-import org.jgroups.util.TimeScheduler;
-import org.jgroups.util.Util;
+import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.RouterStub;
+import org.jgroups.util.Util;
 
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.Properties;
 import java.util.Vector;
 
@@ -50,10 +51,15 @@ public class TUNNEL extends Protocol implements Runnable {
      * media (non)sense */
     boolean  loopback=true;
 
-    TimeScheduler timer=null;
-
-    Reconnector reconnector=null;
+    private final Reconnector reconnector=new Reconnector();
     private final Object reconnector_mutex=new Object();
+
+    /** If set it will be added to <tt>local_addr</tt>. Used to implement
+     * for example transport independent addresses */
+    byte[]          additional_data=null;
+
+    /** time to wait in ms between reconnect attempts */
+    long            reconnect_interval=5000;
 
 
     public TUNNEL() {
@@ -75,7 +81,6 @@ public class TUNNEL extends Protocol implements Runnable {
 
     public void init() throws Exception {
         super.init();
-        timer=stack.timer;
     }
 
     public void start() throws Exception {
@@ -93,11 +98,11 @@ public class TUNNEL extends Protocol implements Runnable {
 
 
     /**
-     * DON'T REMOVE ! This prevents the up-handler thread to be created, which essentially is superfluous:
+     * This prevents the up-handler thread to be created, which essentially is superfluous:
      * messages are received from the network rather than from a layer below.
+     * DON'T REMOVE ! 
      */
     public void startUpHandler() {
-        ;
     }
 
     /** Setup the Protocol instance acording to the configuration string */
@@ -128,6 +133,12 @@ public class TUNNEL extends Protocol implements Runnable {
             }
         }
 
+        str=props.getProperty("reconnect_interval");
+        if(str != null) {
+            reconnect_interval=Long.parseLong(str);
+            props.remove("reconnect_interval");
+        }
+
         str=props.getProperty("loopback");
         if(str != null) {
             loopback=Boolean.valueOf(str).booleanValue();
@@ -155,10 +166,6 @@ public class TUNNEL extends Protocol implements Runnable {
         TunnelHeader hdr;
         Address dest;
 
-        if(log.isDebugEnabled()) {
-            log.debug(evt.toString());
-        }
-
         if(evt.getType() != Event.MSG) {
             handleDownEvent(evt);
             return;
@@ -172,6 +179,9 @@ public class TUNNEL extends Protocol implements Runnable {
         if(msg.getSrc() == null)
             msg.setSrc(local_addr);
 
+        if(trace)
+            log.trace(msg + ", hdrs: " + msg.getHeaders());
+
         // Don't send if destination is local address. Instead, switch dst and src and put in up_queue.
         // If multicast message, loopback a copy directly to us (but still multicast). Once we receive this,
         // we will discard our own multicast message
@@ -179,21 +189,28 @@ public class TUNNEL extends Protocol implements Runnable {
             Message copy=msg.copy();
             // copy.removeHeader(name); // we don't remove the header
             copy.setSrc(local_addr);
-            copy.setDest(dest);
+            // copy.setDest(dest);
             evt=new Event(Event.MSG, copy);
 
             /* Because Protocol.up() is never called by this bottommost layer, we call up() directly in the observer.
                This allows e.g. PerfObserver to get the time of reception of a message */
             if(observer != null)
                 observer.up(evt, up_queue.size());
-            if(log.isTraceEnabled()) log.trace("looped back local message " + copy);
+            if(trace) log.trace("looped back local message " + copy);
             passUp(evt);
             if(dest != null && !dest.isMulticastAddress())
                 return;
         }
 
-        if(!stub.isConnected() || !stub.send(msg, channel_name)) { // if msg is not sent okay,
+
+
+        if(!stub.isConnected()) {
             startReconnector();
+        }
+        else {
+            if(stub.send(msg, channel_name) == false) {
+                startReconnector();
+            }
         }
     }
 
@@ -206,6 +223,8 @@ public class TUNNEL extends Protocol implements Runnable {
         synchronized(stub_mutex) {
             stub=new RouterStub(router_host, router_port);
             local_addr=stub.connect();
+            if(additional_data != null && local_addr instanceof IpAddress)
+                ((IpAddress)local_addr).setAdditionalData(additional_data);
         }
         if(local_addr == null)
             throw new Exception("could not obtain local address !");
@@ -241,7 +260,7 @@ public class TUNNEL extends Protocol implements Runnable {
             msg=stub.receive();
             if(msg == null) {
                 if(receiver == null) break;
-                if(log.isErrorEnabled()) log.error("received a null message. Trying to reconnect to router");
+                if(log.isTraceEnabled()) log.trace("received a null message. Trying to reconnect to router");
                 if(!stub.isConnected())
                     startReconnector();
                 Util.sleep(5000);
@@ -269,16 +288,14 @@ public class TUNNEL extends Protocol implements Runnable {
             Address src=msg.getSrc();
 
             if(dst != null && dst.isMulticastAddress() && src != null && local_addr.equals(src)) {
-                if(log.isTraceEnabled())
+                if(trace)
                     log.trace("discarded own loopback multicast packet");
                 return;
             }
         }
 
-         if(log.isDebugEnabled()) {
-             log.debug("received message " + msg);
-         }
-
+         if(trace)
+             log.trace(msg + ", hdrs: " + msg.getHeaders());
 
         /* Discard all messages destined for a channel with a different name */
 
@@ -291,102 +308,115 @@ public class TUNNEL extends Protocol implements Runnable {
 
 
     void handleDownEvent(Event evt) {
+        if(trace)
+            log.trace(evt);
 
         switch(evt.getType()) {
 
-            case Event.TMP_VIEW:
-            case Event.VIEW_CHANGE:
-                synchronized(members) {
-                    members.removeAllElements();
-                    Vector tmpvec=((View)evt.getArg()).getMembers();
-                    for(int i=0; i < tmpvec.size(); i++)
-                        members.addElement(tmpvec.elementAt(i));
-                }
-                break;
+        case Event.TMP_VIEW:
+        case Event.VIEW_CHANGE:
+            synchronized(members) {
+                members.removeAllElements();
+                Vector tmpvec=((View)evt.getArg()).getMembers();
+                for(int i=0; i < tmpvec.size(); i++)
+                    members.addElement(tmpvec.elementAt(i));
+            }
+            break;
 
-            case Event.GET_LOCAL_ADDRESS:   // return local address -> Event(SET_LOCAL_ADDRESS, local)
-                passUp(new Event(Event.SET_LOCAL_ADDRESS, local_addr));
-                break;
+        case Event.GET_LOCAL_ADDRESS:   // return local address -> Event(SET_LOCAL_ADDRESS, local)
+            passUp(new Event(Event.SET_LOCAL_ADDRESS, local_addr));
+            break;
 
-            case Event.SET_LOCAL_ADDRESS:
-                local_addr=(Address)evt.getArg();
-                break;
+        case Event.SET_LOCAL_ADDRESS:
+            local_addr=(Address)evt.getArg();
+            if(local_addr instanceof IpAddress && additional_data != null)
+                ((IpAddress)local_addr).setAdditionalData(additional_data);
+            break;
 
-            case Event.CONNECT:
-                channel_name=(String)evt.getArg();
-                if(stub == null) {
-                    if(log.isErrorEnabled()) log.error("CONNECT:  router stub is null!");
-                }
-                else {
-                    stub.register(channel_name);
-                }
+        case Event.CONNECT:
+            channel_name=(String)evt.getArg();
+            if(stub == null) {
+                if(log.isErrorEnabled()) log.error("CONNECT:  router stub is null!");
+            }
+            else {
+                stub.register(channel_name);
+            }
 
-                receiver=new Thread(this, "TUNNEL receiver thread");
-                receiver.setDaemon(true);
-                receiver.start();
+            receiver=new Thread(this, "TUNNEL receiver thread");
+            receiver.setDaemon(true);
+            receiver.start();
 
-                passUp(new Event(Event.CONNECT_OK));
-                break;
+            passUp(new Event(Event.CONNECT_OK));
+            break;
 
-            case Event.DISCONNECT:
-                if(receiver != null) {
-                    receiver=null;
-                    if(stub != null)
-                        stub.disconnect();
-                }
-                teardownTunnel();
-                passUp(new Event(Event.DISCONNECT_OK));
-                passUp(new Event(Event.SET_LOCAL_ADDRESS, null));
-                break;
+        case Event.DISCONNECT:
+            if(receiver != null) {
+                receiver=null;
+                if(stub != null)
+                    stub.disconnect();
+            }
+            teardownTunnel();
+            passUp(new Event(Event.DISCONNECT_OK));
+            passUp(new Event(Event.SET_LOCAL_ADDRESS, null));
+            break;
 
-            case Event.ACK:
-                passUp(new Event(Event.ACK_OK));
-                break;
+        case Event.CONFIG:
+            if(log.isDebugEnabled()) log.debug("received CONFIG event: " + evt.getArg());
+            handleConfigEvent((HashMap)evt.getArg());
+            break;
         }
     }
 
     private void startReconnector() {
         synchronized(reconnector_mutex) {
-            if(reconnector == null || reconnector.cancelled()) {
-                reconnector=new Reconnector();
-                timer.add(reconnector);
-            }
+            reconnector.start();
         }
     }
 
     private void stopReconnector() {
         synchronized(reconnector_mutex) {
-            if(reconnector != null) {
-                reconnector.stop();
-                reconnector=null;
-            }
+            reconnector.stop();
         }
+    }
+
+    void handleConfigEvent(HashMap map) {
+        if(map == null) return;
+        if(map.containsKey("additional_data"))
+            additional_data=(byte[])map.get("additional_data");
     }
 
     /* ------------------------------------------------------------------------------- */
 
 
-    private class Reconnector implements TimeScheduler.Task {
-        boolean cancelled=false;
+    private class Reconnector implements Runnable {
+        Thread  my_thread=null;
 
+
+        public void start() {
+            synchronized(this) {
+                if(my_thread == null || !my_thread.isAlive()) {
+                    my_thread=new Thread(this, "Reconnector");
+                    my_thread.setDaemon(true);
+                    my_thread.start();
+                }
+            }
+        }
 
         public void stop() {
-            cancelled=true;
+            synchronized(this) {
+                my_thread=null;
+            }
         }
 
-        public boolean cancelled() {
-            return cancelled;
-        }
-
-        public long nextInterval() {
-            return 5000;
-        }
 
         public void run() {
-            if(stub.reconnect()) {
-                stub.register(channel_name);
-                if(log.isDebugEnabled()) log.debug("reconnected");
-                stop();
+            while(Thread.currentThread().equals(my_thread)) {
+                if(stub.reconnect()) {
+                    stub.register(channel_name);
+                    if(log.isDebugEnabled()) log.debug("reconnected");
+                    return;
+                }
+                Util.sleep(reconnect_interval);
             }
         }
     }

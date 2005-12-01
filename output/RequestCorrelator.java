@@ -1,20 +1,19 @@
-// $Id: RequestCorrelator.java,v 1.15 2004/09/23 16:29:11 belaban Exp $
+// $Id: RequestCorrelator.java,v 1.24 2005/11/12 06:39:11 belaban Exp $
 
 package org.jgroups.blocks;
 
+import EDU.oswego.cs.dl.util.concurrent.ConcurrentReaderHashMap;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.jgroups.*;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.Scheduler;
 import org.jgroups.util.SchedulerListener;
+import org.jgroups.util.Streamable;
 import org.jgroups.util.Util;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
 
 
 
@@ -29,7 +28,7 @@ import java.util.List;
  * the corresponding entry may be removed.
  * <p>
  * <code>RequestCorrelator</code> can be installed at both client and server
- * sides, it can also switch roles dynamically, i.e. send a request and at
+ * sides, it can also switch roles dynamically; i.e., send a request and at
  * the same time process an incoming request (when local delivery is enabled,
  * this is actually the default).
  * <p>
@@ -42,7 +41,7 @@ public class RequestCorrelator {
     protected Object transport=null;
 
     /** The table of pending requests (keys=Long (request IDs), values=<tt>RequestEntry</tt>) */
-    protected final HashMap requests=new HashMap();
+    protected final Map requests=new ConcurrentReaderHashMap();
 
     /** The handler for the incoming requests. It is called from inside the
      * dispatcher thread */
@@ -73,9 +72,9 @@ public class RequestCorrelator {
 
     /**
      * This field is used only if deadlock detection is enabled.
-     * It sets the calling stack for to that for the currently running request
+     * It sets the calling stack to the currently running request
      */
-    protected final CallStackSetter call_stack_setter=null;
+    protected CallStackSetter call_stack_setter=null;
 
     /** Process items on the queue concurrently (Scheduler). The default is to wait until the processing of an item
      * has completed before fetching the next item from the queue. Note that setting this to true
@@ -236,8 +235,8 @@ public class RequestCorrelator {
      * the request data
      *
      * @param coll A response collector (usually the object that invokes
-     * this method). Its methods <code>ReceiveResponse</code> and
-     * <code>Suspect</code> will be invoked when a message has been received
+     * this method). Its methods <code>receiveResponse()</code> and
+     * <code>suspect()</code> will be invoked when a message has been received
      * or a member is suspected, respectively.
      */
     public void sendRequest(long id, List dest_mbrs, Message msg, RspCollector coll) {
@@ -278,8 +277,9 @@ public class RequestCorrelator {
             else if(transport instanceof Transport)
                 ((Transport)transport).send(msg);
             else
-                if(log.isErrorEnabled()) log.error("transport object has to be either a " +
-                            "Transport or a Protocol, however it is a " + transport.getClass());
+                if(log.isErrorEnabled())
+                    log.error("transport object has to be either a " +
+                              "Transport or a Protocol, however it is a " + transport.getClass());
         }
         catch(Throwable e) {
             if(log.isWarnEnabled()) log.warn(e.toString());
@@ -319,6 +319,7 @@ public class RequestCorrelator {
         case Event.VIEW_CHANGE: // adjust number of responses to wait for
             receiveView((View)evt.getArg());
             break;
+
         case Event.SET_LOCAL_ADDRESS:
             setLocalAddress((Address)evt.getArg());
             break;
@@ -343,25 +344,25 @@ public class RequestCorrelator {
         started=true;
     }
 
+    public void stop() {
+        stopScheduler();
+        started=false;
+    }
+
 
     void startScheduler() {
         if(scheduler == null) {
             scheduler=new Scheduler();
-            if(call_stack_setter != null)
+            if(deadlock_detection && call_stack_setter == null) {
+                call_stack_setter=new CallStackSetter();
                 scheduler.setListener(call_stack_setter);
+            }
             if(concurrent_processing)
                 scheduler.setConcurrentProcessing(concurrent_processing);
             scheduler.start();
         }
     }
 
-
-    /**
-     */
-    public void stop() {
-        stopScheduler();
-        started=false;
-    }
 
     void stopScheduler() {
         if(scheduler != null) {
@@ -376,7 +377,7 @@ public class RequestCorrelator {
 
 
     /**
-     * <tt>Event.SUSPECT</tt> event received from a layer below
+     * <tt>Event.SUSPECT</tt> event received from a layer below.
      * <p>
      * All response collectors currently registered will
      * be notified that <code>mbr</code> may have crashed, so they won't
@@ -390,9 +391,7 @@ public class RequestCorrelator {
         if(log.isDebugEnabled()) log.debug("suspect=" + mbr);
 
         // copy so we don't run into bug #761804 - Bela June 27 2003
-        synchronized(requests) {
-            copy=new ArrayList(requests.values());
-        }
+        copy=new ArrayList(requests.values());
         for(Iterator it=copy.iterator(); it.hasNext();) {
             entry=(RequestEntry)it.next();
             if(entry.coll != null)
@@ -402,7 +401,7 @@ public class RequestCorrelator {
 
 
     /**
-     * <tt>Event.VIEW_CHANGE</tt> event received from a layer below
+     * <tt>Event.VIEW_CHANGE</tt> event received from a layer below.
      * <p>
      * Mark all responses from members that are not in new_view as
      * NOT_RECEIVED.
@@ -413,9 +412,7 @@ public class RequestCorrelator {
         ArrayList    copy;
 
         // copy so we don't run into bug #761804 - Bela June 27 2003
-        synchronized(requests) {
-            copy=new ArrayList(requests.values());
-        }
+        copy=new ArrayList(requests.values());
         for(Iterator it=copy.iterator(); it.hasNext();) {
             entry=(RequestEntry)it.next();
             if(entry.coll != null)
@@ -431,10 +428,6 @@ public class RequestCorrelator {
      */
     public boolean receiveMessage(Message msg) {
         Object tmpHdr;
-        Header hdr;
-        RspCollector coll;
-        java.util.Stack stack;
-        java.util.List dests;
 
         // i. If header is not an instance of request correlator header, ignore
         //
@@ -443,32 +436,30 @@ public class RequestCorrelator {
         // protocol stack...)
         tmpHdr=msg.getHeader(name);
         if(tmpHdr == null || !(tmpHdr instanceof Header)) {
-            return (true);
+            return true;
         }
 
-        hdr=(Header)tmpHdr;
+        Header hdr=(Header)tmpHdr;
         if(hdr.corrName == null || !hdr.corrName.equals(name)) {
-            if(log.isDebugEnabled()) {
-                log.debug("name of request correlator header (" +
-                        hdr.corrName + ") is different from ours (" + name + "). Msg not accepted, passed up");
+            if(log.isTraceEnabled()) {
+                log.trace(new StringBuffer("name of request correlator header (").append(hdr.corrName).
+                          append(") is different from ours (").append(name).append("). Msg not accepted, passed up"));
             }
-            return (true);
+            return true;
         }
 
         // If the header contains a destination list, and we are not part of it, then we discard the
         // request (was addressed to other members)
-        dests=hdr.dest_mbrs;
+        java.util.List dests=hdr.dest_mbrs;
         if(dests != null && local_addr != null && !dests.contains(local_addr)) {
-            if(log.isDebugEnabled()) {
-                log.debug("discarded request from " + msg.getSrc() +
-                        " as we are not part of destination list (local_addr=" + local_addr + ", hdr=" + hdr + ')');
+            if(log.isTraceEnabled()) {
+                log.trace(new StringBuffer("discarded request from ").append(msg.getSrc()).
+                          append(" as we are not part of destination list (local_addr=").
+                          append(local_addr).append(", hdr=").append(hdr).append(')'));
             }
             return false;
         }
 
-        if(log.isTraceEnabled()) {
-            log.trace("header is " + hdr);
-        }
 
         // [Header.REQ]:
         // i. If there is no request handler, discard
@@ -485,7 +476,7 @@ public class RequestCorrelator {
                     if(log.isWarnEnabled()) {
                         log.warn("there is no request handler installed to deliver request !");
                     }
-                    return (false);
+                    return false;
                 }
 
                 if(deadlock_detection) {
@@ -496,17 +487,18 @@ public class RequestCorrelator {
                     }
 
                     Request req=new Request(msg);
-                    stack=hdr.callStack;
+                    java.util.Stack stack=hdr.callStack;
                     if(hdr.rsp_expected && stack != null && local_addr != null) {
                         if(stack.contains(local_addr)) {
+                            if(log.isTraceEnabled())
+                                log.trace("call stack=" + hdr.callStack + " contains " + local_addr +
+                                          ": adding request to priority queue");
                             scheduler.addPrio(req);
                             break;
                         }
                     }
-                    else {
-                        scheduler.add(req);
-                        break;
-                    }
+                    scheduler.add(req);
+                    break;
                 }
 
                 handleRequest(msg);
@@ -514,7 +506,7 @@ public class RequestCorrelator {
 
             case Header.RSP:
                 msg.removeHeader(name);
-                coll=findEntry(hdr.id);
+                RspCollector coll=findEntry(hdr.id);
                 if(coll != null) {
                     coll.receiveResponse(msg);
                 }
@@ -566,9 +558,7 @@ public class RequestCorrelator {
         // changed by bela Feb 28 2003 (bug fix for 690606)
         // changed back to use synchronization by bela June 27 2003 (bug fix for #761804),
         // we can do this because we now copy for iteration (viewChange() and suspect())
-        synchronized(requests) {
-            requests.remove(id_obj);
-        }
+        requests.remove(id_obj);
     }
 
 
@@ -581,9 +571,7 @@ public class RequestCorrelator {
         Long id_obj = new Long(id);
         RequestEntry entry;
 
-        synchronized(requests) {
-            entry=(RequestEntry)requests.get(id_obj);
-        }
+        entry=(RequestEntry)requests.get(id_obj);
         return((entry != null)? entry.coll:null);
     }
 
@@ -607,23 +595,24 @@ public class RequestCorrelator {
         // ID as the request and the name of the sender request correlator
         hdr    = (Header)req.removeHeader(name);
 
-        if(log.isTraceEnabled())
-            log.trace("calling (" + (request_handler != null? request_handler.getClass().getName() : "null") +
-                    ") with request " + hdr.id);
+        if(log.isTraceEnabled()) {
+            log.trace(new StringBuffer("calling (").append((request_handler != null? request_handler.getClass().getName() : "null")).
+                      append(") with request ").append(hdr.id));
+        }
 
         try {
             retval = request_handler.handle(req);
         }
         catch(Throwable t) {
-            if(log.isErrorEnabled()) log.error("error invoking method, exception=" + t.toString());
+            if(log.isErrorEnabled()) log.error("error invoking method", t);
             retval=t;
         }
 
         if(!hdr.rsp_expected) // asynchronous call, we don't need to send a response; terminate call here
             return;
 
-        if (transport == null) {
-            if(log.isErrorEnabled()) log.error("failure sending " + "response; no transport available");
+        if(transport == null) {
+            if(log.isErrorEnabled()) log.error("failure sending response; no transport available");
             return;
         }
 
@@ -633,11 +622,10 @@ public class RequestCorrelator {
         }
         catch(Throwable t) {
             try {
-                rsp_buf=Util.objectToByteBuffer(t); // this call shoudl succeed (all exceptions are serializable)
+                rsp_buf=Util.objectToByteBuffer(t); // this call should succeed (all exceptions are serializable)
             }
             catch(Throwable tt) {
-                if(log.isErrorEnabled()) log.error("failed sending response: " +
-                        "return value (" + retval + ") is not serializable");
+                if(log.isErrorEnabled()) log.error("failed sending rsp: return value (" + retval + ") is not serializable");
                 return;
             }
         }
@@ -647,8 +635,8 @@ public class RequestCorrelator {
             rsp.setBuffer(rsp_buf);
         rsp_hdr=new Header(Header.RSP, hdr.id, false, name);
         rsp.putHeader(name, rsp_hdr);
-        if(log.isTraceEnabled()) log.trace("sending rsp for " +
-                rsp_hdr.id + " to " + rsp.getDest());
+        if(log.isTraceEnabled())
+            log.trace(new StringBuffer("sending rsp for ").append(rsp_hdr.id).append(" to ").append(rsp.getDest()));
 
         try {
             if(transport instanceof Protocol)
@@ -657,22 +645,11 @@ public class RequestCorrelator {
                 ((Transport)transport).send(rsp);
             else
                 if(log.isErrorEnabled()) log.error("transport object has to be either a " +
-                            "Transport or a Protocol, however it is a " + transport.getClass());
+                                                   "Transport or a Protocol, however it is a " + transport.getClass());
         }
         catch(Throwable e) {
-            if(log.isErrorEnabled()) log.error(throwableToString(e));
+            if(log.isErrorEnabled()) log.error("failed sending the response", e);
         }
-    }
-
-
-    /**
-     * Convert exception stack trace to string
-     */
-    private String throwableToString(Throwable ex) {
-        StringWriter sw = new StringWriter();
-        PrintWriter  pw = new PrintWriter(sw);
-        ex.printStackTrace(pw);
-        return(sw.toString());
     }
 
 
@@ -698,23 +675,24 @@ public class RequestCorrelator {
     /**
      * The header for <tt>RequestCorrelator</tt> messages
      */
-    public static class Header extends org.jgroups.Header {
-        public static final int REQ = 0;
-        public static final int RSP = 1;
+    public static final class Header extends org.jgroups.Header implements Streamable {
+        public static final byte REQ = 0;
+        public static final byte RSP = 1;
 
         /** Type of header: request or reply */
-        public int type=REQ;
+        public byte type=REQ;
         /**
          * The id of this request to distinguish among other requests from
-         * the same <tt>RequestCorrelator</tt>
-         */
+         * the same <tt>RequestCorrelator</tt> */
         public long id=0;
+
         /** msg is synchronous if true */
         public boolean rsp_expected=true;
+
         /** The unique name of the associated <tt>RequestCorrelator</tt> */
         public String corrName=null;
 
-        /** Contains senders (e.g. P --> Q --> R) */
+        /** Stack<Address>. Contains senders (e.g. P --> Q --> R) */
         public java.util.Stack callStack=null;
 
         /** Contains a list of members who should receive the request (others will drop). Ignored if null */
@@ -732,13 +710,12 @@ public class RequestCorrelator {
          * originating from the same correlator
          * @param rsp_expected whether it's a sync or async request
          * @param name the name of the <tt>RequestCorrelator</tt> from which
-         * this header originates
          */
-        public Header(int type, long id, boolean rsp_expected, String name) {
+        public Header(byte type, long id, boolean rsp_expected, String name) {
             this.type         = type;
             this.id           = id;
             this.rsp_expected = rsp_expected;
-            this.corrName         = name;
+            this.corrName     = name;
         }
 
         /**
@@ -749,17 +726,16 @@ public class RequestCorrelator {
             ret.append(type == REQ ? "REQ" : type == RSP ? "RSP" : "<unknown>");
             ret.append(", id=" + id);
             ret.append(", rsp_expected=" + rsp_expected + ']');
+            if(callStack != null)
+                ret.append(", call stack=" + callStack);
             if(dest_mbrs != null)
                 ret.append(", dest_mbrs=").append(dest_mbrs);
             return ret.toString();
         }
 
 
-        /**
-         * Write out the header to the given stream
-         */
         public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeInt(type);
+            out.writeByte(type);
             out.writeLong(id);
             out.writeBoolean(rsp_expected);
             if(corrName != null) {
@@ -774,12 +750,8 @@ public class RequestCorrelator {
         }
 
 
-        /**
-         * Read the header from the given stream
-         */
-        public void readExternal(ObjectInput in)
-            throws IOException, ClassNotFoundException {
-            type         = in.readInt();
+        public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+            type         = in.readByte();
             id           = in.readLong();
             rsp_expected = in.readBoolean();
             if(in.readBoolean())
@@ -787,6 +759,82 @@ public class RequestCorrelator {
             callStack   = (java.util.Stack)in.readObject();
             dest_mbrs=(java.util.List)in.readObject();
         }
+
+        public void writeTo(DataOutputStream out) throws IOException {
+            out.writeByte(type);
+            out.writeLong(id);
+            out.writeBoolean(rsp_expected);
+
+            if(corrName != null) {
+                out.writeBoolean(true);
+                out.writeUTF(corrName);
+            }
+            else {
+                out.writeBoolean(false);
+            }
+
+            if(callStack != null) {
+                out.writeBoolean(true);
+                out.writeShort(callStack.size());
+                Address mbr;
+                for(int i=0; i < callStack.size(); i++) {
+                    mbr=(Address)callStack.elementAt(i);
+                    Util.writeAddress(mbr, out);
+                }
+            }
+            else {
+                out.writeBoolean(false);
+            }
+
+            Util.writeAddresses(dest_mbrs, out);
+        }
+
+        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+            boolean present;
+            type=in.readByte();
+            id=in.readLong();
+            rsp_expected=in.readBoolean();
+
+            present=in.readBoolean();
+            if(present)
+                corrName=in.readUTF();
+
+            present=in.readBoolean();
+            if(present) {
+                callStack=new Stack();
+                short len=in.readShort();
+                Address tmp;
+                for(short i=0; i < len; i++) {
+                    tmp=Util.readAddress(in);
+                    callStack.add(tmp);
+                }
+            }
+
+            dest_mbrs=(List)Util.readAddresses(in, java.util.LinkedList.class);
+        }
+
+        public long size() {
+            long retval=Global.BYTE_SIZE // type
+                    + Global.LONG_SIZE // id
+                    + Global.BYTE_SIZE; // rsp_expected
+
+            retval+=Global.BYTE_SIZE; // presence for corrName
+            if(corrName != null)
+                retval+=corrName.length() +2; // UTF
+
+            retval+=Global.BYTE_SIZE; // presence
+            if(callStack != null) {
+                retval+=Global.SHORT_SIZE; // number of elements
+                if(callStack.size() > 0) {
+                    Address mbr=(Address)callStack.firstElement();
+                    retval+=callStack.size() * (Util.size(mbr));
+                }
+            }
+
+            retval+=Util.size(dest_mbrs);
+            return retval;
+        }
+
     }
 
 

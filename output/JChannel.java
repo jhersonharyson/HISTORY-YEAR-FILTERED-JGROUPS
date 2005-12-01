@@ -1,4 +1,4 @@
-// $Id: JChannel.java,v 1.29 2004/09/23 16:29:59 belaban Exp $
+// $Id: JChannel.java,v 1.45 2005/11/21 13:00:14 belaban Exp $
 
 package org.jgroups;
 
@@ -19,12 +19,54 @@ import java.util.Map;
 import java.util.Vector;
 
 /**
- * JChannel is a pure Java implementation of Channel
+ * JChannel is a pure Java implementation of Channel.
  * When a JChannel object is instantiated it automatically sets up the
- * protocol stack
+ * protocol stack.
+ * <p>
+ * <B>Properties</B>
+ * <P>
+ * Properties are used to configure a channel, and are accepted in
+ * several forms; the String form is described here.
+ * A property string consists of a number of properties separated by
+ * colons.  For example:
+ * <p>
+ * <pre>"&lt;prop1&gt;(arg1=val1):&lt;prop2&gt;(arg1=val1;arg2=val2):&lt;prop3&gt;:&lt;propn&gt;"</pre>
+ * <p>
+ * Each property relates directly to a protocol layer, which is
+ * implemented as a Java class. When a protocol stack is to be created
+ * based on the above property string, the first property becomes the
+ * bottom-most layer, the second one will be placed on the first, etc.:
+ * the stack is created from the bottom to the top, as the string is
+ * parsed from left to right. Each property has to be the name of a
+ * Java class that resides in the
+ * {@link org.jgroups.protocols} package.
+ * <p>
+ * Note that only the base name has to be given, not the fully specified
+ * class name (e.g., UDP instead of org.jgroups.protocols.UDP).
+ * <p>
+ * Each layer may have 0 or more arguments, which are specified as a
+ * list of name/value pairs in parentheses directly after the property.
+ * In the example above, the first protocol layer has 1 argument,
+ * the second 2, the third none. When a layer is created, these
+ * properties (if there are any) will be set in a layer by invoking
+ * the layer's setProperties() method
+ * <p>
+ * As an example the property string below instructs JGroups to create
+ * a JChannel with protocols UDP, PING, FD and GMS:<p>
+ * <pre>"UDP(mcast_addr=228.10.9.8;mcast_port=5678):PING:FD:GMS"</pre>
+ * <p>
+ * The UDP protocol layer is at the bottom of the stack, and it
+ * should use mcast address 228.10.9.8. and port 5678 rather than
+ * the default IP multicast address and port. The only other argument
+ * instructs FD to output debug information while executing.
+ * Property UDP refers to a class {@link org.jgroups.protocols.UDP},
+ * which is subsequently loaded and an instance of which is created as protocol layer.
+ * If any of these classes are not found, an exception will be thrown and
+ * the construction of the stack will be aborted.
+ *
  * @author Bela Ban
  * @author Filip Hanik
- * @version $Revision: 1.29 $
+ * @version $Revision: 1.45 $
  */
 public class JChannel extends Channel {
 
@@ -59,7 +101,7 @@ public class JChannel extends Channel {
     /*the protocol stack, used to send and receive messages from the protocol stack*/
     private ProtocolStack prot_stack=null;
 
-    /** Thread responsible for closing a channel and potentially reconnecting to it (e.g. when shunned) */
+    /** Thread responsible for closing a channel and potentially reconnecting to it (e.g., when shunned). */
     protected CloserThread closer=null;
 
     /** To wait until a local address has been assigned */
@@ -73,8 +115,8 @@ public class JChannel extends Channel {
 
     private final Promise state_promise=new Promise();
 
-    // private final Promise flow_control_promise=new Promise();
-    // private final Object  flow_control_mutex=new Object();
+    private final Object suspend_mutex=new Object();
+    private boolean suspended=false;
 
     /** wait until we have a non-null local_addr */
     private long LOCAL_ADDR_TIMEOUT=30000; //=Long.parseLong(System.getProperty("local_addr.timeout", "30000"));
@@ -114,6 +156,13 @@ public class JChannel extends Channel {
     private byte[] additional_data=null;
 
     protected final Log log=LogFactory.getLog(getClass());
+
+    /** Collect statistics */
+    protected boolean stats=true;
+
+    protected long sent_msgs=0, received_msgs=0, sent_bytes=0, received_bytes=0;
+
+
 
     /**
      * Constructs a <code>JChannel</code> instance with the protocol stack
@@ -218,8 +267,8 @@ public class JChannel extends Channel {
      * parameter. an example of this parameter is<BR>
      * "UDP:PING:FD:STABLE:NAKACK:UNICAST:FRAG:FLUSH:GMS:VIEW_ENFORCER:STATE_TRANSFER:QUEUE"<BR>
      * Other examples can be found in the ./conf directory<BR>
-     * @param properties the protocol stack setup, if null, the default protocol stack will be used
-     * @param properties the properties can also be a java.net.URL object or a string that is a URL spec.
+     * @param properties the protocol stack setup; if null, the default protocol stack will be used.
+     * 					 The properties can also be a java.net.URL object or a string that is a URL spec.
      *                   The JChannel will validate any URL object and String object to see if they are a URL.
      *                   In case of the parameter being a url, the JChannel will try to load the xml from there.
      *                   In case properties is a org.w3c.dom.Element, the ConfiguratorFactory will parse the
@@ -236,9 +285,7 @@ public class JChannel extends Channel {
             props=c.getProtocolStackString();
         }
         catch(Exception x) {
-            String strace=Util.getStackTrace(x);
-            if(log.isErrorEnabled()) log.error(strace);
-            throw new ChannelException("unable to load protocol stack: {" + x.getMessage() + ';' + strace + '}');
+            throw new ChannelException("unable to load protocol stack", x);
         }
 
         /*create the new protocol stack*/
@@ -249,7 +296,7 @@ public class JChannel extends Channel {
             prot_stack.setup();
         }
         catch(Throwable e) {
-            throw new ChannelException("JChannel(): " + e);
+            throw new ChannelException("failed to setup protocol stack", e);
         }
     }
 
@@ -264,6 +311,9 @@ public class JChannel extends Channel {
         return prot_stack;
     }
 
+    protected Log getLog() {
+        return log;
+    }
 
     /**
      * returns the protocol stack configuration in string format.
@@ -274,6 +324,27 @@ public class JChannel extends Channel {
         return props;
     }
 
+    public boolean statsEnabled() {
+        return stats;
+    }
+
+    public void enableStats(boolean stats) {
+        this.stats=stats;
+    }
+
+    public void resetStats() {
+        sent_msgs=received_msgs=sent_bytes=received_bytes=0;
+    }
+
+    public long getSentMessages() {return sent_msgs;}
+    public long getSentBytes() {return sent_bytes;}
+    public long getReceivedMessages() {return received_msgs;}
+    public long getReceivedBytes() {return received_bytes;}
+    public int  getNumberOfTasksInTimer() {return prot_stack != null ? prot_stack.timer.size() : -1;}
+
+    public String dumpTimerQueue() {
+        return prot_stack != null? prot_stack.dumpTimerQueue() : "<n/a";
+    }
 
     /**
      * Returns a pretty-printed form of all the protocols. If include_properties is set,
@@ -285,13 +356,13 @@ public class JChannel extends Channel {
 
 
     /**
-     * Connects the channel to a group.<BR>
-     * If the channel is already connected, an error message will be printed to the error log<BR>
-     * If the channel is closed a ChannelClosed exception will be thrown<BR>
-     * This method starts the protocol stack by calling ProtocolStack.start<BR>
-     * then it sends an Event.CONNECT event down the stack and waits to receive a CONNECT_OK event<BR>
-     * Once the CONNECT_OK event arrives from the protocol stack, any channel listeners are notified<BR>
-     * and the channel is considered connected<BR>
+     * Connects the channel to a group.
+     * If the channel is already connected, an error message will be printed to the error log.
+     * If the channel is closed a ChannelClosed exception will be thrown.
+     * This method starts the protocol stack by calling ProtocolStack.start,
+     * then it sends an Event.CONNECT event down the stack and waits to receive a CONNECT_OK event.
+     * Once the CONNECT_OK event arrives from the protocol stack, any channel listeners are notified
+     * and the channel is considered connected.
      *
      * @param channel_name A <code>String</code> denoting the group name. Cannot be null.
      * @exception ChannelException The protocol stack cannot be started
@@ -319,8 +390,7 @@ public class JChannel extends Channel {
             prot_stack.startStack(); // calls start() in all protocols, from top to bottom
         }
         catch(Throwable e) {
-            if(log.isErrorEnabled()) log.error("exception: " + e);
-            throw new ChannelException(e.toString());
+            throw new ChannelException("failed to start protocol stack", e);
         }
 
         /* try to get LOCAL_ADDR_TIMEOUT. Catch SecurityException if called in an untrusted environment (e.g. using JNLP) */
@@ -355,8 +425,7 @@ public class JChannel extends Channel {
 
         /*notify any channel listeners*/
         connected=true;
-        if(channel_listener != null)
-            channel_listener.channelConnected(this);
+        notifyChannelConnected(this);
     }
 
 
@@ -373,6 +442,8 @@ public class JChannel extends Channel {
      */
     public synchronized void disconnect() {
         if(closed) return;
+
+        resume();
 
         if(connected) {
 
@@ -398,17 +469,14 @@ public class JChannel extends Channel {
             catch(Exception e) {
                 if(log.isErrorEnabled()) log.error("exception: " + e);
             }
-
-            if(channel_listener != null)
-                channel_listener.channelDisconnected(this);
-
+            notifyChannelDisconnected(this);
             init(); // sets local_addr=null; changed March 18 2003 (bela) -- prevented successful rejoining
         }
     }
 
 
     /**
-     * Destroys the channel.<BR>
+     * Destroys the channel.
      * After this method has been called, the channel us unusable.<BR>
      * This operation will disconnect the channel and close the channel receive queue immediately<BR>
      */
@@ -417,16 +485,23 @@ public class JChannel extends Channel {
     }
 
 
+    /** Shuts down the channel without disconnecting */
+    public synchronized void shutdown() {
+        _close(false, true); // by default disconnect before closing channel and close mq
+    }
+
     /**
-     * Opens the channel.<BR>
-     * this does the following actions<BR>
-     * 1. Resets the receiver queue by calling Queue.reset<BR>
-     * 2. Sets up the protocol stack by calling ProtocolStack.setup<BR>
-     * 3. Sets the closed flag to false.<BR>
+     * Opens the channel.
+     * This does the following actions:
+     * <ol>
+     * <li> Resets the receiver queue by calling Queue.reset
+     * <li> Sets up the protocol stack by calling ProtocolStack.setup
+     * <li> Sets the closed flag to false
+     * </ol>
      */
     public synchronized void open() throws ChannelException {
         if(!closed)
-            throw new ChannelException("JChannel.open(): channel is already open");
+            throw new ChannelException("channel is already open");
 
         try {
             mq.reset();
@@ -437,7 +512,7 @@ public class JChannel extends Channel {
             closed=false;
         }
         catch(Exception e) {
-            throw new ChannelException("JChannel().open(): " + e.getMessage());
+            throw new ChannelException("failed to open channel" , e);
         }
     }
 
@@ -461,9 +536,39 @@ public class JChannel extends Channel {
     }
 
 
+    public String dumpQueue() {
+        return Util.dumpQueue(mq);
+    }
+
     /**
-     * implementation of the Transport interface.<BR>
-     * Sends a message through the protocol stack<BR>
+     * Returns a map of statistics of the various protocols and of the channel itself.
+     * @return Map<String,Map>. A map where the keys are the protocols ("channel" pseudo key is
+     * used for the channel itself") and the values are property maps.
+     */
+    public Map dumpStats() {
+        Map retval=prot_stack.dumpStats();
+        if(retval != null) {
+            Map tmp=dumpChannelStats();
+            if(tmp != null)
+                retval.put("channel", tmp);
+        }
+        return retval;
+    }
+
+    private Map dumpChannelStats() {
+        Map retval=new HashMap();
+        retval.put("sent_msgs", new Long(sent_msgs));
+        retval.put("sent_bytes", new Long(sent_bytes));
+        retval.put("received_msgs", new Long(received_msgs));
+        retval.put("received_bytes", new Long(received_bytes));
+        return retval;
+    }
+
+
+    /**
+     * Sends a message through the protocol stack.
+     * Implements the Transport interface.
+     * 
      * @param msg the message to be sent through the protocol stack,
      *        the destination of the message is specified inside the message itself
      * @exception ChannelNotConnectedException
@@ -472,6 +577,10 @@ public class JChannel extends Channel {
     public void send(Message msg) throws ChannelNotConnectedException, ChannelClosedException {
         checkClosed();
         checkNotConnected();
+        if(stats) {
+            sent_msgs++;
+            sent_bytes+=msg.getLength();
+        }
         down(new Event(Event.MSG, msg));
     }
 
@@ -516,6 +625,12 @@ public class JChannel extends Channel {
             evt=(timeout <= 0) ? (Event)mq.remove() : (Event)mq.remove(timeout);
             retval=getEvent(evt);
             evt=null;
+            if(stats) {
+                if(retval != null && retval instanceof Message) {
+                    received_msgs++;
+                    received_bytes+=((Message)retval).getLength();
+                }
+            }
             return retval;
         }
         catch(QueueClosedException queue_closed) {
@@ -567,8 +682,10 @@ public class JChannel extends Channel {
 
 
     /**
-     * returns the current view.<BR>
-     * if the channel is not connected or if it is closed it will return null<BR>
+     * Returns the current view.
+     * <BR>
+     * If the channel is not connected or if it is closed it will return null.
+     * <BR>
      * @return returns the current group view, or null if the channel is closed or disconnected
      */
     public View getView() {
@@ -595,18 +712,20 @@ public class JChannel extends Channel {
 
 
     /**
-     * sets a channel option
-     * the options can be either
-     * <PRE>
-     *     Channel.BLOCK
-     *     Channel.VIEW
-     *     Channel.SUSPECT
-     *     Channel.LOCAL
-     *     Channel.GET_STATE_EVENTS
-     *     Channel.AUTO_RECONNECT
-     *     Channel.AUTO_GETSTATE
-     * </PRE>
-     * There are certain dependencies between the options that you can set, I will try to describe them here<BR>
+     * Sets a channel option.  The options can be one of the following:
+     * <UL>
+     * <LI>    Channel.BLOCK
+     * <LI>    Channel.VIEW
+     * <LI>    Channel.SUSPECT
+     * <LI>    Channel.LOCAL
+     * <LI>    Channel.GET_STATE_EVENTS
+     * <LI>    Channel.AUTO_RECONNECT
+     * <LI>    Channel.AUTO_GETSTATE
+     * </UL>
+     * <P>
+     * There are certain dependencies between the options that you can set,
+     * I will try to describe them here.
+     * <P>
      * Option: Channel.VIEW option<BR>
      * Value:  java.lang.Boolean<BR>
      * Result: set to true the JChannel will receive VIEW change events<BR>
@@ -787,7 +906,7 @@ public class JChannel extends Channel {
 
     /**
      * Called by the application is response to receiving a <code>getState()</code> object when
-     * calling <code>receive()</code>.<br>
+     * calling <code>receive()</code>.
      * When the application receives a getState() message on the receive() method,
      * it should call returnState() to reply with the state of the application
      * @param state The state of the application as a byte buffer
@@ -812,110 +931,116 @@ public class JChannel extends Channel {
         int type=evt.getType();
         Message msg;
 
-        /*if the queue is not available, there is no point in
-         *processing the message at all*/
-        if(mq == null) {
-            if(log.isErrorEnabled()) log.error("message queue is null");
-            return;
-        }
 
         switch(type) {
 
-            case Event.MSG:
-                msg=(Message)evt.getArg();
-                if(!receive_local_msgs) {  // discard local messages (sent by myself to me)
-                    if(local_addr != null && msg.getSrc() != null)
-                        if(local_addr.equals(msg.getSrc()))
-                            return;
-                }
-                break;
+        case Event.MSG:
+            msg=(Message)evt.getArg();
+            if(!receive_local_msgs) {  // discard local messages (sent by myself to me)
+                if(local_addr != null && msg.getSrc() != null)
+                    if(local_addr.equals(msg.getSrc()))
+                        return;
+            }
+            break;
 
-            case Event.VIEW_CHANGE:
-                my_view=(View)evt.getArg();
+        case Event.VIEW_CHANGE:
+            View tmp=(View)evt.getArg();
+            if(tmp instanceof MergeView)
+                my_view=new View(tmp.getVid(), tmp.getMembers());
+            else
+                my_view=tmp;
 
-                // crude solution to bug #775120: if we get our first view *before* the CONNECT_OK,
-                // we simply set the state to connected
-                if(connected == false) {
-                    connected=true;
-                    connect_promise.setResult(Boolean.TRUE);
-                }
-
-                // unblock queueing of messages due to previous BLOCK event:
-                down(new Event(Event.STOP_QUEUEING));
-                if(!receive_views)  // discard if client has not set receving views to on
-                    return;
-                //if(connected == false)
-                //  my_view=(View)evt.getArg();
-                break;
-
-            case Event.SUSPECT:
-                if(!receive_suspects)
-                    return;
-                break;
-
-            case Event.GET_APPLSTATE:  // return the application's state
-                if(!receive_get_states) {  // if not set to handle state transfers, send null state
-                    down(new Event(Event.GET_APPLSTATE_OK, null));
-                    return;
-                }
-                break;
-
-            case Event.CONFIG:
-                HashMap config=(HashMap)evt.getArg();
-                if(config != null && config.containsKey("state_transfer"))
-                    state_transfer_supported=((Boolean)config.get("state_transfer")).booleanValue();
-                break;
-
-            case Event.BLOCK:
-                // If BLOCK is received by application, then we trust the application to not send
-                // any more messages until a VIEW_CHANGE is received. Otherwise (BLOCKs are disabled),
-                // we queue any messages sent until the next VIEW_CHANGE (they will be sent in the
-                // next view)
-
-                if(!receive_blocks) {  // discard if client has not set 'receiving blocks' to 'on'
-                    down(new Event(Event.BLOCK_OK));
-                    down(new Event(Event.START_QUEUEING));
-                    return;
-                }
-                break;
-
-            case Event.CONNECT_OK:
+            // crude solution to bug #775120: if we get our first view *before* the CONNECT_OK,
+            // we simply set the state to connected
+            if(connected == false) {
+                connected=true;
                 connect_promise.setResult(Boolean.TRUE);
-                break;
+            }
 
-            case Event.DISCONNECT_OK:
-                disconnect_promise.setResult(Boolean.TRUE);
-                break;
+            // unblock queueing of messages due to previous BLOCK event:
+            down(new Event(Event.STOP_QUEUEING));
+            if(!receive_views)  // discard if client has not set receving views to on
+                return;
+            //if(connected == false)
+            //  my_view=(View)evt.getArg();
+            break;
 
-            case Event.GET_STATE_OK:
-                try {
-                    mq.add(new Event(Event.STATE_RECEIVED, evt.getArg()));
+        case Event.SUSPECT:
+            if(!receive_suspects)
+                return;
+            break;
+
+        case Event.GET_APPLSTATE:  // return the application's state
+            if(!receive_get_states) {  // if not set to handle state transfers, send null state
+                down(new Event(Event.GET_APPLSTATE_OK, null));
+                return;
+            }
+            break;
+
+        case Event.CONFIG:
+            HashMap config=(HashMap)evt.getArg();
+            if(config != null && config.containsKey("state_transfer"))
+                state_transfer_supported=((Boolean)config.get("state_transfer")).booleanValue();
+            break;
+
+        case Event.BLOCK:
+            // If BLOCK is received by application, then we trust the application to not send
+            // any more messages until a VIEW_CHANGE is received. Otherwise (BLOCKs are disabled),
+            // we queue any messages sent until the next VIEW_CHANGE (they will be sent in the
+            // next view)
+
+            if(!receive_blocks) {  // discard if client has not set 'receiving blocks' to 'on'
+                down(new Event(Event.BLOCK_OK));
+                down(new Event(Event.START_QUEUEING));
+                return;
+            }
+            break;
+
+        case Event.CONNECT_OK:
+            connect_promise.setResult(Boolean.TRUE);
+            break;
+
+        case Event.DISCONNECT_OK:
+            disconnect_promise.setResult(Boolean.TRUE);
+            break;
+
+        case Event.GET_STATE_OK:
+            Object state=evt.getArg();
+            state_promise.setResult(state);
+            if(up_handler != null) {
+                up_handler.up(evt);
+                return;
+            }
+            if(state != null) {
+                if(receiver != null) {
+                    receiver.setState((byte[])state);
                 }
-                catch(Exception e) {
+                else {
+                    try {mq.add(new Event(Event.STATE_RECEIVED, state));} catch(Exception e) {}
                 }
-                state_promise.setResult(evt.getArg());
-                break;
+            }
+            break;
 
-            case Event.SET_LOCAL_ADDRESS:
-                local_addr_promise.setResult(evt.getArg());
-                break;
+        case Event.SET_LOCAL_ADDRESS:
+            local_addr_promise.setResult(evt.getArg());
+            break;
 
-            case Event.EXIT:
-                handleExit(evt);
-                return;  // no need to pass event up; already done in handleExit()
+        case Event.EXIT:
+            handleExit(evt);
+            return;  // no need to pass event up; already done in handleExit()
 
-            case Event.BLOCK_SEND: // emitted by FLOW_CONTROL
-                if(log.isInfoEnabled()) log.info("received BLOCK_SEND");
-                block_sending.set(Boolean.TRUE);
-                break;
+        case Event.BLOCK_SEND: // emitted by FLOW_CONTROL
+            if(log.isInfoEnabled()) log.info("received BLOCK_SEND");
+            block_sending.set(Boolean.TRUE);
+            break;
 
-            case Event.UNBLOCK_SEND:  // emitted by FLOW_CONTROL
-                if(log.isInfoEnabled()) log.info("received UNBLOCK_SEND");
-                block_sending.set(Boolean.FALSE);
-                break;
+        case Event.UNBLOCK_SEND:  // emitted by FLOW_CONTROL
+            if(log.isInfoEnabled()) log.info("received UNBLOCK_SEND");
+            block_sending.set(Boolean.FALSE);
+            break;
 
-            default:
-                break;
+        default:
+            break;
         }
 
 
@@ -923,6 +1048,42 @@ public class JChannel extends Channel {
         if(up_handler != null) {
             up_handler.up(evt);
             return;
+        }
+
+        switch(type) {
+            case Event.MSG:
+                if(receiver != null) {
+                    receiver.receive((Message)evt.getArg());
+                    return;
+                }
+                break;
+            case Event.VIEW_CHANGE:
+                if(receiver != null) {
+                    receiver.viewAccepted((View)evt.getArg());
+                    return;
+                }
+                break;
+            case Event.SUSPECT:
+                if(receiver != null) {
+                    receiver.suspect((Address)evt.getArg());
+                    return;
+                }
+                break;
+            case Event.GET_APPLSTATE:
+                if(receiver != null) {
+                    byte[] tmp_state=receiver.getState();
+                    returnState(tmp_state);
+                    return;
+                }
+                break;
+            case Event.BLOCK:
+                if(receiver != null) {
+                    receiver.block();
+                    return;
+                }
+                break;
+            default:
+                break;
         }
 
         if(type == Event.MSG || type == Event.VIEW_CHANGE || type == Event.SUSPECT ||
@@ -944,16 +1105,30 @@ public class JChannel extends Channel {
     public void down(Event evt) {
         if(evt == null) return;
 
+        if(suspended) {
+            synchronized(suspend_mutex) {
+                while(suspended) {
+                    try {
+                        suspend_mutex.wait();
+                    }
+                    catch(InterruptedException e) {
+                    }
+                }
+            }
+        }
+
+        int type=evt.getType();
+
         // only block for messages; all other events are passed through
         // we use double-checked locking; it is okay to 'lose' one or more messages because block_sending changes
         // to true after an initial false value
-        if(evt.getType() == Event.MSG && block_sending.get().equals(Boolean.TRUE)) {
-            if(log.isInfoEnabled()) log.info("down() blocks because block_sending == true");
+        if(type == Event.MSG && block_sending.get().equals(Boolean.TRUE)) {
+            if(log.isTraceEnabled()) log.trace("down() blocks because block_sending == true");
             block_sending.waitUntil(Boolean.FALSE);
         }
 
         // handle setting of additional data (kludge, will be removed soon)
-        if(evt.getType() == Event.CONFIG) {
+        if(type == Event.CONFIG) {
             try {
                 Map m=(Map)evt.getArg();
                 if(m != null && m.containsKey("additional_data")) {
@@ -963,13 +1138,31 @@ public class JChannel extends Channel {
             catch(Throwable t) {
                 if(log.isErrorEnabled()) log.error("CONFIG event did not contain a hashmap: " + t);
             }
-
         }
 
         if(prot_stack != null)
             prot_stack.down(evt);
         else
             if(log.isErrorEnabled()) log.error("no protocol stack available");
+    }
+
+    /** Send() blocks from now on, until resume() is called */
+    public void suspend() {
+        synchronized(suspend_mutex) {
+            suspended=true;
+        }
+    }
+
+    /** Send() unblocks */
+    public void resume() {
+        synchronized(suspend_mutex) {
+            suspended=false;
+            suspend_mutex.notifyAll();
+        }
+    }
+
+    public boolean isSuspended() {
+        return suspended;
     }
 
 
@@ -1026,7 +1219,7 @@ public class JChannel extends Channel {
      * health check.<BR>
      * throws a ChannelNotConnected exception if the channel is not connected
      */
-    void checkNotConnected() throws ChannelNotConnectedException {
+    private final void checkNotConnected() throws ChannelNotConnectedException {
         if(!connected)
             throw new ChannelNotConnectedException();
     }
@@ -1035,10 +1228,12 @@ public class JChannel extends Channel {
      * health check<BR>
      * throws a ChannelClosed exception if the channel is closed
      */
-    void checkClosed() throws ChannelClosedException {
+    private final void checkClosed() throws ChannelClosedException {
         if(closed)
             throw new ChannelClosedException();
     }
+
+
 
     /**
      * returns the value of the event<BR>
@@ -1114,16 +1309,21 @@ public class JChannel extends Channel {
     /**
      * Disconnects and closes the channel.
      * This method does the folloing things
-     * 1. Calls <code>this.disconnect</code> if the disconnect parameter is true
-     * 2. Calls <code>Queue.close</code> on mq if the close_mq parameter is true
-     * 3. Calls <code>ProtocolStack.stop</code> on the protocol stack
-     * 4. Calls <code>ProtocolStack.destroy</code> on the protocol stack
-     * 5. Sets the channel closed and channel connected flags to true and false
-     * 6. Notifies any channel listener of the channel close operation
+     * <ol>
+     * <li>Calls <code>this.disconnect</code> if the disconnect parameter is true
+     * <li>Calls <code>Queue.close</code> on mq if the close_mq parameter is true
+     * <li>Calls <code>ProtocolStack.stop</code> on the protocol stack
+     * <li>Calls <code>ProtocolStack.destroy</code> on the protocol stack
+     * <li>Sets the channel closed and channel connected flags to true and false
+     * <li>Notifies any channel listener of the channel close operation
+     * </ol>
      */
-    void _close(boolean disconnect, boolean close_mq) {
+    private void _close(boolean disconnect, boolean close_mq) {
         if(closed)
             return;
+
+        if(!disconnect)
+            resume();
 
         if(disconnect)
             disconnect();                     // leave group if connected
@@ -1149,8 +1349,7 @@ public class JChannel extends Channel {
         }
         closed=true;
         connected=false;
-        if(channel_listener != null)
-            channel_listener.channelClosed(this);
+        notifyChannelClosed(this);
         init(); // sets local_addr=null; changed March 18 2003 (bela) -- prevented successful rejoining
     }
 
@@ -1161,10 +1360,8 @@ public class JChannel extends Channel {
      * hang waiting for up() to return, while up() actually tries to kill that very thread.
      * This way, we return immediately and allow the thread to terminate.
      */
-    void handleExit(Event evt) {
-        if(channel_listener != null)
-            channel_listener.channelShunned();
-
+    private void handleExit(Event evt) {
+        notifyChannelShunned();
         if(closer != null && !closer.isAlive())
             closer=null;
         if(closer == null) {
@@ -1201,7 +1398,8 @@ public class JChannel extends Channel {
                     up_handler.up(this.evt);
                 else {
                     try {
-                        mq.add(this.evt);
+                        if(receiver == null)
+                            mq.add(this.evt);
                     }
                     catch(Exception ex) {
                         if(log.isErrorEnabled()) log.error("exception: " + ex);
@@ -1234,8 +1432,7 @@ public class JChannel extends Channel {
                             down(new Event(Event.CONFIG, m));
                         }
                         connect(old_channel_name);
-                        if(channel_listener != null)
-                            channel_listener.channelReconnected(local_addr);
+                        notifyChannelReconnected(local_addr);
                     }
                     catch(Exception ex) {
                         if(log.isErrorEnabled()) log.error("failure reconnecting to channel: " + ex);

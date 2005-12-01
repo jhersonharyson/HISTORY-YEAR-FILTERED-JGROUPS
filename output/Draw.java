@@ -1,19 +1,23 @@
-// $Id: Draw.java,v 1.7 2004/09/23 16:29:35 belaban Exp $
+// $Id: Draw.java,v 1.15 2005/10/31 10:56:31 belaban Exp $
 
 
 package org.jgroups.demos;
 
 
 import org.jgroups.*;
+import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.debug.Debugger;
 import org.jgroups.util.Util;
 
 import javax.swing.*;
+import javax.management.MBeanServerFactory;
+import javax.management.MBeanServer;
 import java.awt.*;
 import java.awt.event.*;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectOutputStream;
 import java.util.Random;
+import java.util.ArrayList;
 
 
 
@@ -25,7 +29,7 @@ import java.util.Random;
  */
 public class Draw implements ActionListener, ChannelListener {
     private final ByteArrayOutputStream  out=new ByteArrayOutputStream();
-    private final String                 groupname="DrawGroupDemo";
+    String                         groupname="DrawGroupDemo";
     private JChannel               channel=null;
     private int                    member_size=1;
     Debugger                       debugger=null;
@@ -40,13 +44,12 @@ public class Draw implements ActionListener, ChannelListener {
     private final Color                  draw_color=selectColor();
     private final Color background_color=Color.white;
     boolean                        no_channel=false;
+    boolean                        jmx;
 
 
-
-
-
-    public Draw(String props, boolean debug, boolean cummulative, boolean no_channel) throws Exception {
+    public Draw(String props, boolean debug, boolean cummulative, boolean no_channel, boolean jmx) throws Exception {
         this.no_channel=no_channel;
+        this.jmx=jmx;
         if(no_channel)
             return;
 
@@ -56,12 +59,18 @@ public class Draw implements ActionListener, ChannelListener {
             debugger.start();
         }
         channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
-        channel.setChannelListener(this);
+        channel.addChannelListener(this);
     }
 
 
+    public String getGroupName() {
+        return groupname;
+    }
 
-
+    public void setGroupName(String groupname) {
+        if(groupname != null)
+            this.groupname=groupname;
+    }
 
 
    public static void main(String[] args) {
@@ -70,6 +79,8 @@ public class Draw implements ActionListener, ChannelListener {
        boolean          debug=false;
        boolean          cummulative=false;
        boolean          no_channel=false;
+       boolean          jmx=false;
+       String           group_name=null;
 
         for(int i=0; i < args.length; i++) {
             if("-help".equals(args[i])) {
@@ -92,6 +103,15 @@ public class Draw implements ActionListener, ChannelListener {
                 no_channel=true;
                 continue;
             }
+            if("-jmx".equals(args[i])) {
+                jmx=true;
+                continue;
+            }
+            if("-groupname".equals(args[i])) {
+                group_name=args[++i];
+                continue;
+            }
+
             help();
             return;
         }
@@ -115,7 +135,9 @@ public class Draw implements ActionListener, ChannelListener {
 
 
         try {
-            draw=new Draw(props, debug, cummulative, no_channel);
+            draw=new Draw(props, debug, cummulative, no_channel, jmx);
+            if(group_name != null)
+                draw.setGroupName(group_name);
             draw.go();
         }
         catch(Throwable e) {
@@ -126,7 +148,8 @@ public class Draw implements ActionListener, ChannelListener {
 
 
     static void help() {
-        System.out.println("\nDraw [-help] [-debug] [-cummulative] [-no_channel] [-props <protocol stack definition>]");
+        System.out.println("\nDraw [-help] [-debug] [-cummulative] [-no_channel] [-props <protocol stack definition>]" +
+                           " [-groupname <name>]");
         System.out.println("-debug: brings up a visual debugger");
         System.out.println("-no_channel: doesn't use JGroups at all, any drawing will be relected on the " +
                            "whiteboard directly");
@@ -147,6 +170,15 @@ public class Draw implements ActionListener, ChannelListener {
     public void go() throws Exception {
         if(!no_channel) {
             channel.connect(groupname);
+            if(jmx) {
+                ArrayList servers=MBeanServerFactory.findMBeanServer(null);
+                if(servers == null || servers.size() == 0) {
+                    throw new Exception("No MBeanServers found;" +
+                                        "\nJmxTest needs to be run with an MBeanServer present, or inside JDK 5");
+                }
+                MBeanServer server=(MBeanServer)servers.get(0);
+                JmxConfigurator.registerChannel(channel, server, "JGroups:channel=" + channel.getChannelName() , true);
+            }
         }
         mainFrame=new JFrame();
         mainFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -169,6 +201,7 @@ public class Draw implements ActionListener, ChannelListener {
         setTitle();
         mainFrame.pack();
         mainFrame.setLocation(15, 25);
+        mainFrame.setBounds(new Rectangle(250, 250));
         mainFrame.setVisible(true);
         if(!no_channel)
             mainLoop();
@@ -189,7 +222,7 @@ public class Draw implements ActionListener, ChannelListener {
         else {
             if(channel.getLocalAddress() != null)
                 tmp+=channel.getLocalAddress();
-            tmp+=" (" + member_size + ") mbrs";
+            tmp+=" (" + member_size + ")";
             mainFrame.setTitle(tmp);
         }
     }
@@ -214,7 +247,10 @@ public class Draw implements ActionListener, ChannelListener {
 
                 if(tmp instanceof View) {
                     View v=(View)tmp;
-                    System.out.println("** View=" + v);
+                    if(v instanceof MergeView)
+                        System.out.println("** MergeView=" + v);
+                    else
+                        System.out.println("** View=" + v);
                     member_size=v.size();
                     if(mainFrame != null)
                         setTitle();
