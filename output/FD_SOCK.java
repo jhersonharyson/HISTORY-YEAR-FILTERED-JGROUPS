@@ -1,4 +1,4 @@
-// $Id: FD_SOCK.java,v 1.30 2005/10/19 12:12:56 belaban Exp $
+// $Id: FD_SOCK.java,v 1.53 2006/12/22 14:45:52 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -8,9 +8,9 @@ import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
 
 import java.io.*;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.*;
 import java.util.List;
@@ -35,7 +35,7 @@ import java.util.List;
  */
 public class FD_SOCK extends Protocol implements Runnable {
     long                get_cache_timeout=3000;            // msecs to wait for the socket cache from the coordinator
-    final long          get_cache_retry_timeout=500;       // msecs to wait until we retry getting the cache from coord
+    static final long   get_cache_retry_timeout=500;       // msecs to wait until we retry getting the cache from coord
     long                suspect_msg_interval=5000;         // (BroadcastTask): mcast SUSPECT every 5000 msecs
     int                 num_tries=3;                       // attempts coord is solicited for socket cache until we give up
     final Vector        members=new Vector(11);            // list of group members (updated on VIEW_CHANGE)
@@ -45,13 +45,22 @@ public class FD_SOCK extends Protocol implements Runnable {
     boolean             got_cache_from_coord=false;        // was cache already fetched ?
     Address             local_addr=null;                   // our own address
     ServerSocket        srv_sock=null;                     // server socket to which another member connects to monitor me
+
+    InetAddress         bind_addr=null;                    // the NIC on which the ServerSocket should listen
+
+    String              group_name=null;                   // the name of the group (set on CONNECT, nulled on DISCONNECT)
+
+    /** @deprecated Use {@link bind_addr} instead */
     InetAddress         srv_sock_bind_addr=null;           // the NIC on which the ServerSocket should listen
-    ServerSocketHandler srv_sock_handler=null;             // accepts new connections on srv_sock
+
+    private ServerSocketHandler srv_sock_handler=null;             // accepts new connections on srv_sock
     IpAddress           srv_sock_addr=null;                // pair of server_socket:port
     Address             ping_dest=null;                    // address of the member we monitor
     Socket              ping_sock=null;                    // socket to the member we monitor
     InputStream         ping_input=null;                   // input stream of the socket to the member we monitor
     Thread              pinger_thread=null;                // listens on ping_sock, suspects member if socket is closed
+    final Object        pinger_mutex=new Object();
+
     final Hashtable     cache=new Hashtable(11);           // keys=Addresses, vals=IpAddresses (socket:port)
 
     /** Start port for server socket (uses first available port starting at start_port). A value of 0 (default)
@@ -60,14 +69,20 @@ public class FD_SOCK extends Protocol implements Runnable {
     final Promise       ping_addr_promise=new Promise();   // to fetch the ping_addr for ping_dest
     final Object        sock_mutex=new Object();           // for access to ping_sock, ping_input
     TimeScheduler       timer=null;
-    final BroadcastTask bcast_task=new BroadcastTask();    // to transmit SUSPECT message (until view change)
+    private final BroadcastTask bcast_task=new BroadcastTask();    // to transmit SUSPECT message (until view change)
     boolean             regular_sock_close=false;         // used by interruptPingerThread() when new ping_dest is computed
     int                 num_suspect_events=0;
-    private static final int NORMAL_TEMINATION=9;
-    private static final int ABNORMAL_TEMINATION=-1;
+    private static final int INTERRUPT =8;
+    private static final int NORMAL_TERMINATION=9;
+    private static final int ABNORMAL_TERMINATION=-1;
     private static final String name="FD_SOCK";
 
     BoundedList          suspect_history=new BoundedList(20);
+
+    /** whether to use KEEP_ALIVE on the ping socket or not */
+    private boolean      keep_alive=true;
+
+    private boolean      running=false;
 
 
     public String getName() {
@@ -88,7 +103,7 @@ public class FD_SOCK extends Protocol implements Runnable {
     }
 
     public boolean setProperties(Properties props) {
-        String str, tmp=null;
+        String str;
 
         super.setProperties(props);
         str=props.getProperty("get_cache_timeout");
@@ -115,35 +130,34 @@ public class FD_SOCK extends Protocol implements Runnable {
             props.remove("start_port");
         }
 
-
-        // PropertyPermission not granted if running in an untrusted environment with JNLP.
-        try {
-            tmp=System.getProperty("bind.address");
-            if(Util.isBindAddressPropertyIgnored()) {
-                tmp=null;
-            }
-        }
-        catch (SecurityException ex){
-        }
-
-        if(tmp != null)
-            str=tmp;
-        else
-            str=props.getProperty("srv_sock_bind_addr");
+        str=props.getProperty("keep_alive");
         if(str != null) {
-            try {
-                srv_sock_bind_addr=InetAddress.getByName(str);
-            }
-            catch(UnknownHostException unknown) {
-                if(log.isFatalEnabled()) log.fatal("(srv_sock_bind_addr): host " + str + " not known");
-                return false;
-            }
+            keep_alive=new Boolean(str).booleanValue();
+            props.remove("keep_alive");
+        }
+
+        str=props.getProperty("srv_sock_bind_addr");
+        if(str != null) {
+            log.error("srv_sock_bind_addr is deprecated and will be ignored - use bind_addr instead");
             props.remove("srv_sock_bind_addr");
         }
 
+        boolean ignore_systemprops=Util.isBindAddressPropertyIgnored();
+        str=Util.getProperty(new String[]{Global.BIND_ADDR, Global.BIND_ADDR_OLD}, props, "bind_addr",
+                             ignore_systemprops, null);
+        if(str != null) {
+            try {
+                bind_addr=InetAddress.getByName(str);
+            }
+            catch(UnknownHostException unknown) {
+                log.error("(bind_addr): host " + str + " not known");
+                return false;
+            }
+            props.remove("bind_addr");
+        }
 
         if(props.size() > 0) {
-            log.error("FD_SOCK.setProperties(): the following properties are not recognized: " + props);
+            log.error("the following properties are not recognized: " + props);
             return false;
         }
         return true;
@@ -158,7 +172,13 @@ public class FD_SOCK extends Protocol implements Runnable {
     }
 
 
+    public void start() throws Exception {
+        super.start();
+        running=true;
+    }
+
     public void stop() {
+        running=false;
         bcast_task.removeAll();
         stopPingerThread();
         stopServerSocket();
@@ -183,7 +203,7 @@ public class FD_SOCK extends Protocol implements Runnable {
 
         case Event.MSG:
             msg=(Message) evt.getArg();
-            hdr=(FdHeader) msg.removeHeader(name);
+            hdr=(FdHeader) msg.getHeader(name);
             if(hdr == null)
                 break;  // message did not originate from FD_SOCK layer, just pass up
 
@@ -193,6 +213,12 @@ public class FD_SOCK extends Protocol implements Runnable {
                 if(hdr.mbrs != null) {
                     if(log.isDebugEnabled()) log.debug("[SUSPECT] hdr=" + hdr);
                     for(int i=0; i < hdr.mbrs.size(); i++) {
+                        Address m=(Address)hdr.mbrs.elementAt(i);
+                        if(local_addr != null && m.equals(local_addr)) {
+                            if(warn)
+                                log.warn("I was suspected by " + msg.getSrc() + "; ignoring the SUSPECT message");
+                            continue;
+                        }
                         passUp(new Event(Event.SUSPECT, hdr.mbrs.elementAt(i)));
                         passDown(new Event(Event.SUSPECT, hdr.mbrs.elementAt(i)));
                     }
@@ -250,6 +276,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 hdr=new FdHeader(FdHeader.GET_CACHE_RSP);
                 hdr.cachedAddrs=(Hashtable) cache.clone();
                 msg=new Message(hdr.mbr, null, null);
+                msg.setFlag(Message.OOB);
                 msg.putHeader(name, hdr);
                 passDown(new Event(Event.MSG, msg));
                 break;
@@ -263,6 +290,13 @@ public class FD_SOCK extends Protocol implements Runnable {
                 break;
             }
             return;
+
+            case Event.CONFIG:
+                if(bind_addr == null) {
+                    Map config=(Map)evt.getArg();
+                    bind_addr=(InetAddress)config.get("bind_addr");
+                }
+                break;
         }
 
         passUp(evt);                                        // pass up to the layer above us
@@ -281,23 +315,50 @@ public class FD_SOCK extends Protocol implements Runnable {
 
             case Event.CONNECT:
                 passDown(evt);
-                srv_sock=Util.createServerSocket(srv_sock_bind_addr, start_port); // grab a random unused port above 10000
-                srv_sock_addr=new IpAddress(srv_sock_bind_addr, srv_sock.getLocalPort());
+                group_name=(String)evt.getArg();
+                srv_sock=Util.createServerSocket(bind_addr, start_port); // grab a random unused port above 10000
+                srv_sock_addr=new IpAddress(bind_addr, srv_sock.getLocalPort());
                 startServerSocket();
-                //if(pinger_thread == null)
-                  //  startPingerThread();
+                break;
+
+            case Event.DISCONNECT:
+                group_name=null;
+                String tmp, prefix=Global.THREAD_PREFIX;
+                int index;
+                tmp=srv_sock_handler != null? srv_sock_handler.getName() : null;
+                if(tmp != null) {
+                    index=tmp.indexOf(prefix);
+                    if(index > -1) {
+                        tmp=tmp.substring(0, index);
+                        srv_sock_handler.setName(tmp);
+                    }
+                }
+                synchronized(pinger_mutex) {
+                    tmp=pinger_thread != null? pinger_thread.getName() : null;
+                    if(tmp != null) {
+                        index=tmp.indexOf(prefix);
+                        if(index > -1) {
+                            tmp=tmp.substring(0, index);
+                            pinger_thread.setName(tmp);
+                        }
+                    }
+                }
+
+                stopServerSocket();
+
                 break;
 
             case Event.VIEW_CHANGE:
+                v=(View) evt.getArg();
+                Vector new_mbrs=v.getMembers();
+                passDown(evt);
+
                 synchronized(this) {
-                    v=(View) evt.getArg();
                     members.removeAllElements();
-                    members.addAll(v.getMembers());
+                    members.addAll(new_mbrs);
                     bcast_task.adjustSuspectedMembers(members);
                     pingable_mbrs.removeAllElements();
                     pingable_mbrs.addAll(members);
-                    passDown(evt);
-
                     if(log.isDebugEnabled()) log.debug("VIEW_CHANGE received: " + members);
 
                     // 1. Get the addr:pid cache from the coordinator (only if not already fetched)
@@ -305,7 +366,6 @@ public class FD_SOCK extends Protocol implements Runnable {
                         getCacheFromCoordinator();
                         got_cache_from_coord=true;
                     }
-
 
                     // 2. Broadcast my own addr:sock to all members so they can update their cache
                     if(!srv_sock_sent) {
@@ -327,14 +387,16 @@ public class FD_SOCK extends Protocol implements Runnable {
                     }
 
                     if(members.size() > 1) {
-                        if(pinger_thread != null && pinger_thread.isAlive()) {
-                            tmp_ping_dest=determinePingDest();
-                            if(ping_dest != null && tmp_ping_dest != null && !ping_dest.equals(tmp_ping_dest)) {
-                                interruptPingerThread(); // allows the thread to use the new socket
+                        synchronized(pinger_mutex) {
+                            if(pinger_thread != null && pinger_thread.isAlive()) {
+                                tmp_ping_dest=determinePingDest();
+                                if(ping_dest != null && tmp_ping_dest != null && !ping_dest.equals(tmp_ping_dest)) {
+                                    interruptPingerThread(); // allows the thread to use the new socket
+                                }
                             }
+                            else
+                                startPingerThread(); // only starts if not yet running
                         }
-                        else
-                            startPingerThread(); // only starts if not yet running
                     }
                     else {
                         ping_dest=null;
@@ -363,19 +425,22 @@ public class FD_SOCK extends Protocol implements Runnable {
         int max_fetch_tries=10;  // number of times a socket address is to be requested before giving up
 
         if(trace) log.trace("pinger_thread started"); // +++ remove
-
-        while(pinger_thread != null) {
+        while(pinger_thread != null && Thread.currentThread().equals(pinger_thread) && running) {
             tmp_ping_dest=determinePingDest(); // gets the neighbor to our right
             if(log.isDebugEnabled())
                 log.debug("determinePingDest()=" + tmp_ping_dest + ", pingable_mbrs=" + pingable_mbrs);
             if(tmp_ping_dest == null) {
                 ping_dest=null;
-                pinger_thread=null;
+                synchronized(pinger_mutex) {
+                    pinger_thread=null;
+                }
                 break;
             }
             ping_dest=tmp_ping_dest;
             ping_addr=fetchPingAddress(ping_dest);
             if(ping_addr == null) {
+                if(!running)
+                    break;
                 if(log.isErrorEnabled()) log.error("socket address for " + ping_dest + " could not be fetched, retrying");
                 if(--max_fetch_tries <= 0)
                     break;
@@ -384,7 +449,7 @@ public class FD_SOCK extends Protocol implements Runnable {
             }
 
             if(!setupPingSocket(ping_addr)) {
-                // covers use cases #7 and #8 in GmsTests.txt
+                // covers use cases #7 and #8 in ManualTests.txt
                 if(log.isDebugEnabled()) log.debug("could not create socket to " + ping_dest + "; suspecting " + ping_dest);
                 broadcastSuspectMessage(ping_dest);
                 pingable_mbrs.removeElement(ping_dest);
@@ -398,12 +463,14 @@ public class FD_SOCK extends Protocol implements Runnable {
                 if(ping_input != null) {
                     int c=ping_input.read();
                     switch(c) {
-                        case NORMAL_TEMINATION:
+                        case NORMAL_TERMINATION:
                             if(log.isDebugEnabled())
                                 log.debug("peer closed socket normally");
-                            pinger_thread=null;
+                            synchronized(pinger_mutex) {
+                                pinger_thread=null;
+                            }
                             break;
-                        case ABNORMAL_TEMINATION:
+                        case ABNORMAL_TERMINATION:
                             handleSocketClose(null);
                             break;
                         default:
@@ -419,7 +486,9 @@ public class FD_SOCK extends Protocol implements Runnable {
             }
         }
         if(log.isDebugEnabled()) log.debug("pinger thread terminated");
-        pinger_thread=null;
+        synchronized(pinger_mutex) {
+            pinger_thread=null;
+        }
     }
 
 
@@ -443,22 +512,67 @@ public class FD_SOCK extends Protocol implements Runnable {
     }
 
 
+    /**
+     * Does *not* need to be synchronized on pinger_mutex because the caller (down()) already has the mutex acquired
+     */
     void startPingerThread() {
+        running=true;
         if(pinger_thread == null) {
-            pinger_thread=new Thread(this, "FD_SOCK Ping thread");
+            pinger_thread=new Thread(Util.getGlobalThreadGroup(), this, "FD_SOCK Ping thread");
             pinger_thread.setDaemon(true);
             pinger_thread.start();
+            if(group_name != null) {
+                String tmp, prefix=Global.THREAD_PREFIX;
+                tmp=pinger_thread.getName();
+                if(tmp != null && tmp.indexOf(prefix) == -1) {
+                    tmp+=prefix + group_name + ")";
+                    pinger_thread.setName(tmp);
+                }
+            }
         }
     }
 
 
     void stopPingerThread() {
-        if(pinger_thread != null && pinger_thread.isAlive()) {
-            regular_sock_close=true;
-            teardownPingSocket();
+        running=false;
+        synchronized(pinger_mutex) {
+            if(pinger_thread != null && pinger_thread.isAlive()) {
+                regular_sock_close=true;
+                pinger_thread=null;
+                sendPingTermination(); // PATCH by Bruce Schuchardt (http://jira.jboss.com/jira/browse/JGRP-246)
+                teardownPingSocket();
+                ping_addr_promise.setResult(null);
+            }
         }
-        pinger_thread=null;
     }
+
+    // PATCH: send something so the connection handler can exit
+    synchronized void sendPingTermination() {
+        sendPingSignal(NORMAL_TERMINATION);
+    }
+
+    void sendPingInterrupt() {
+        sendPingSignal(INTERRUPT);
+    }
+
+
+    synchronized void sendPingSignal(int signal) {
+        if(ping_sock != null) {
+            try {
+                OutputStream out=ping_sock.getOutputStream();
+                if(out != null) {
+                    out.write(signal);
+                    out.flush();
+                }
+            }
+            catch(Throwable t) {
+                if(trace)
+                    log.trace("problem sending signal " + signalToString(signal), t);
+            }
+        }
+    }
+
+
 
 
     /**
@@ -466,19 +580,30 @@ public class FD_SOCK extends Protocol implements Runnable {
      * (JDK 1.2.2 had no problems here), therefore we close the socket (setSoLinger has to be set !) if we are
      * running under Linux. This should be tested under Windows. (Solaris 8 and JDK 1.3.1 definitely works).<p>
      * Oct 29 2001 (bela): completely removed Thread.interrupt(), but used socket close on all OSs. This makes this
-     * code portable and we don't have to check for OSs.
+     * code portable and we don't have to check for OSs.<p/>
+     * Does *not* need to be synchronized on pinger_mutex because the caller (down()) already has the mutex acquired
      * @see org.jgroups.tests.InterruptTest to determine whether Thread.interrupt() works for InputStream.read().
      */
     void interruptPingerThread() {
         if(pinger_thread != null && pinger_thread.isAlive()) {
             regular_sock_close=true;
+            sendPingInterrupt();  // PATCH by Bruce Schuchardt (http://jira.jboss.com/jira/browse/JGRP-246)
             teardownPingSocket(); // will wake up the pinger thread. less elegant than Thread.interrupt(), but does the job
         }
     }
 
     void startServerSocket() {
-        if(srv_sock_handler != null)
+        if(srv_sock_handler != null) {
             srv_sock_handler.start(); // won't start if already running
+            if(group_name != null) {
+                String tmp, prefix=Global.THREAD_PREFIX;
+                tmp=srv_sock_handler.getName();
+                if(tmp != null && tmp.indexOf(prefix) == -1) {
+                    tmp+=prefix + group_name + ")";
+                    srv_sock_handler.setName(tmp);
+                }
+            }
+        }
     }
 
     void stopServerSocket() {
@@ -499,6 +624,7 @@ public class FD_SOCK extends Protocol implements Runnable {
             try {
                 ping_sock=new Socket(dest.getIpAddress(), dest.getPort());
                 ping_sock.setSoLinger(true, 1);
+                ping_sock.setKeepAlive(keep_alive);
                 ping_input=ping_sock.getInputStream();
                 return true;
             }
@@ -520,14 +646,8 @@ public class FD_SOCK extends Protocol implements Runnable {
                 }
                 ping_sock=null;
             }
-            if(ping_input != null) {
-                try {
-                    ping_input.close();
-                }
-                catch(Exception ex) {
-                }
-                ping_input=null;
-            }
+            Util.close(ping_input);
+            ping_input=null;
         }
     }
 
@@ -553,6 +673,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 hdr=new FdHeader(FdHeader.GET_CACHE);
                 hdr.mbr=local_addr;
                 msg=new Message(coord, null, null);
+                msg.setFlag(Message.OOB);
                 msg.putHeader(name, hdr);
                 passDown(new Event(Event.MSG, msg));
                 result=(Hashtable) get_cache_promise.getResult(get_cache_timeout);
@@ -594,6 +715,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         hdr.mbrs=new Vector(1);
         hdr.mbrs.addElement(suspected_mbr);
         suspect_msg=new Message();
+        suspect_msg.setFlag(Message.OOB);
         suspect_msg.putHeader(name, hdr);
         passDown(new Event(Event.MSG, suspect_msg));
 
@@ -607,19 +729,6 @@ public class FD_SOCK extends Protocol implements Runnable {
     }
 
 
-    void broadcastWhoHasSockMessage(Address mbr) {
-        Message msg;
-        FdHeader hdr;
-
-        if(local_addr != null && mbr != null)
-            if(log.isDebugEnabled()) log.debug("[" + local_addr + "]: who-has " + mbr);
-
-        msg=new Message();  // bcast msg
-        hdr=new FdHeader(FdHeader.WHO_HAS_SOCK);
-        hdr.mbr=mbr;
-        msg.putHeader(name, hdr);
-        passDown(new Event(Event.MSG, msg));
-    }
 
 
     /**
@@ -628,14 +737,11 @@ public class FD_SOCK extends Protocol implements Runnable {
      */
     void sendIHaveSockMessage(Address dst, Address mbr, IpAddress addr) {
         Message msg=new Message(dst, null, null);
+        msg.setFlag(Message.OOB);
         FdHeader hdr=new FdHeader(FdHeader.I_HAVE_SOCK);
         hdr.mbr=mbr;
         hdr.sock_addr=addr;
         msg.putHeader(name, hdr);
-
-        if(trace) // +++ remove
-            log.trace("hdr=" + hdr);
-
         passDown(new Event(Event.MSG, msg));
     }
 
@@ -644,7 +750,7 @@ public class FD_SOCK extends Protocol implements Runnable {
      Attempts to obtain the ping_addr first from the cache, then by unicasting q request to <code>mbr</code>,
      then by multicasting a request to all members.
      */
-    IpAddress fetchPingAddress(Address mbr) {
+    private IpAddress fetchPingAddress(Address mbr) {
         IpAddress ret;
         Message ping_addr_req;
         FdHeader hdr;
@@ -668,18 +774,21 @@ public class FD_SOCK extends Protocol implements Runnable {
         // 2. Try to get from mbr
         ping_addr_promise.reset();
         ping_addr_req=new Message(mbr, null, null); // unicast
+        ping_addr_req.setFlag(Message.OOB);
         hdr=new FdHeader(FdHeader.WHO_HAS_SOCK);
         hdr.mbr=mbr;
         ping_addr_req.putHeader(name, hdr);
         passDown(new Event(Event.MSG, ping_addr_req));
-        ret=(IpAddress) ping_addr_promise.getResult(3000);
+        if(!running) return null;
+        ret=(IpAddress)ping_addr_promise.getResult(3000);
         if(ret != null) {
             return ret;
         }
 
 
         // 3. Try to get from all members
-        ping_addr_req=new Message(null, null, null); // multicast
+        ping_addr_req=new Message(null); // multicast
+        ping_addr_req.setFlag(Message.OOB);
         hdr=new FdHeader(FdHeader.WHO_HAS_SOCK);
         hdr.mbr=mbr;
         ping_addr_req.putHeader(name, hdr);
@@ -689,7 +798,7 @@ public class FD_SOCK extends Protocol implements Runnable {
     }
 
 
-    Address determinePingDest() {
+    private Address determinePingDest() {
         Address tmp;
 
         if(pingable_mbrs == null || pingable_mbrs.size() < 2 || local_addr == null)
@@ -711,6 +820,15 @@ public class FD_SOCK extends Protocol implements Runnable {
         return members.size() > 0 ? (Address) members.elementAt(0) : null;
     }
 
+
+    static String signalToString(int signal) {
+        switch(signal) {
+            case NORMAL_TERMINATION: return "NORMAL_TERMINATION";
+            case ABNORMAL_TERMINATION: return "ABNORMAL_TERMINATION";
+            case INTERRUPT: return "INTERRUPT";
+            default: return "n/a";
+        }
+    }
 
 
 
@@ -905,21 +1023,29 @@ public class FD_SOCK extends Protocol implements Runnable {
         final List clients=new ArrayList();
 
 
+        String getName() {
+            return acceptor != null? acceptor.getName() : null;
+        }
+
+        void setName(String thread_name) {
+            if(acceptor != null)
+                acceptor.setName(thread_name);
+        }
 
         ServerSocketHandler() {
             start();
         }
 
-        void start() {
+        final void start() {
             if(acceptor == null) {
-                acceptor=new Thread(this, "ServerSocket acceptor thread");
+                acceptor=new Thread(Util.getGlobalThreadGroup(), this, "ServerSocket acceptor thread");
                 acceptor.setDaemon(true);
                 acceptor.start();
             }
         }
 
 
-        void stop() {
+        final void stop() {
             if(acceptor != null && acceptor.isAlive()) {
                 try {
                     srv_sock.close(); // this will terminate thread, peer will receive SocketException (socket close)
@@ -970,7 +1096,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         Socket      client_sock=null;
         InputStream in;
         final Object mutex=new Object();
-        List clients=new ArrayList();
+        final List clients=new ArrayList();
 
         ClientConnectionHandler(Socket client_sock, List clients) {
             setName("ClientConnectionHandler");
@@ -984,25 +1110,20 @@ public class FD_SOCK extends Protocol implements Runnable {
                 if(client_sock != null) {
                     try {
                         OutputStream out=client_sock.getOutputStream();
-                        out.write(NORMAL_TEMINATION);
+                        out.write(NORMAL_TERMINATION);
+                        out.flush();
+                        closeClientSocket();
                     }
                     catch(Throwable t) {
                     }
                 }
             }
-            closeClientSocket();
         }
 
         void closeClientSocket() {
             synchronized(mutex) {
-                if(client_sock != null) {
-                    try {
-                        client_sock.close();
-                    }
-                    catch(Exception ex) {
-                    }
-                    client_sock=null;
-                }
+                Util.close(client_sock);
+                client_sock=null;
             }
         }
 
@@ -1013,13 +1134,18 @@ public class FD_SOCK extends Protocol implements Runnable {
                         return;
                     in=client_sock.getInputStream();
                 }
-                while((in.read()) != -1) {
+                int b=0;
+                do {
+                    b=in.read();
                 }
+                while(b != ABNORMAL_TERMINATION && b != NORMAL_TERMINATION);
             }
-            catch(IOException io_ex1) {
+            catch(IOException ex) {
             }
             finally {
-                closeClientSocket();
+                Socket sock=client_sock; // PATCH: avoid race condition causing NPE
+                if (sock != null && !sock.isClosed())
+                    closeClientSocket();
                 synchronized(clients) {
                     clients.remove(this);
                 }
@@ -1125,6 +1251,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 hdr.mbrs=(Vector) suspected_mbrs.clone();
             }
             suspect_msg=new Message();       // mcast SUSPECT to all members
+            suspect_msg.setFlag(Message.OOB);
             suspect_msg.putHeader(name, hdr);
             passDown(new Event(Event.MSG, suspect_msg));
             if(log.isDebugEnabled()) log.debug("task done");

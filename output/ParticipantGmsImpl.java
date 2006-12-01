@@ -1,4 +1,4 @@
-// $Id: ParticipantGmsImpl.java,v 1.17 2005/12/23 14:57:06 belaban Exp $
+// $Id: ParticipantGmsImpl.java,v 1.22 2006/08/03 09:20:58 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
@@ -6,6 +6,9 @@ import org.jgroups.*;
 import org.jgroups.util.Promise;
 
 import java.util.Vector;
+import java.util.Iterator;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 
 
 public class ParticipantGmsImpl extends GmsImpl {
@@ -63,8 +66,17 @@ public class ParticipantGmsImpl extends GmsImpl {
     }
 
 
+    /** In case we get a different JOIN_RSP from a previous JOIN_REQ sent by us (as a client), we simply apply the
+     * new view if it is greater than ours
+     *
+     * @param join_rsp
+     */
     public void handleJoinResponse(JoinRsp join_rsp) {
-        // wrongMethod("handleJoinResponse");
+        View v=join_rsp.getView();
+        ViewId tmp_vid=v != null? v.getVid() : null;
+        if(tmp_vid != null && gms.view_id != null && tmp_vid.compareTo(gms.view_id) > 0) {
+            gms.installView(v);
+        }
     }
 
     public void handleLeaveResponse() {
@@ -79,7 +91,10 @@ public class ParticipantGmsImpl extends GmsImpl {
 
 
     public void suspect(Address mbr) {
-        handleSuspect(mbr);
+        Collection emptyVector=new LinkedHashSet(0);
+        Collection suspected=new LinkedHashSet(1);
+        suspected.add(mbr);
+        handleMembershipChange(emptyVector, emptyVector, suspected);
     }
 
 
@@ -90,11 +105,31 @@ public class ParticipantGmsImpl extends GmsImpl {
     }
 
 
-    public void handleJoin(Address mbr) {
-    }
+    public void handleMembershipChange(Collection newMembers, Collection leavingMembers, Collection suspectedMembers) {
+        if(suspectedMembers == null || suspectedMembers.isEmpty())
+            return;
 
+        for(Iterator i=suspectedMembers.iterator(); i.hasNext();) {
+            Address mbr=(Address)i.next();
+            if(!suspected_mbrs.contains(mbr))
+                suspected_mbrs.addElement(mbr);
+        }
 
-    public void handleLeave(Address mbr, boolean suspected) {
+        if(log.isDebugEnabled())
+            log.debug("suspected members=" + suspectedMembers + ", suspected_mbrs=" + suspected_mbrs);
+
+        if(wouldIBeCoordinator()) {
+            if(log.isDebugEnabled())
+                log.debug("members are " + gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
+
+            suspected_mbrs.removeAllElements();
+            gms.becomeCoordinator();
+            for(Iterator i=suspectedMembers.iterator(); i.hasNext();) {
+                Address mbr=(Address)i.next();
+                gms.getViewHandler().add(new GMS.Request(GMS.Request.SUSPECT, mbr, true, null));
+                gms.ack_collector.suspect(mbr);
+            }
+        }
     }
 
 
@@ -116,11 +151,11 @@ public class ParticipantGmsImpl extends GmsImpl {
     }
 
 
-    public void handleSuspect(Address mbr) {
+/*    public void handleSuspect(Address mbr) {
         if(mbr == null) return;
         if(!suspected_mbrs.contains(mbr))
             suspected_mbrs.addElement(mbr);
-        
+
         if(log.isDebugEnabled()) log.debug("suspected mbr=" + mbr + ", suspected_mbrs=" + suspected_mbrs);
 
         if(wouldIBeCoordinator()) {
@@ -130,10 +165,10 @@ public class ParticipantGmsImpl extends GmsImpl {
             suspected_mbrs.removeAllElements();
             gms.becomeCoordinator();
             // gms.getImpl().suspect(mbr);
-            gms.view_handler.add(new GMS.Request(GMS.Request.SUSPECT, mbr, true, null));
+            gms.getViewHandler().add(new GMS.Request(GMS.Request.SUSPECT, mbr, true, null));
             gms.ack_collector.suspect(mbr);
         }
-    }
+    }*/
 
     public void handleMergeRequest(Address sender, ViewId merge_id) {
         // only coords handle this method; reject it if we're not coord
@@ -153,10 +188,7 @@ public class ParticipantGmsImpl extends GmsImpl {
     boolean wouldIBeCoordinator() {
         Address new_coord;
         Vector mbrs=gms.members.getMembers(); // getMembers() returns a *copy* of the membership vector
-
-        for(int i=0; i < suspected_mbrs.size(); i++)
-            mbrs.removeElement(suspected_mbrs.elementAt(i));
-
+        mbrs.removeAll(suspected_mbrs);
         if(mbrs.size() < 1) return false;
         new_coord=(Address)mbrs.elementAt(0);
         return gms.local_addr.equals(new_coord);

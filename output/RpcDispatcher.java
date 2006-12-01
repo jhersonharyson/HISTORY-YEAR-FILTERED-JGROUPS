@@ -1,26 +1,18 @@
-// $Id: RpcDispatcher.java,v 1.20 2005/11/12 06:39:21 belaban Exp $
+// $Id: RpcDispatcher.java,v 1.27 2006/12/11 08:24:13 belaban Exp $
 
 package org.jgroups.blocks;
 
 
+import org.jgroups.*;
 import org.jgroups.util.RspList;
 import org.jgroups.util.Util;
-import org.jgroups.ChannelListener;
-import org.jgroups.Channel;
-import org.jgroups.MessageListener;
-import org.jgroups.MembershipListener;
-import org.jgroups.Transport;
-import org.jgroups.Message;
-import org.jgroups.TimeoutException;
-import org.jgroups.SuspectedException;
-import org.jgroups.Address;
 
 import java.io.Serializable;
-import java.util.Vector;
-import java.util.List;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Iterator;
-import java.lang.reflect.Method;
+import java.util.List;
+import java.util.Vector;
 
 
 
@@ -38,8 +30,12 @@ import java.lang.reflect.Method;
  */
 public class RpcDispatcher extends MessageDispatcher implements ChannelListener {
     protected Object        server_obj=null;
-    protected Marshaller    marshaller=null;
-    protected List          additionalChannelListeners=null;
+    /** Marshaller to marshall requests at the caller and unmarshal requests at the receiver(s) */
+    protected Marshaller    req_marshaller=null;
+
+    /** Marshaller to marshal responses at the receiver(s) and unmarshal responses at the caller */
+    protected Marshaller    rsp_marshaller=null;
+    protected final List    additionalChannelListeners=new ArrayList();
     protected MethodLookup  method_lookup=null;
 
 
@@ -47,7 +43,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         super(channel, l, l2);
         channel.addChannelListener(this);
         this.server_obj=server_obj;
-        additionalChannelListeners = new ArrayList();
     }
 
 
@@ -56,7 +51,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         super(channel, l, l2, deadlock_detection);
         channel.addChannelListener(this);
         this.server_obj=server_obj;
-        additionalChannelListeners = new ArrayList();
     }
 
     public RpcDispatcher(Channel channel, MessageListener l, MembershipListener l2, Object server_obj,
@@ -64,7 +58,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         super(channel, l, l2, deadlock_detection, concurrent_processing);
         channel.addChannelListener(this);
         this.server_obj=server_obj;
-        additionalChannelListeners = new ArrayList();
     }
 
 
@@ -83,7 +76,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         }
 
         this.server_obj=server_obj;
-        additionalChannelListeners = new ArrayList();
     }
 
 
@@ -95,11 +87,29 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
     public String getName() {return "RpcDispatcher";}
 
-    public void       setMarshaller(Marshaller m) {this.marshaller=m;}
+    public Marshaller getRequestMarshaller()             {return req_marshaller;}
 
-    public Marshaller getMarshaller()             {return marshaller;}
+    public void setRequestMarshaller(Marshaller m) {
+        this.req_marshaller=m;
+    }
+
+    public Marshaller getResponseMarshaller()             {return rsp_marshaller;}
+
+    public void setResponseMarshaller(Marshaller m) {
+        this.rsp_marshaller=m;
+        if(corr != null)
+            corr.setMarshaller(m);
+    }
+
+    public Marshaller getMarshaller() {return req_marshaller;}
+    
+    public void setMarshaller(Marshaller m) {req_marshaller=m;}
 
     public Object getServerObject() {return server_obj;}
+
+    public void setServerObject(Object server_obj) {
+        this.server_obj=server_obj;
+    }
 
     public MethodLookup getMethodLookup() {
         return method_lookup;
@@ -123,23 +133,37 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
     }
 
 
-
+    public RspList callRemoteMethods(Vector dests, String method_name, Object[] args,
+                                     Class[] types, int mode, long timeout) {
+        return callRemoteMethods(dests, method_name, args, types, mode, timeout, false);
+    }
 
 
     public RspList callRemoteMethods(Vector dests, String method_name, Object[] args,
-                                     Class[] types, int mode, long timeout) {
+                                     Class[] types, int mode, long timeout, boolean use_anycasting) {
         MethodCall method_call=new MethodCall(method_name, args, types);
-        return callRemoteMethods(dests, method_call, mode, timeout);
+        return callRemoteMethods(dests, method_call, mode, timeout, use_anycasting);
     }
+
 
     public RspList callRemoteMethods(Vector dests, String method_name, Object[] args,
                                      String[] signature, int mode, long timeout) {
+        return callRemoteMethods(dests, method_name, args, signature, mode, timeout, false);
+    }
+
+
+    public RspList callRemoteMethods(Vector dests, String method_name, Object[] args,
+                                     String[] signature, int mode, long timeout, boolean use_anycasting) {
         MethodCall method_call=new MethodCall(method_name, args, signature);
-        return callRemoteMethods(dests, method_call, mode, timeout);
+        return callRemoteMethods(dests, method_call, mode, timeout, use_anycasting);
     }
 
 
     public RspList callRemoteMethods(Vector dests, MethodCall method_call, int mode, long timeout) {
+        return callRemoteMethods(dests, method_call, mode, timeout, false);
+    }
+
+    public RspList callRemoteMethods(Vector dests, MethodCall method_call, int mode, long timeout, boolean use_anycasting) {
         if(dests != null && dests.size() == 0) {
             // don't send if dest list is empty
             if(log.isTraceEnabled())
@@ -154,15 +178,18 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
         byte[] buf;
         try {
-            buf=marshaller != null? marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
+            buf=req_marshaller != null? req_marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
         }
         catch(Exception e) {
-            if(log.isErrorEnabled()) log.error("exception=" + e);
-            return null;
+            // if(log.isErrorEnabled()) log.error("exception", e);
+            // we will change this in 2.4 to add the exception to the signature
+            // (see http://jira.jboss.com/jira/browse/JGRP-193). The reason for a RTE is that we cannot change the
+            // signature in 2.3, otherwise 2.3 would be *not* API compatible to prev releases
+            throw new RuntimeException("failure to marshal argument(s)", e);
         }
 
         Message msg=new Message(null, null, buf);
-        RspList  retval=super.castMessage(dests, msg, mode, timeout);
+        RspList  retval=super.castMessage(dests, msg, mode, timeout, use_anycasting);
         if(log.isTraceEnabled()) log.trace("responses: " + retval);
         return retval;
     }
@@ -170,21 +197,18 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
 
     public Object callRemoteMethod(Address dest, String method_name, Object[] args,
-                                   Class[] types, int mode, long timeout)
-            throws TimeoutException, SuspectedException {
+                                   Class[] types, int mode, long timeout) throws Throwable {
         MethodCall method_call=new MethodCall(method_name, args, types);
         return callRemoteMethod(dest, method_call, mode, timeout);
     }
 
     public Object callRemoteMethod(Address dest, String method_name, Object[] args,
-                                   String[] signature, int mode, long timeout)
-            throws TimeoutException, SuspectedException {
+                                   String[] signature, int mode, long timeout) throws Throwable {
         MethodCall method_call=new MethodCall(method_name, args, signature);
         return callRemoteMethod(dest, method_call, mode, timeout);
     }
 
-    public Object callRemoteMethod(Address dest, MethodCall method_call, int mode, long timeout)
-            throws TimeoutException, SuspectedException {
+    public Object callRemoteMethod(Address dest, MethodCall method_call, int mode, long timeout) throws Throwable {
         byte[]   buf=null;
         Message  msg=null;
         Object   retval=null;
@@ -192,22 +216,20 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         if(log.isTraceEnabled())
             log.trace("dest=" + dest + ", method_call=" + method_call + ", mode=" + mode + ", timeout=" + timeout);
 
-        try {
-            buf=marshaller != null? marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
-        }
-        catch(Exception e) {
-            if(log.isErrorEnabled()) log.error("exception=" + e);
-            return null;
-        }
-
+        buf=req_marshaller != null? req_marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
         msg=new Message(dest, null, buf);
         retval=super.sendMessage(msg, mode, timeout);
         if(log.isTraceEnabled()) log.trace("retval: " + retval);
+        if(retval instanceof Throwable)
+            throw (Throwable)retval;
         return retval;
     }
 
 
-
+    protected void correlatorStarted() {
+        if(corr != null)
+           corr.setMarshaller(rsp_marshaller);
+    }
 
 
     /**
@@ -229,10 +251,10 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         }
 
         try {
-            body=marshaller != null? marshaller.objectFromByteBuffer(req.getBuffer()) : req.getObject();
+            body=req_marshaller != null? req_marshaller.objectFromByteBuffer(req.getBuffer()) : req.getObject();
         }
         catch(Throwable e) {
-            if(log.isErrorEnabled()) log.error("exception=" + e);
+            if(log.isErrorEnabled()) log.error("exception marshalling object", e);
             return e;
         }
 
@@ -259,7 +281,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             return method_call.invoke(server_obj);
         }
         catch(Throwable x) {
-            log.error("failed invoking method", x);
             return x;
         }
     }

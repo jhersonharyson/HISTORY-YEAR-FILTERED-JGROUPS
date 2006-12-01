@@ -1,4 +1,4 @@
-// $Id: DiscardTest.java,v 1.6 2005/12/23 18:27:04 belaban Exp $
+// $Id: DiscardTest.java,v 1.9 2006/09/22 12:30:45 belaban Exp $
 
 package org.jgroups.tests;
 
@@ -8,19 +8,20 @@ import junit.framework.TestCase;
 import junit.framework.TestSuite;
 import org.jgroups.*;
 import org.jgroups.util.Promise;
+import org.jgroups.util.Util;
 
 
 /**
  * Tests the NAKACK (retransmission) and STABLE (garbage collection) protocols
  * by discarding 10% of all network-bound messages
  * @author Bela Ban
- * @version $Id: DiscardTest.java,v 1.6 2005/12/23 18:27:04 belaban Exp $
+ * @version $Id: DiscardTest.java,v 1.9 2006/09/22 12:30:45 belaban Exp $
  */
 public class DiscardTest extends TestCase {
     JChannel ch1, ch2;
 
     final String discard_props="discard.xml";             // located in JGroups/conf, needs to be in the classpath
-    final String fast_props="fc-fast-minimalthreads.xml"; // located in JGroups/conf, needs to be in the classpath
+    final String fast_props="udp.xml"; // located in JGroups/conf, needs to be in the classpath
     final long NUM_MSGS=10000;
     final int  MSG_SIZE=1000;
     private static final String GROUP="DiscardTestGroup";
@@ -62,6 +63,7 @@ public class DiscardTest extends TestCase {
         ch2.connect(GROUP);
         ch2_addr=ch2.getLocalAddress();
 
+        Util.sleep(2000);
         View v=ch2.getView();
         System.out.println("**** ch2's view: " + v);
         assertEquals(2, v.size());
@@ -140,8 +142,7 @@ public class DiscardTest extends TestCase {
 
 
     public static Test suite() {
-        TestSuite s=new TestSuite(DiscardTest.class);
-        return s;
+        return new TestSuite(DiscardTest.class);
     }
 
     public static void main(String[] args) {

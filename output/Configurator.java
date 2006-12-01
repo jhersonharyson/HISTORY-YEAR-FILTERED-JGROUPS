@@ -1,4 +1,4 @@
-// $Id: Configurator.java,v 1.14 2005/10/19 07:23:16 belaban Exp $
+// $Id: Configurator.java,v 1.23 2006/12/22 13:37:12 belaban Exp $
 
 package org.jgroups.stack;
 
@@ -61,18 +61,30 @@ public class Configurator {
     }
 
 
-    public void startProtocolStack(Protocol bottom_prot) {
+    public void initProtocolStack(Protocol bottom_prot) throws Exception {
         while(bottom_prot != null) {
-            bottom_prot.startDownHandler();
-            bottom_prot.startUpHandler();
+            bottom_prot.init();
             bottom_prot=bottom_prot.getUpProtocol();
         }
     }
 
+    public void startProtocolStack(Protocol prot) throws Exception {
+        while(prot != null) {
+            prot.start();
+            prot=prot.getDownProtocol();
+        }
+    }
 
-    public void stopProtocolStack(Protocol start_prot) {
+    public void stopProtocolStack(Protocol prot) {
+        while(prot != null) {
+            prot.stop();
+            prot=prot.getDownProtocol();
+        }
+    }
+
+
+    public void destroyProtocolStack(Protocol start_prot) {
         while(start_prot != null) {
-            start_prot.stopInternal();
             start_prot.destroy();
             start_prot=start_prot.getDownProtocol();
         }
@@ -131,11 +143,7 @@ public class Configurator {
 
         // create an instance of the protocol class and configure it
         prot=config.createLayer(stack);
-
-        // start the handler threads (unless down_thread or up_thread are set to false)
-        prot.startDownHandler();
-        prot.startUpHandler();
-
+        prot.init();
         return prot;
     }
 
@@ -143,6 +151,7 @@ public class Configurator {
     /**
      * Inserts an already created (and initialized) protocol into the protocol list. Sets the links
      * to the protocols above and below correctly and adjusts the linked list of protocols accordingly.
+     * This should be done before starting the stack.
      * @param prot  The protocol to be inserted. Before insertion, a sanity check will ensure that none
      *              of the existing protocols have the same name as the new protocol.
      * @param position Where to place the protocol with respect to the neighbor_prot (ABOVE, BELOW)
@@ -154,16 +163,30 @@ public class Configurator {
     public void insertProtocol(Protocol prot, int position, String neighbor_prot, ProtocolStack stack) throws Exception {
         if(neighbor_prot == null) throw new Exception("Configurator.insertProtocol(): neighbor_prot is null");
         if(position != ProtocolStack.ABOVE && position != ProtocolStack.BELOW)
-            throw new Exception("Configurator.insertProtocol(): position has to be ABOVE or BELOW");
+            throw new Exception("position has to be ABOVE or BELOW");
 
 
-        // find the neighbors below and above
+        Protocol neighbor=stack.findProtocol(neighbor_prot);
+        if(neighbor == null)
+            throw new Exception("protocol \"" + neighbor_prot + "\" not found in " + stack.printProtocolSpec(false));
 
-
-
-        // connect to the protocol layer below and above
-
-
+         // connect to the protocol layer below and above
+        if(position == ProtocolStack.BELOW) {
+            prot.setUpProtocol(neighbor);
+            Protocol below=neighbor.getDownProtocol();
+            prot.setDownProtocol(below);
+            if(below != null)
+                below.setUpProtocol(prot);
+            neighbor.setDownProtocol(prot);
+        }
+        else { // ABOVE is default
+            Protocol above=neighbor.getUpProtocol();
+            prot.setUpProtocol(above);
+            if(above != null)
+                above.setDownProtocol(prot);
+            prot.setDownProtocol(neighbor);
+            neighbor.setUpProtocol(prot);
+        }
     }
 
 
@@ -174,7 +197,18 @@ public class Configurator {
      *                  (otherwise the stack won't be created), the name refers to just 1 protocol.
      * @exception Exception Thrown if the protocol cannot be stopped correctly.
      */
-    public void removeProtocol(String prot_name) throws Exception {
+    public Protocol removeProtocol(Protocol top_prot, String prot_name) throws Exception {
+        if(prot_name == null) return null;
+        Protocol prot=findProtocol(top_prot, prot_name);
+        if(prot == null) return null;
+        Protocol above=prot.getUpProtocol(), below=prot.getDownProtocol();
+        if(above != null)
+            above.setDownProtocol(below);
+        if(below != null)
+            below.setUpProtocol(above);
+        prot.setUpProtocol(null);
+        prot.setDownProtocol(null);
+        return prot;
     }
 
 
@@ -185,8 +219,7 @@ public class Configurator {
     /**
      * Creates a protocol stack by iterating through the protocol list and connecting
      * adjacent layers. The list starts with the topmost layer and has the bottommost
-     * layer at the tail. When all layers are connected the algorithms traverses the list
-     * once more to call startInternal() on each layer.
+     * layer at the tail.
      * @param protocol_list List of Protocol elements (from top to bottom)
      * @return Protocol stack
      */
@@ -276,7 +309,6 @@ public class Configurator {
                 return null;
             retval.addElement(layer);
         }
-
         sanityCheck(retval);
         return retval;
     }
@@ -554,7 +586,7 @@ public class Configurator {
         }
 
 
-        Protocol createLayer(ProtocolStack prot_stack) throws Exception {
+        private Protocol createLayer(ProtocolStack prot_stack) throws Exception {
             Protocol retval=null;
             if(protocol_name == null)
                 return null;
@@ -590,7 +622,7 @@ public class Configurator {
                 if(properties != null)
                     if(!retval.setPropertiesInternal(properties))
                         return null;
-                retval.init();
+                // retval.init(); // moved to after creation of *all* protocols
             }
             catch(InstantiationException inst_ex) {
                 log.error("an instance of " + protocol_name + " could not be created. Please check that it implements" +
@@ -634,7 +666,7 @@ public class Configurator {
                 return;
             protocol_stack=conf.connectProtocols(protocols);
             Thread.sleep(3000);
-            conf.stopProtocolStack(protocol_stack);
+            conf.destroyProtocolStack(protocol_stack);
             // conf.stopProtocolStackInternal(protocol_stack);
         }
         catch(Exception e) {

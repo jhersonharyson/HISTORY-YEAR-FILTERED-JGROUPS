@@ -1,10 +1,9 @@
-// $Id: ProtocolStack.java,v 1.24 2005/09/29 12:10:03 belaban Exp $
+// $Id: ProtocolStack.java,v 1.34 2006/12/28 09:34:31 belaban Exp $
 
 package org.jgroups.stack;
 
 import org.jgroups.*;
 import org.jgroups.conf.ClassConfigurator;
-import org.jgroups.util.Promise;
 import org.jgroups.util.TimeScheduler;
 
 import java.util.*;
@@ -32,10 +31,10 @@ public class ProtocolStack extends Protocol implements Transport {
     // final Promise                   ack_promise=new Promise();
 
     /** Used to sync on START/START_OK events for start()*/
-    Promise                         start_promise=null;
+    // Promise                         start_promise=null;
 
     /** used to sync on STOP/STOP_OK events for stop() */
-    Promise                         stop_promise=null;
+    // Promise                         stop_promise=null;
 
     public static final int         ABOVE=1; // used by insertProtocol()
     public static final int         BELOW=2; // used by insertProtocol()
@@ -101,7 +100,7 @@ public class ProtocolStack extends Protocol implements Transport {
      * the properties for each protocol will also be printed.
      */
     public String printProtocolSpec(boolean include_properties) {
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
         Protocol     prot=top_prot;
         Properties   tmpProps;
         String       name;
@@ -119,7 +118,7 @@ public class ProtocolStack extends Protocol implements Transport {
                         sb.append('\n');
                         for(Iterator it=tmpProps.entrySet().iterator(); it.hasNext();) {
                             entry=(Map.Entry)it.next();
-                            sb.append(entry + "\n");
+                            sb.append(entry).append("\n");
                         }
                     }
                 }
@@ -133,7 +132,7 @@ public class ProtocolStack extends Protocol implements Transport {
     }
 
     public String printProtocolSpecAsXML() {
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
         Protocol     prot=bottom_prot;
         Properties   tmpProps;
         String       name;
@@ -174,12 +173,12 @@ public class ProtocolStack extends Protocol implements Transport {
 
     public void setup() throws Exception {
         if(top_prot == null) {
-            top_prot=conf.setupProtocolStack(setup_string, this); // calls init() on each protocol
+            top_prot=conf.setupProtocolStack(setup_string, this);
             if(top_prot == null)
-                throw new Exception("ProtocolStack.setup(): couldn't create protocol stack");
+                throw new Exception("couldn't create protocol stack");
             top_prot.setUpProtocol(this);
             bottom_prot=conf.getBottommostProtocol(top_prot);
-            conf.startProtocolStack(bottom_prot);        // sets up queues and threads
+            conf.initProtocolStack(bottom_prot);         // calls init() on each protocol, from bottom to top
         }
     }
 
@@ -230,8 +229,8 @@ public class ProtocolStack extends Protocol implements Transport {
      *                  (otherwise the stack won't be created), the name refers to just 1 protocol.
      * @exception Exception Thrown if the protocol cannot be stopped correctly.
      */
-    public void removeProtocol(String prot_name) throws Exception {
-        conf.removeProtocol(prot_name);
+    public Protocol removeProtocol(String prot_name) throws Exception {
+        return conf.removeProtocol(top_prot, prot_name);
     }
 
 
@@ -251,7 +250,7 @@ public class ProtocolStack extends Protocol implements Transport {
 
     public void destroy() {
         if(top_prot != null) {
-            conf.stopProtocolStack(top_prot);           // destroys msg queues and threads
+            conf.destroyProtocolStack(top_prot);           // destroys msg queues and threads
             top_prot=null;
         }
     }
@@ -264,37 +263,14 @@ public class ProtocolStack extends Protocol implements Transport {
      * Each layer can perform some initialization, e.g. create a multicast socket
      */
     public void startStack() throws Exception {
-        Object start_result=null;
         if(stopped == false) return;
 
         timer.start();
-
-        if(start_promise == null)
-            start_promise=new Promise();
-        else
-            start_promise.reset();
-
-        down(new Event(Event.START));
-        start_result=start_promise.getResult(0);
-        if(start_result != null && start_result instanceof Throwable) {
-            if(start_result instanceof Exception)
-                throw (Exception)start_result;
-            else
-                throw new Exception("ProtocolStack.start(): exception is " + start_result);
-        }
-
+        conf.startProtocolStack(top_prot);
         stopped=false;
     }
 
 
-
-    public void startUpHandler() {
-        // DON'T REMOVE !!!!  Avoids a superfluous thread
-    }
-
-    public void startDownHandler() {
-        // DON'T REMOVE !!!!  Avoids a superfluous thread
-    }
 
 
     /**
@@ -314,14 +290,7 @@ public class ProtocolStack extends Protocol implements Transport {
         }
 
         if(stopped) return;
-
-        if(stop_promise == null)
-            stop_promise=new Promise();
-        else
-            stop_promise.reset();
-
-        down(new Event(Event.STOP));
-        stop_promise.getResult(5000);
+        conf.stopProtocolStack(top_prot);
         stopped=true;
     }
 
@@ -331,10 +300,6 @@ public class ProtocolStack extends Protocol implements Transport {
      */
     public void flushEvents() {
 
-    }
-
-    public void stopInternal() {
-        // do nothing, DON'T REMOVE !!!!
     }
 
 
@@ -361,17 +326,6 @@ public class ProtocolStack extends Protocol implements Transport {
 
 
     public void up(Event evt) {
-        switch(evt.getType()) {
-            case Event.START_OK:
-                if(start_promise != null)
-                    start_promise.setResult(evt.getArg());
-                return;
-            case Event.STOP_OK:
-                if(stop_promise != null)
-                    stop_promise.setResult(evt.getArg());
-                return;
-        }
-
         if(channel != null)
             channel.up(evt);
     }
@@ -381,16 +335,12 @@ public class ProtocolStack extends Protocol implements Transport {
 
     public void down(Event evt) {
         if(top_prot != null)
-            top_prot.receiveDownEvent(evt);
+            top_prot.down(evt);
         else
             log.error("no down protocol available !");
     }
 
 
-
-    protected void receiveUpEvent(Event evt) {
-        up(evt);
-    }
 
 
 

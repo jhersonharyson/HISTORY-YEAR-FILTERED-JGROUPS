@@ -1,5 +1,3 @@
-// $Id: FRAG2.java,v 1.20 2005/08/11 12:43:47 belaban Exp $
-
 package org.jgroups.protocols;
 
 import org.jgroups.Address;
@@ -25,9 +23,9 @@ import java.util.*;
  * Compared to FRAG, this protocol does <em>not</em> need to serialize the message in order to break it into
  * smaller fragments: it looks only at the message's buffer, which is a byte[] array anyway. We assume that the
  * size addition for headers and src and dest address is minimal when the transport finally has to serialize the
- * message, so we add a constant (1000 bytes).
+ * message, so we add a constant (200 bytes).
  * @author Bela Ban
- * @version $Id: FRAG2.java,v 1.20 2005/08/11 12:43:47 belaban Exp $
+ * @version $Id: FRAG2.java,v 1.26 2006/12/19 12:53:12 belaban Exp $
  */
 public class FRAG2 extends Protocol {
 
@@ -36,7 +34,7 @@ public class FRAG2 extends Protocol {
 
     /** Number of bytes that we think the headers plus src and dest will take up when
         message is serialized by transport. This will be subtracted from frag_size */
-    int overhead=50;
+    int overhead=200;
 
     /*the fragmentation list contains a fragmentation table per sender
      *this way it becomes easier to clean up if a sender (member) leaves or crashes
@@ -128,7 +126,7 @@ public class FRAG2 extends Protocol {
             }
             if(size > frag_size) {
                 if(trace) {
-                    StringBuffer sb=new StringBuffer("message's buffer size is ");
+                    StringBuilder sb=new StringBuilder("message's buffer size is ");
                     sb.append(size).append(", will fragment ").append("(frag_size=");
                     sb.append(frag_size).append(')');
                     log.trace(sb.toString());
@@ -179,9 +177,9 @@ public class FRAG2 extends Protocol {
 
         case Event.MSG:
             Message msg=(Message)evt.getArg();
-            Object obj=msg.getHeader(name);
-            if(obj != null && obj instanceof FragHeader) { // needs to be defragmented
-                unfragment(msg); // Unfragment and possibly pass up
+            FragHeader hdr=(FragHeader)msg.getHeader(name);
+            if(hdr != null) { // needs to be defragmented
+                unfragment(msg, hdr); // Unfragment and possibly pass up
                 return;
             }
             else {
@@ -220,7 +218,6 @@ public class FRAG2 extends Protocol {
         Address            dest=msg.getDest();
         long               id=getNextId(); // used as seqnos
         int                num_frags;
-        StringBuffer       sb;
         Range              r;
 
         try {
@@ -232,7 +229,7 @@ public class FRAG2 extends Protocol {
             }
 
             if(trace) {
-                sb=new StringBuffer("fragmenting packet to ");
+                StringBuilder sb=new StringBuilder("fragmenting packet to ");
                 sb.append((dest != null ? dest.toString() : "<all members>")).append(" (size=").append(buffer.length);
                 sb.append(") into ").append(num_frags).append(" fragment(s) [frag_size=").append(frag_size).append(']');
                 log.trace(sb.toString());
@@ -250,7 +247,7 @@ public class FRAG2 extends Protocol {
             }
         }
         catch(Exception e) {
-            if(log.isErrorEnabled()) log.error("exception is " + e);
+            if(log.isErrorEnabled()) log.error("fragmentation failure", e);
         }
     }
 
@@ -262,11 +259,10 @@ public class FRAG2 extends Protocol {
      4. Set headers and buffer in msg
      5. Pass msg up the stack
      */
-    void unfragment(Message msg) {
+    private void unfragment(Message msg, FragHeader hdr) {
         FragmentationTable frag_table;
         Address            sender=msg.getSrc();
         Message            assembled_msg;
-        FragHeader         hdr=(FragHeader)msg.removeHeader(name);
 
         frag_table=fragment_list.get(sender);
         if(frag_table == null) {
@@ -288,7 +284,7 @@ public class FRAG2 extends Protocol {
                 passUp(new Event(Event.MSG, assembled_msg));
             }
             catch(Exception e) {
-                if(log.isErrorEnabled()) log.error("exception is " + e);
+                if(log.isErrorEnabled()) log.error("unfragmentation failed", e);
             }
         }
     }
@@ -401,7 +397,7 @@ public class FRAG2 extends Protocol {
 
         public String toString() {
             Map.Entry entry;
-            StringBuffer buf=new StringBuffer("Fragmentation list contains ");
+            StringBuilder buf=new StringBuilder("Fragmentation list contains ");
             synchronized(frag_tables) {
                 buf.append(frag_tables.size()).append(" tables\n");
                 for(Iterator it=frag_tables.entrySet().iterator(); it.hasNext();) {
@@ -530,8 +526,8 @@ public class FRAG2 extends Protocol {
              * debug only
              */
             public String toString() {
-                StringBuffer ret=new StringBuffer();
-                ret.append("[tot_frags=" + tot_frags + ", number_of_frags_recvd=" + number_of_frags_recvd + ']');
+                StringBuilder ret=new StringBuilder();
+                ret.append("[tot_frags=").append(tot_frags).append(", number_of_frags_recvd=").append(number_of_frags_recvd).append(']');
                 return ret.toString();
             }
 
@@ -575,7 +571,7 @@ public class FRAG2 extends Protocol {
         }
 
         public String toString() {
-            StringBuffer buf=new StringBuffer("Fragmentation Table Sender:").append(sender).append("\n\t");
+            StringBuilder buf=new StringBuilder("Fragmentation Table Sender:").append(sender).append("\n\t");
             java.util.Enumeration e=this.h.elements();
             while(e.hasMoreElements()) {
                 Entry entry=(Entry)e.nextElement();

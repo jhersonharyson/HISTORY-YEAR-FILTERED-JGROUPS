@@ -6,13 +6,14 @@ import junit.framework.TestCase;
 import org.jgroups.JChannel;
 import org.jgroups.ReceiverAdapter;
 import org.jgroups.View;
+import org.jgroups.util.Util;
 import org.jgroups.stack.GossipRouter;
 
 
 /**
  * Tests merging
  * @author Bela Ban
- * @version $Id: MergeTest.java,v 1.6 2005/12/08 12:52:08 belaban Exp $
+ * @version $Id: MergeTest.java,v 1.9 2006/10/04 12:15:37 belaban Exp $
  */
 public class MergeTest extends TestCase {
     JChannel     channel;
@@ -21,7 +22,7 @@ public class MergeTest extends TestCase {
     final String bind_addr="127.0.0.1";
     GossipRouter router;
     JChannel     ch1, ch2;
-    ViewChecker  checker;
+    private ViewChecker  checker;
 
     String props="TUNNEL(router_port=" + router_port + ";router_host=" +bind_addr+ ";loopback=true):" +
             "PING(timeout=1000;num_initial_members=2;gossip_host=" +bind_addr+";gossip_port=" + router_port + "):" +
@@ -31,7 +32,7 @@ public class MergeTest extends TestCase {
             "UNICAST(timeout=600,1200,2400):" +
             "pbcast.STABLE(desired_avg_gossip=20000):" +
             "pbcast.GMS(join_timeout=5000;join_retry_timeout=2000;" +
-            "shun=true;print_local_addr=false;shun=false)";
+            "print_local_addr=false;shun=false)";
 
 
 
@@ -49,6 +50,7 @@ public class MergeTest extends TestCase {
         ch2=new JChannel(props);
         ch2.setReceiver(checker);
         ch2.connect("demo");
+        Util.sleep(1000);
     }
 
     public void tearDown() throws Exception {
@@ -119,7 +121,7 @@ public class MergeTest extends TestCase {
         router.stop();
     }
 
-    private class ViewChecker extends ReceiverAdapter {
+    private static class ViewChecker extends ReceiverAdapter {
         final Object mutex=new Object();
         int          count=0;
 

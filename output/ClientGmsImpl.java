@@ -1,4 +1,4 @@
-// $Id: ClientGmsImpl.java,v 1.29 2005/11/22 11:58:28 belaban Exp $
+// $Id: ClientGmsImpl.java,v 1.35 2006/12/12 09:09:56 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
@@ -19,7 +19,7 @@ import java.util.*;
  * <code>ViewChange</code> which is called by the coordinator that was contacted by this client, to
  * tell the client what its initial membership is.
  * @author Bela Ban
- * @version $Revision: 1.29 $
+ * @version $Revision: 1.35 $
  */
 public class ClientGmsImpl extends GmsImpl {
     private final Vector  initial_mbrs=new Vector(11);
@@ -57,7 +57,8 @@ public class ClientGmsImpl extends GmsImpl {
     public void join(Address mbr) {
         Address coord;
         JoinRsp rsp;
-        Digest tmp_digest;
+        Digest  tmp_digest;
+        View    tmp_view;
         leaving=false;
 
         join_promise.reset();
@@ -126,29 +127,35 @@ public class ClientGmsImpl extends GmsImpl {
                     if(warn) log.warn("join(" + mbr + ") sent to " + coord + " timed out, retrying");
                 }
                 else {
-                    // 1. Install digest
+                    // 1. check whether JOIN was rejected
+                    String failure=rsp.getFailReason();
+                    if(failure != null)
+                        throw new SecurityException(failure);
+
+                    // 2. Install digest
                     tmp_digest=rsp.getDigest();
-                    if(tmp_digest != null) {
-                        tmp_digest.incrementHighSeqno(coord); 	// see DESIGN for an explanantion
-                        // if(log.isDebugEnabled()) log.debug("digest is " + tmp_digest);
-                        gms.setDigest(tmp_digest);
+                    tmp_view=rsp.getView();
+                    if(tmp_digest == null || tmp_view == null) {
+                        if(log.isErrorEnabled())
+                            log.error("JoinRsp has a null view or digest: view=" + tmp_view + ", digest=" +
+                                    tmp_digest + ", skipping it");
                     }
-                    else
-                        if(log.isErrorEnabled()) log.error("digest of JOIN response is null");
+                    else {
+                        tmp_digest.incrementHighSeqno(coord); 	// see DESIGN for an explanantion
+                        gms.setDigest(tmp_digest);
 
-                    // 2. Install view
-                    if(log.isDebugEnabled()) log.debug("[" + gms.local_addr + "]: JoinRsp=" + rsp.getView() +
-                            " [size=" + rsp.getView().size() + "]\n\n");
+                        if(log.isDebugEnabled()) log.debug("[" + gms.local_addr + "]: JoinRsp=" + tmp_view +
+                                " [size=" + tmp_view.size() + "]\n\n");
 
-                    if(rsp.getView() != null) {
-                        if(!installView(rsp.getView())) {
+                        if(!installView(tmp_view)) {
                             if(log.isErrorEnabled()) log.error("view installation failed, retrying to join group");
                             continue;
                         }
 
                         // send VIEW_ACK to sender of view
                         Message view_ack=new Message(coord, null, null);
-                        GMS.GmsHeader tmphdr=new GMS.GmsHeader(GMS.GmsHeader.VIEW_ACK, rsp.getView());
+                        view_ack.setFlag(Message.OOB);
+                        GMS.GmsHeader tmphdr=new GMS.GmsHeader(GMS.GmsHeader.VIEW_ACK, tmp_view);
                         view_ack.putHeader(GMS.name, tmphdr);
                         gms.passDown(new Event(Event.MSG, view_ack));
 
@@ -156,12 +163,13 @@ public class ClientGmsImpl extends GmsImpl {
                         gms.passDown(new Event(Event.BECOME_SERVER));
                         return;
                     }
-                    else
-                        if(log.isErrorEnabled()) log.error("view of JOIN response is null");
                 }
             }
-            catch(Exception e) {
-                if(log.isDebugEnabled()) log.debug("exception=" + e.toString() + ", retrying");
+            catch(SecurityException security_ex) {
+                throw security_ex;
+            }
+            catch(Throwable e) {
+                if(log.isDebugEnabled()) log.debug("exception=" + e + ", retrying");
             }
 
             Util.sleep(gms.join_retry_timeout);
@@ -190,12 +198,7 @@ public class ClientGmsImpl extends GmsImpl {
     }
 
 
-    public void handleJoin(Address mbr) {
-    }
-
-
-    /** Returns false. Clients don't handle leave() requests */
-    public void handleLeave(Address mbr, boolean suspected) {
+    public void handleMembershipChange (Collection newMembers, Collection leavingMembers, Collection suspectedMembers) {
     }
 
 
@@ -229,8 +232,8 @@ public class ClientGmsImpl extends GmsImpl {
 
 
     /** Returns immediately. Clients don't handle suspect() requests */
-    public void handleSuspect(Address mbr) {
-    }
+    // public void handleSuspect(Address mbr) {
+    // }
 
 
     public boolean handleUpEvent(Event evt) {

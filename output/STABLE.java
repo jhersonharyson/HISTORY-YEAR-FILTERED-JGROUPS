@@ -1,4 +1,4 @@
-// $Id: STABLE.java,v 1.39 2005/08/11 12:43:46 belaban Exp $
+// $Id: STABLE.java,v 1.50 2006/12/19 12:53:11 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
@@ -10,7 +10,10 @@ import org.jgroups.util.TimeScheduler;
 import org.jgroups.util.Util;
 
 import java.io.*;
-import java.util.*;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Vector;
 
 
 
@@ -45,11 +48,11 @@ public class STABLE extends Protocol {
     /** delay before we send STABILITY msg (give others a change to send first). This should be set to a very
      * small number (> 0 !) if <code>max_bytes</code> is used */
     long                stability_delay=6000;
-    StabilitySendTask   stability_task=null;
-    final Object        stability_mutex=new Object(); // to synchronize on stability_task
-    StableTask          stable_task=null;             // bcasts periodic STABLE message (added to timer below)
+    private StabilitySendTask   stability_task=null;
+    final Object        stability_mutex=new Object();   // to synchronize on stability_task
+    private volatile StableTask  stable_task=null;               // bcasts periodic STABLE message (added to timer below)
     final Object        stable_task_mutex=new Object(); // to sync on stable_task
-    TimeScheduler       timer=null;                   // to send periodic STABLE msgs (and STABILITY messages)
+    TimeScheduler       timer=null;                     // to send periodic STABLE msgs (and STABILITY messages)
     static final String name="STABLE";
 
     /** Total amount of bytes from incoming messages (default = 0 = disabled). When exceeded, a STABLE
@@ -66,12 +69,13 @@ public class STABLE extends Protocol {
 
     boolean             initialized=false;
 
-    ResumeTask          resume_task=null;
+    private ResumeTask  resume_task=null;
     final Object        resume_task_mutex=new Object();
 
     /** Number of gossip messages */
     int                 num_gossips=0;
-
+    
+    private static final long MAX_SUSPEND_TIME=200000;
 
 
     public String getName() {
@@ -148,6 +152,8 @@ public class STABLE extends Protocol {
             props.remove("max_suspend_time");
         }
 
+        Util.checkBufferSize("STABLE.max_bytes", max_bytes);
+
         if(props.size() > 0) {
             log.error("these properties are not recognized: " + props);
             
@@ -167,6 +173,7 @@ public class STABLE extends Protocol {
     }
 
     private void resume() {
+        resetDigest(mbrs); // start from scratch
         suspended=false;
         if(log.isDebugEnabled())
             log.debug("resuming message garbage collection");
@@ -197,21 +204,26 @@ public class STABLE extends Protocol {
 
         case Event.MSG:
             msg=(Message)evt.getArg();
-            if(max_bytes > 0) {  // message counting is enabled
-                long size=Math.max(msg.getLength(), 24);
-                num_bytes_received+=size;
-                if(num_bytes_received >= max_bytes) {
-                    if(trace) {
-                        log.trace(new StringBuffer("max_bytes has been reached (").append(max_bytes).
-                                  append(", bytes received=").append(num_bytes_received).append("): triggers stable msg"));
+
+            // only if message counting is enabled, and only for multicast messages
+            // fixes http://jira.jboss.com/jira/browse/JGRP-233
+            if(max_bytes > 0) {
+                Address dest=msg.getDest();
+                if(dest == null || dest.isMulticastAddress()) {
+                    num_bytes_received+=(long)Math.max(msg.getLength(), 24);
+                    if(num_bytes_received >= max_bytes) {
+                        if(trace) {
+                            log.trace(new StringBuffer("max_bytes has been reached (").append(max_bytes).
+                                    append(", bytes received=").append(num_bytes_received).append("): triggers stable msg"));
+                        }
+                        num_bytes_received=0;
+                        // asks the NAKACK protocol for the current digest, reply event is GET_DIGEST_STABLE_OK (arg=digest)
+                        passDown(new Event(Event.GET_DIGEST_STABLE));
                     }
-                    num_bytes_received=0;
-                    // asks the NAKACK protocol for the current digest, reply event is GET_DIGEST_STABLE_OK (arg=digest)
-                    passDown(new Event(Event.GET_DIGEST_STABLE));
                 }
             }
 
-            hdr=(StableHeader)msg.removeHeader(name);
+            hdr=(StableHeader)msg.getHeader(name);
             if(hdr == null)
                 break;
             switch(hdr.type) {
@@ -300,7 +312,7 @@ public class STABLE extends Protocol {
 
 
     /** Digest and members are guaranteed to be non-null */
-    private void adjustSenders(Digest d, Vector members) {
+    private static void adjustSenders(Digest d, Vector members) {
         synchronized(d) {
             // 1. remove all members from digest who are not in the view
             Iterator it=d.senders.keySet().iterator();
@@ -407,7 +419,6 @@ public class STABLE extends Protocol {
      * Removes mbr from heard_from and returns true if this was the last member, otherwise false.
      * Resets the heard_from list (populates with membership)
      * @param mbr
-     * @return
      */
     private boolean removeFromHeardFromList(Address mbr) {
         synchronized(heard_from) {
@@ -453,6 +464,8 @@ public class STABLE extends Protocol {
 
     void startResumeTask(long max_suspend_time) {
         max_suspend_time=(long)(max_suspend_time * 1.1); // little slack
+        if(max_suspend_time <= 0)
+            max_suspend_time=MAX_SUSPEND_TIME;
 
         synchronized(resume_task_mutex) {
             if(resume_task != null && resume_task.running()) {
@@ -551,7 +564,7 @@ public class STABLE extends Protocol {
     /**
      * Bcasts a STABLE message of the current digest to all members. Message contains highest seqnos of all members
      * seen by this member. Highest seqnos are retrieved from the NAKACK layer below.
-     * @param Digest A <em>copy</em> of this.digest
+     * @param d A <em>copy</em> of this.digest
      */
     private void sendStableMessage(Digest d) {
         if(suspended) {
@@ -564,6 +577,7 @@ public class STABLE extends Protocol {
             if(trace)
                 log.trace("sending stable msg " + d.printHighSeqnos());
             Message msg=new Message(); // mcast message
+            msg.setFlag(Message.OOB);
             StableHeader hdr=new StableHeader(StableHeader.STABLE_GOSSIP, d);
             msg.putHeader(name, hdr);
             num_gossips++;
@@ -585,6 +599,12 @@ public class STABLE extends Protocol {
      */
     void sendStabilityMessage(Digest tmp) {
         long delay;
+
+        if(suspended) {
+            if(trace)
+                log.trace("STABILITY message will not be sent as I'm suspended");
+            return;
+        }
 
         // give other members a chance to mcast STABILITY message. if we receive STABILITY by the end of
         // our random sleep, we will not send the STABILITY msg. this prevents that all mbrs mcast a
@@ -826,6 +846,7 @@ public class STABLE extends Protocol {
 
             if(d != null && !stopped) {
                 msg=new Message();
+                msg.setFlag(Message.OOB);
                 hdr=new StableHeader(StableHeader.STABILITY, d);
                 msg.putHeader(STABLE.name, hdr);
                 if(trace) log.trace("sending stability msg " + d.printHighSeqnos());

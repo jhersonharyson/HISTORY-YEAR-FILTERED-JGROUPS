@@ -1,8 +1,8 @@
-// $Id: Util.java,v 1.62 2005/11/07 08:05:54 belaban Exp $
-
 package org.jgroups.util;
 
+import org.apache.commons.logging.LogFactory;
 import org.jgroups.*;
+import org.jgroups.auth.AuthToken;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.FD;
 import org.jgroups.protocols.PingHeader;
@@ -10,6 +10,8 @@ import org.jgroups.protocols.UdpHeader;
 import org.jgroups.protocols.pbcast.NakAckHeader;
 import org.jgroups.stack.IpAddress;
 
+import javax.management.MBeanServer;
+import javax.management.MBeanServerFactory;
 import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
@@ -21,18 +23,48 @@ import java.util.List;
 
 /**
  * Collection of various utility routines that can not be assigned to other classes.
+ * @author Bela Ban
+ * @version $Id: Util.java,v 1.112 2006/12/31 14:31:00 belaban Exp $
  */
 public class Util {
-    private static final Object mutex=new Object();
     private static final ByteArrayOutputStream out_stream=new ByteArrayOutputStream(512);
 
     private static  NumberFormat f;
 
+    private static Map PRIMITIVE_TYPES=new HashMap(10);
+    private static final byte TYPE_NULL         =  0;
+    private static final byte TYPE_STREAMABLE   =  1;
+    private static final byte TYPE_SERIALIZABLE =  2;
+
+    private static final byte TYPE_BOOLEAN      = 10;
+    private static final byte TYPE_BYTE         = 11;
+    private static final byte TYPE_CHAR         = 12;
+    private static final byte TYPE_DOUBLE       = 13;
+    private static final byte TYPE_FLOAT        = 14;
+    private static final byte TYPE_INT          = 15;
+    private static final byte TYPE_LONG         = 16;
+    private static final byte TYPE_SHORT        = 17;
+    private static final byte TYPE_STRING       = 18;
+
     // constants
     public static final int MAX_PORT=65535; // highest port allocatable
-    public static final String DIAG_GROUP="DIAG_GROUP-BELA-322649"; // unique
     static boolean resolve_dns=false;
-    static final String IGNORE_BIND_ADDRESS_PROPERTY="ignore.bind.address";
+
+    static boolean      JGROUPS_COMPAT=false;
+
+    /**
+     * Global thread group to which all (most!) JGroups threads belong
+     */
+    private static ThreadGroup GLOBAL_GROUP=new ThreadGroup("JGroups") {
+        public void uncaughtException(Thread t, Throwable e) {
+            LogFactory.getLog("org.jgroups").error("uncaught exception in " + t + " (thread group=" + GLOBAL_GROUP + " )", e);
+        }
+    };
+
+    public static ThreadGroup getGlobalThreadGroup() {
+        return GLOBAL_GROUP;
+    }
+
 
     static {
         /* Trying to get value of resolve_dns. PropertyPermission not granted if
@@ -46,68 +78,317 @@ public class Util {
         f=NumberFormat.getNumberInstance();
         f.setGroupingUsed(false);
         f.setMaximumFractionDigits(2);
+
+        try {
+            String tmp=Util.getProperty(new String[]{Global.MARSHALLING_COMPAT}, null, null, false, "false");
+            JGROUPS_COMPAT=Boolean.valueOf(tmp).booleanValue();
+        }
+        catch (SecurityException ex){
+        }
+
+        PRIMITIVE_TYPES.put(Boolean.class, new Byte(TYPE_BOOLEAN));
+        PRIMITIVE_TYPES.put(Byte.class, new Byte(TYPE_BYTE));
+        PRIMITIVE_TYPES.put(Character.class, new Byte(TYPE_CHAR));
+        PRIMITIVE_TYPES.put(Double.class, new Byte(TYPE_DOUBLE));
+        PRIMITIVE_TYPES.put(Float.class, new Byte(TYPE_FLOAT));
+        PRIMITIVE_TYPES.put(Integer.class, new Byte(TYPE_INT));
+        PRIMITIVE_TYPES.put(Long.class, new Byte(TYPE_LONG));
+        PRIMITIVE_TYPES.put(Short.class, new Byte(TYPE_SHORT));
+        PRIMITIVE_TYPES.put(String.class, new Byte(TYPE_STRING));
     }
 
 
-    public static void closeInputStream(InputStream inp) {
+    /**
+     * Verifies that val is <= max memory
+     * @param buf_name
+     * @param val
+     */
+    public static void checkBufferSize(String buf_name, long val) {
+        // sanity check that max_credits doesn't exceed memory allocated to VM by -Xmx
+        long max_mem=Runtime.getRuntime().maxMemory();
+        if(val > max_mem) {
+            throw new IllegalArgumentException(buf_name + "(" + Util.printBytes(val) + ") exceeds max memory allocated to VM (" +
+                    Util.printBytes(max_mem) + ")");
+        }
+    }
+
+
+    public static void close(InputStream inp) {
         if(inp != null)
             try {inp.close();} catch(IOException e) {}
     }
 
-    public static void closeOutputStream(OutputStream out) {
+    public static void close(OutputStream out) {
         if(out != null) {
             try {out.close();} catch(IOException e) {}
         }
     }
+
+    public static void close(Socket s) {
+        if(s != null) {
+            try {s.close();} catch(Exception ex) {}
+        }
+    }
+
+     public static void close(DatagramSocket my_sock) {
+        if(my_sock != null) {
+            try {my_sock.close();} catch(Throwable t) {}
+        }
+    }
+
+
 
 
     /**
      * Creates an object from a byte buffer
      */
     public static Object objectFromByteBuffer(byte[] buffer) throws Exception {
-        synchronized(mutex) {
-            if(buffer == null) return null;
-            Object retval=null;
-            ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer);
-            ObjectInputStream in=new ContextObjectInputStream(in_stream); // changed Nov 29 2004 (bela)
-            retval=in.readObject();
-            in.close();
-            if(retval == null)
-                return null;
+        if(buffer == null) return null;
+        if(JGROUPS_COMPAT)
+            return oldObjectFromByteBuffer(buffer);
+        return objectFromByteBuffer(buffer, 0, buffer.length);
+    }
+
+
+    public static Object objectFromByteBuffer(byte[] buffer, int offset, int length) throws Exception {
+        if(buffer == null) return null;
+        if(JGROUPS_COMPAT)
+            return oldObjectFromByteBuffer(buffer, offset, length);
+        Object retval=null;
+        InputStream in=null;
+        ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer, offset, length);
+        byte b=(byte)in_stream.read();
+
+        try {
+            switch(b) {
+                case TYPE_NULL:
+                    return null;
+                case TYPE_STREAMABLE:
+                    in=new DataInputStream(in_stream);
+                    retval=readGenericStreamable((DataInputStream)in);
+                    break;
+                case TYPE_SERIALIZABLE: // the object is Externalizable or Serializable
+                    in=new ContextObjectInputStream(in_stream); // changed Nov 29 2004 (bela)
+                    retval=((ContextObjectInputStream)in).readObject();
+                    break;
+                case TYPE_BOOLEAN:
+                    in=new DataInputStream(in_stream);
+                    retval=Boolean.valueOf(((DataInputStream)in).readBoolean());
+                    break;
+                case TYPE_BYTE:
+                    in=new DataInputStream(in_stream);
+                    retval=new Byte(((DataInputStream)in).readByte());
+                    break;
+                case TYPE_CHAR:
+                    in=new DataInputStream(in_stream);
+                    retval=new Character(((DataInputStream)in).readChar());
+                    break;
+                case TYPE_DOUBLE:
+                    in=new DataInputStream(in_stream);
+                    retval=new Double(((DataInputStream)in).readDouble());
+                    break;
+                case TYPE_FLOAT:
+                    in=new DataInputStream(in_stream);
+                    retval=new Float(((DataInputStream)in).readFloat());
+                    break;
+                case TYPE_INT:
+                    in=new DataInputStream(in_stream);
+                    retval=new Integer(((DataInputStream)in).readInt());
+                    break;
+                case TYPE_LONG:
+                    in=new DataInputStream(in_stream);
+                    retval=new Long(((DataInputStream)in).readLong());
+                    break;
+                case TYPE_SHORT:
+                    in=new DataInputStream(in_stream);
+                    retval=new Short(((DataInputStream)in).readShort());
+                    break;
+                case TYPE_STRING:
+                    in=new DataInputStream(in_stream);
+                    retval=((DataInputStream)in).readUTF();
+                    break;
+                default:
+                    throw new IllegalArgumentException("type " + b + " is invalid");
+            }
             return retval;
+        }
+        finally {
+            Util.close(in);
         }
     }
 
+
+
+
     /**
-     * Serializes an object into a byte buffer.
+     * Serializes/Streams an object into a byte buffer.
      * The object has to implement interface Serializable or Externalizable
+     * or Streamable.  Only Streamable objects are interoperable w/ jgroups-me
      */
     public static byte[] objectToByteBuffer(Object obj) throws Exception {
+
+        if(JGROUPS_COMPAT)
+            return oldObjectToByteBuffer(obj);
+
         byte[] result=null;
+
         synchronized(out_stream) {
             out_stream.reset();
-            ObjectOutputStream out=new ObjectOutputStream(out_stream);
-            out.writeObject(obj);
+            if(obj == null) {
+                out_stream.write(TYPE_NULL);
+                out_stream.flush();
+                return out_stream.toByteArray();
+            }
+
+            OutputStream out=null;
+            Byte type;
+            try {
+                if(obj instanceof Streamable) {  // use Streamable if we can
+                    out_stream.write(TYPE_STREAMABLE);
+                    out=new DataOutputStream(out_stream);
+                    writeGenericStreamable((Streamable)obj, (DataOutputStream)out);
+                }
+                else if((type=(Byte)PRIMITIVE_TYPES.get(obj.getClass())) != null) {
+                    out_stream.write(type.byteValue());
+                    out=new DataOutputStream(out_stream);
+                    switch(type.byteValue()) {
+                        case TYPE_BOOLEAN:
+                            ((DataOutputStream)out).writeBoolean(((Boolean)obj).booleanValue());
+                            break;
+                        case TYPE_BYTE:
+                            ((DataOutputStream)out).writeByte(((Byte)obj).byteValue());
+                            break;
+                        case TYPE_CHAR:
+                            ((DataOutputStream)out).writeChar(((Character)obj).charValue());
+                            break;
+                        case TYPE_DOUBLE:
+                            ((DataOutputStream)out).writeDouble(((Double)obj).doubleValue());
+                            break;
+                        case TYPE_FLOAT:
+                            ((DataOutputStream)out).writeFloat(((Float)obj).floatValue());
+                            break;
+                        case TYPE_INT:
+                            ((DataOutputStream)out).writeInt(((Integer)obj).intValue());
+                            break;
+                        case TYPE_LONG:
+                            ((DataOutputStream)out).writeLong(((Long)obj).longValue());
+                            break;
+                        case TYPE_SHORT:
+                            ((DataOutputStream)out).writeShort(((Short)obj).shortValue());
+                            break;
+                        case TYPE_STRING:
+                            ((DataOutputStream)out).writeUTF((String)obj);
+                            break;
+                        default:
+                            throw new IllegalArgumentException("type " + type + " is invalid");
+                    }
+                }
+                else { // will throw an exception if object is not serializable
+                    out_stream.write(TYPE_SERIALIZABLE);
+                    out=new ObjectOutputStream(out_stream);
+                    ((ObjectOutputStream)out).writeObject(obj);
+                }
+            }
+            finally {
+                Util.close(out);
+            }
             result=out_stream.toByteArray();
-            out.close();
         }
         return result;
     }
 
 
-     public static Streamable streamableFromByteBuffer(Class cl, byte[] buffer) throws Exception {
-        synchronized(mutex) {
-            if(buffer == null) return null;
-            Streamable retval=null;
-            ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer);
-            DataInputStream in=new DataInputStream(in_stream); // changed Nov 29 2004 (bela)
-            retval=(Streamable)cl.newInstance();
-            retval.readFrom(in);
+
+
+    /** For backward compatibility in JBoss 4.0.2 */
+    public static Object oldObjectFromByteBuffer(byte[] buffer) throws Exception {
+        if(buffer == null) return null;
+        return oldObjectFromByteBuffer(buffer, 0, buffer.length);
+    }
+
+    public static Object oldObjectFromByteBuffer(byte[] buffer, int offset, int length) throws Exception {
+        if(buffer == null) return null;
+        Object retval=null;
+
+        try {  // to read the object as an Externalizable
+            ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer, offset, length);
+            ObjectInputStream in=new ContextObjectInputStream(in_stream); // changed Nov 29 2004 (bela)
+            retval=in.readObject();
             in.close();
-            if(retval == null)
-                return null;
-            return retval;
         }
+        catch(StreamCorruptedException sce) {
+            try {  // is it Streamable?
+                ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer, offset, length);
+                DataInputStream in=new DataInputStream(in_stream);
+                retval=readGenericStreamable(in);
+                in.close();
+            }
+            catch(Exception ee) {
+                IOException tmp=new IOException("unmarshalling failed");
+                tmp.initCause(ee);
+                throw tmp;
+            }
+        }
+
+        if(retval == null)
+            return null;
+        return retval;
+    }
+
+
+
+
+    /**
+     * Serializes/Streams an object into a byte buffer.
+     * The object has to implement interface Serializable or Externalizable
+     * or Streamable.  Only Streamable objects are interoperable w/ jgroups-me
+     */
+    public static byte[] oldObjectToByteBuffer(Object obj) throws Exception {
+        byte[] result=null;
+        synchronized(out_stream) {
+            out_stream.reset();
+            if(obj instanceof Streamable) {  // use Streamable if we can
+                DataOutputStream out=new DataOutputStream(out_stream);
+                writeGenericStreamable((Streamable)obj, out);
+                out.close();
+            }
+            else {
+                ObjectOutputStream out=new ObjectOutputStream(out_stream);
+                out.writeObject(obj);
+                out.close();
+            }
+            result=out_stream.toByteArray();
+        }
+        return result;
+    }
+
+
+
+    public static Streamable streamableFromByteBuffer(Class cl, byte[] buffer) throws Exception {
+        if(buffer == null) return null;
+        Streamable retval=null;
+        ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer);
+        DataInputStream in=new DataInputStream(in_stream); // changed Nov 29 2004 (bela)
+        retval=(Streamable)cl.newInstance();
+        retval.readFrom(in);
+        in.close();
+        if(retval == null)
+            return null;
+        return retval;
+    }
+
+
+    public static Streamable streamableFromByteBuffer(Class cl, byte[] buffer, int offset, int length) throws Exception {
+        if(buffer == null) return null;
+        Streamable retval=null;
+        ByteArrayInputStream in_stream=new ByteArrayInputStream(buffer, offset, length);
+        DataInputStream in=new DataInputStream(in_stream); // changed Nov 29 2004 (bela)
+        retval=(Streamable)cl.newInstance();
+        retval.readFrom(in);
+        in.close();
+        if(retval == null)
+            return null;
+        return retval;
     }
 
     public static byte[] streamableToByteBuffer(Streamable obj) throws Exception {
@@ -142,6 +423,23 @@ public class Util {
         return retval;
     }
 
+    public static void writeAuthToken(AuthToken token, DataOutputStream out) throws IOException{
+        Util.writeString(token.getName(), out);
+        token.writeTo(out);
+    }
+
+    public static AuthToken readAuthToken(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        try{
+            String type = Util.readString(in);
+            Object obj = Class.forName(type).newInstance();
+            AuthToken token = (AuthToken) obj;
+            token.readFrom(in);
+            return token;
+        }
+        catch(ClassNotFoundException cnfe){
+            return null;
+        }
+    }
 
     public static void writeAddress(Address addr, DataOutputStream out) throws IOException {
         if(addr == null) {
@@ -160,8 +458,6 @@ public class Util {
             writeOtherAddress(addr, out);
         }
     }
-
-
 
     public static Address readAddress(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
         Address addr=null;
@@ -343,10 +639,16 @@ public class Util {
             if(use_magic_number == 1) {
                 magic_number=in.readInt();
                 clazz=ClassConfigurator.getInstance(false).get(magic_number);
+                if (clazz==null) {
+                   throw new ClassNotFoundException("Class for magic number "+magic_number+" cannot be found.");
+                }
             }
             else {
                 classname=in.readUTF();
                 clazz=ClassConfigurator.getInstance(false).get(classname);
+                if (clazz==null) {
+                   throw new ClassNotFoundException(classname);
+                }
             }
 
             retval=(Streamable)clazz.newInstance();
@@ -509,7 +811,16 @@ public class Util {
         try {
             Thread.sleep(timeout);
         }
-        catch(Exception e) {
+        catch(Throwable e) {
+        }
+    }
+
+
+    public static void sleep(long timeout, int nanos) {
+        try {
+            Thread.sleep(timeout, nanos);
+        }
+        catch(Throwable e) {
         }
     }
 
@@ -558,10 +869,7 @@ public class Util {
     public static boolean tossWeightedCoin(double probability) {
         long r=random(100);
         long cutoff=(long)(probability * 100);
-        if(r < cutoff)
-            return true;
-        else
-            return false;
+        return r < cutoff;
     }
 
 
@@ -592,7 +900,7 @@ public class Util {
      * to follow the evolution of the queue's content in time.
      */
     public static String dumpQueue(Queue q) {
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
         LinkedList values=q.values();
         if(values.size() == 0) {
             sb.append("empty");
@@ -613,7 +921,7 @@ public class Util {
                     if(type == Event.MSG) {
                         s+="[";
                         Message m=(Message)event.getArg();
-                        Map headers=m.getHeaders();
+                        Map headers=new HashMap(m.getHeaders());
                         for(Iterator i=headers.keySet().iterator(); i.hasNext();) {
                             Object headerKey=i.next();
                             Object value=headers.get(headerKey);
@@ -748,7 +1056,7 @@ public class Util {
 
 
     public static String activeThreads() {
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
         Thread threads[]=new Thread[Thread.activeCount()];
         Thread.enumerate(threads);
         sb.append("------- Threads -------\n");
@@ -760,6 +1068,26 @@ public class Util {
     }
 
     public static String printBytes(long bytes) {
+        double tmp;
+
+        if(bytes < 1000)
+            return bytes + "b";
+        if(bytes < 1000000) {
+            tmp=bytes / 1000.0;
+            return f.format(tmp) + "KB";
+        }
+        if(bytes < 1000000000) {
+            tmp=bytes / 1000000.0;
+            return f.format(tmp) + "MB";
+        }
+        else {
+            tmp=bytes / 1000000000.0;
+            return f.format(tmp) + "GB";
+        }
+    }
+
+
+    public static String printBytes(double bytes) {
         double tmp;
 
         if(bytes < 1000)
@@ -943,7 +1271,7 @@ public class Util {
 
 
     public static String array2String(long[] array) {
-        StringBuffer ret=new StringBuffer("[");
+        StringBuilder ret=new StringBuilder("[");
 
         if(array != null) {
             for(int i=0; i < array.length; i++)
@@ -955,7 +1283,7 @@ public class Util {
     }
 
     public static String array2String(int[] array) {
-        StringBuffer ret=new StringBuffer("[");
+        StringBuilder ret=new StringBuilder("[");
 
         if(array != null) {
             for(int i=0; i < array.length; i++)
@@ -967,7 +1295,7 @@ public class Util {
     }
 
     public static String array2String(boolean[] array) {
-        StringBuffer ret=new StringBuffer("[");
+        StringBuilder ret=new StringBuilder("[");
 
         if(array != null) {
             for(int i=0; i < array.length; i++)
@@ -975,6 +1303,27 @@ public class Util {
         }
         ret.append(']');
         return ret.toString();
+    }
+
+    public static String array2String(Object[] array) {
+        StringBuilder ret=new StringBuilder("[");
+
+        if(array != null) {
+            for(int i=0; i < array.length; i++)
+                ret.append(array[i]).append(" ");
+        }
+        ret.append(']');
+        return ret.toString();
+    }
+
+    /** Returns true if all elements of c match obj */
+    public static boolean all(Collection c, Object obj) {
+        for(Iterator iterator=c.iterator(); iterator.hasNext();) {
+            Object o=iterator.next();
+            if(!o.equals(obj))
+                return false;
+        }
+        return true;
     }
 
 
@@ -1031,7 +1380,7 @@ public class Util {
 
 
     public static String printMembers(Vector v) {
-        StringBuffer sb=new StringBuffer("(");
+        StringBuilder sb=new StringBuilder("(");
         boolean first=true;
         Object el;
 
@@ -1303,23 +1652,73 @@ public class Util {
 
     /** e.g. "bela,jeannette,michelle" --> List{"bela", "jeannette", "michelle"} */
     public static java.util.List parseCommaDelimitedStrings(String l) {
-        java.util.List tmp=new ArrayList();
-        StringTokenizer tok=new StringTokenizer(l, ",");
-        String t;
-
-        while(tok.hasMoreTokens()) {
-            t=tok.nextToken();
-            tmp.add(t);
-        }
-
-        return tmp;
+        return parseStringList(l, ",");
     }
 
+
+    public static List parseStringList(String l, String separator) {
+         List tmp=new LinkedList();
+         StringTokenizer tok=new StringTokenizer(l, separator);
+         String t;
+
+         while(tok.hasMoreTokens()) {
+             t=tok.nextToken();
+             tmp.add(t.trim());
+         }
+
+         return tmp;
+     }
+
+    public static int parseInt(Properties props,String property,int defaultValue)
+    {
+        int result = defaultValue;
+        String str=props.getProperty(property);
+        if(str != null) {
+            result=Integer.parseInt(str);
+            props.remove(property);
+        }
+        return result;
+    }
+
+
+    public static long parseLong(Properties props,String property,long defaultValue)
+    {
+        long result = defaultValue;
+        String str=props.getProperty(property);
+        if(str != null) {
+            result=Integer.parseInt(str);
+            props.remove(property);
+        }
+        return result;
+    }
+
+    public static boolean parseBoolean(Properties props,String property,boolean defaultValue)
+    {
+        boolean result = defaultValue;
+        String str=props.getProperty(property);
+        if(str != null) {
+            result=str.equalsIgnoreCase("true");
+            props.remove(property);
+        }
+        return result;
+    }
+
+    public static InetAddress parseBindAddress(Properties props, String property) throws UnknownHostException {
+        InetAddress bind_addr=null;
+        boolean ignore_systemprops=Util.isBindAddressPropertyIgnored();
+        String str=Util.getProperty(new String[]{Global.BIND_ADDR, Global.BIND_ADDR_OLD}, props, "bind_addr",
+                                    ignore_systemprops, null);
+        if(str != null) {
+            bind_addr=InetAddress.getByName(str);
+            props.remove(property);
+        }
+        return bind_addr;
+    }
 
 
     public static String shortName(String hostname) {
         int index;
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
 
         if(hostname == null) return null;
 
@@ -1333,7 +1732,7 @@ public class Util {
 
     public static String shortName(InetAddress hostname) {
         if(hostname == null) return null;
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
         if(resolve_dns)
             sb.append(hostname.getHostName());
         else
@@ -1429,17 +1828,17 @@ public class Util {
 
     public static boolean checkForLinux() {
         String os=System.getProperty("os.name");
-        return os != null && os.toLowerCase().startsWith("linux") ? true : false;
+        return os != null && os.toLowerCase().startsWith("linux");
     }
 
     public static boolean checkForSolaris() {
         String os=System.getProperty("os.name");
-        return os != null && os.toLowerCase().startsWith("sun") ? true : false;
+        return os != null && os.toLowerCase().startsWith("sun");
     }
 
     public static boolean checkForWindows() {
         String os=System.getProperty("os.name");
-        return os != null && os.toLowerCase().startsWith("win") ? true : false;
+        return os != null && os.toLowerCase().startsWith("win");
     }
 
     public static void prompt(String s) {
@@ -1478,8 +1877,13 @@ public class Util {
         return retval;
     }
 
+    public static Vector unmodifiableVector(Vector v) {
+        if(v == null) return null;
+        return new UnmodifiableVector(v);
+    }
+
     public static String memStats(boolean gc) {
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
         Runtime rt=Runtime.getRuntime();
         if(gc)
             rt.gc();
@@ -1532,6 +1936,33 @@ public class Util {
         return null;
     }
 
+
+
+    public static InetAddress getFirstNonLoopbackIPv6Address() throws SocketException {
+        Enumeration en=NetworkInterface.getNetworkInterfaces();
+        boolean preferIpv4=false;
+        boolean preferIPv6=true;
+        while(en.hasMoreElements()) {
+            NetworkInterface i=(NetworkInterface)en.nextElement();
+            for(Enumeration en2=i.getInetAddresses(); en2.hasMoreElements();) {
+                InetAddress addr=(InetAddress)en2.nextElement();
+                if(!addr.isLoopbackAddress()) {
+                    if(addr instanceof Inet4Address) {
+                        if(preferIPv6)
+                            continue;
+                        return addr;
+                    }
+                    if(addr instanceof Inet6Address) {
+                        if(preferIpv4)
+                            continue;
+                        return addr;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     public static List getAllAvailableInterfaces() throws SocketException {
         List retval=new ArrayList(10);
         NetworkInterface intf;
@@ -1543,18 +1974,78 @@ public class Util {
     }
 
 
+    /**
+     * Returns a value associated wither with one or more system properties, or found in the props map
+     * @param system_props
+     * @param props List of properties read from the configuration file
+     * @param prop_name The name of the property, will be removed from props if found
+     * @param ignore_sysprops If true, system properties are not used and the values will only be retrieved from
+     * props (not system_props)
+     * @param default_value Used to return a default value if the properties or system properties didn't have the value
+     * @return The value, or null if not found
+     */
+    public static String getProperty(String[] system_props, Properties props, String prop_name,
+                                     boolean ignore_sysprops, String default_value) {
+        String retval=null;
+        if(props != null && prop_name != null) {
+            retval=props.getProperty(prop_name);
+            props.remove(prop_name);
+        }
+
+        if(!ignore_sysprops) {
+            String tmp, prop;
+            if(system_props != null) {
+                for(int i=0; i < system_props.length; i++) {
+                    prop=system_props[i];
+                    if(prop != null) {
+                        try {
+                            tmp=System.getProperty(prop);
+                            if(tmp != null)
+                                return tmp; // system properties override config file definitions
+                        }
+                        catch(SecurityException ex) {}
+                    }
+                }
+            }
+        }
+        if(retval == null)
+            return default_value;
+        return retval;
+    }
+
+
+
     public static boolean isBindAddressPropertyIgnored() {
-        String tmp=System.getProperty(IGNORE_BIND_ADDRESS_PROPERTY);
-        if(tmp == null)
+        try {
+            String tmp=System.getProperty(Global.IGNORE_BIND_ADDRESS_PROPERTY);
+            if(tmp == null) {
+                tmp=System.getProperty(Global.IGNORE_BIND_ADDRESS_PROPERTY_OLD);
+                if(tmp == null)
+                    return false;
+            }
+            tmp=tmp.trim().toLowerCase();
+            return !(tmp.equals("false") || tmp.equals("no") || tmp.equals("off")) && (tmp.equals("true") || tmp.equals("yes") || tmp.equals("on"));
+        }
+        catch(SecurityException ex) {
             return false;
+        }
+    }
 
-        tmp=tmp.trim().toLowerCase();
-        if(tmp.equals("false") ||
-                tmp.equals("no") ||
-                tmp.equals("off"))
-            return false;
 
-        return true;
+    public static MBeanServer getMBeanServer() {
+        ArrayList servers=MBeanServerFactory.findMBeanServer(null);
+        if(servers == null || servers.size() == 0)
+            return null;
+
+        // return 'jboss' server if available
+        for(int i=0; i < servers.size(); i++) {
+            MBeanServer srv=(MBeanServer)servers.get(i);
+            if("jboss".equalsIgnoreCase(srv.getDefaultDomain()))
+                return srv;
+        }
+
+        // return first available server
+        return (MBeanServer)servers.get(0);
     }
 
 
@@ -1630,5 +2121,83 @@ public class Util {
     }
 
 
+    public static String generateList(Collection c, String separator) {
+        if(c == null) return null;
+        StringBuilder sb=new StringBuilder();
+        boolean first=true;
+
+        for(Iterator it=c.iterator(); it.hasNext();) {
+            if(first) {
+                first=false;
+            }
+            else {
+                sb.append(separator);
+            }
+            sb.append(it.next());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Replaces variables of ${var:default} with System.getProperty(var, default). If no variables are found, returns
+     * the same string, otherwise a copy of the string with variables substituted
+     * @param val
+     * @return A string with vars replaced, or the same string if no vars found
+     */
+    public static String substituteVariable(String val) {
+        if(val == null)
+            return val;
+        String retval=val, prev;
+
+        while(retval.indexOf("${") >= 0) { // handle multiple variables in val
+            prev=retval;
+            retval=_substituteVar(retval);
+            if(retval.equals(prev))
+                break;
+        }
+        return retval;
+    }
+
+    private static String _substituteVar(String val) {
+        int start_index, end_index;
+        start_index=val.indexOf("${");
+        if(start_index == -1)
+            return val;
+        end_index=val.indexOf("}", start_index+2);
+        if(end_index == -1)
+            throw new IllegalArgumentException("missing \"}\" in " + val);
+
+        String tmp=getProperty(val.substring(start_index +2, end_index));
+        if(tmp == null)
+            return val;
+        StringBuilder sb=new StringBuilder();
+        sb.append(val.substring(0, start_index));
+        sb.append(tmp);
+        sb.append(val.substring(end_index+1));
+        return sb.toString();
+    }
+
+    private static String getProperty(String s) {
+        String var, default_val, retval=null;
+        int index=s.indexOf(":");
+        if(index >= 0) {
+            var=s.substring(0, index);
+            default_val=s.substring(index+1);
+            retval=System.getProperty(var, default_val);
+        }
+        else {
+            var=s;
+            retval=System.getProperty(var);
+        }
+        return retval;
+    }
+
+
 
 }
+
+
+
+
+
+

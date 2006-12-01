@@ -1,4 +1,4 @@
-// $Id: GmsImpl.java,v 1.13 2005/12/23 14:57:06 belaban Exp $
+// $Id: GmsImpl.java,v 1.18 2006/08/04 15:53:33 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
@@ -6,9 +6,8 @@ import org.apache.commons.logging.Log;
 import org.jgroups.*;
 
 import java.util.Vector;
-
-
-
+import java.util.Collection;
+import java.util.Set;
 
 
 public abstract class GmsImpl {
@@ -46,14 +45,11 @@ public abstract class GmsImpl {
     public void               handleMergeView(MergeData data, ViewId merge_id)     {} // only processed by coords
     public void               handleMergeCancelled(ViewId merge_id)                {} // only processed by coords
 
-    public abstract void      handleJoin(Address mbr);
-    public abstract void      handleLeave(Address mbr, boolean suspected);
+    public abstract void      handleMembershipChange(Collection newMembers, Collection oldMembers, Collection suspectedMembers);
     public abstract void      handleViewChange(View new_view, Digest digest);
-    public abstract void      handleSuspect(Address mbr);
     public          void      handleExit() {}
 
     public boolean            handleUpEvent(Event evt) {return true;}
-    public boolean            handleDownEvent(Event evt) {return true;}
 
     public void               init() throws Exception {leaving=false;}
     public void               start() throws Exception {leaving=false;}

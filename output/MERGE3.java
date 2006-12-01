@@ -1,4 +1,4 @@
-// $Id: MERGE3.java,v 1.8 2005/08/08 12:45:43 belaban Exp $
+// $Id: MERGE3.java,v 1.12 2006/12/13 14:21:48 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -96,21 +96,6 @@ public class MERGE3 extends Protocol {
         timer=stack.timer;
     }
 
-
-    /**
-     * This prevents the up-handler thread to be created, which is not needed in the protocol.
-     * DON'T REMOVE ! 
-     */
-    public void startUpHandler() {
-    }
-
-
-    /**
-     * This prevents the down-handler thread to be created, which is not needed in the protocol.
-     * DON'T REMOVE ! 
-     */
-    public void startDownHandler() {
-    }
 
 
     public void up(Event evt) {
@@ -232,19 +217,20 @@ public class MERGE3 extends Protocol {
                     log.debug("passing up MERGE event, coords=" + coords);
                 final Event evt=new Event(Event.MERGE, coords);
                 if(use_separate_thread) {
-                    Thread merge_notifier=new Thread() {
+                    Thread merge_notifier=new Thread(Util.getGlobalThreadGroup(), "merge notifier thread") {
                         public void run() {
                             passUp(evt);
                         }
                     };
                     merge_notifier.setDaemon(true);
-                    merge_notifier.setName("merge notifier thread");
+                    merge_notifier.start();
                 }
                 else {
                     passUp(evt);
                 }
             }
             announcements.clear();
+            announcements.add(local_addr);
         }
     }
 

@@ -10,7 +10,7 @@ import java.util.*;
 /**
  * The Discovery protocol layer retrieves the initial membership (used by the GMS when started
  * by sending event FIND_INITIAL_MBRS down the stack). We do this by specific subclasses, e.g. by mcasting PING
- * requests to an IP MCAST address or, if gossiping is enabled, by contacting the GossipServer.
+ * requests to an IP MCAST address or, if gossiping is enabled, by contacting the GossipRouter.
  * The responses should allow us to determine the coordinator whom we have to
  * contact, e.g. in case we want to join the group.  When we are a server (after having
  * received the BECOME_SERVER event), we'll respond to PING requests with a PING
@@ -23,7 +23,7 @@ import java.util.*;
  * <li>num_ping_requests - the number of GET_MBRS_REQ messages to be sent (min=1), distributed over timeout ms
  * </ul>
  * @author Bela Ban
- * @version $Id: Discovery.java,v 1.14 2005/12/16 16:02:43 belaban Exp $
+ * @version $Id: Discovery.java,v 1.18 2006/12/22 14:45:52 belaban Exp $
  */
 public abstract class Discovery extends Protocol {
     final Vector  members=new Vector(11);
@@ -211,8 +211,7 @@ public abstract class Discovery extends Protocol {
 
     public void up(Event evt) {
         Message msg, rsp_msg;
-        Object obj;
-        PingHeader hdr, rsp_hdr;
+        PingHeader rsp_hdr;
         PingRsp rsp;
         Address coord;
 
@@ -220,19 +219,16 @@ public abstract class Discovery extends Protocol {
 
         case Event.MSG:
             msg=(Message)evt.getArg();
-            obj=msg.getHeader(getName());
-            if(obj == null || !(obj instanceof PingHeader)) {
+            PingHeader hdr=(PingHeader)msg.getHeader(getName());
+            if(hdr == null) {
                 passUp(evt);
                 return;
             }
-            hdr=(PingHeader)msg.removeHeader(getName());
 
             switch(hdr.type) {
 
             case PingHeader.GET_MBRS_REQ:   // return Rsp(local_addr, coord)
                 if(local_addr != null && msg.getSrc() != null && local_addr.equals(msg.getSrc())) {
-                    if(trace)
-                        log.trace("discarded my own discovery request");
                     return;
                 }
                 synchronized(members) {
@@ -241,6 +237,7 @@ public abstract class Discovery extends Protocol {
 
                 PingRsp ping_rsp=new PingRsp(local_addr, coord, is_server);
                 rsp_msg=new Message(msg.getSrc(), null, null);
+                rsp_msg.setFlag(Message.OOB);
                 rsp_hdr=new PingHeader(PingHeader.GET_MBRS_RSP, ping_rsp);
                 rsp_msg.putHeader(getName(), rsp_hdr);
                 if(trace)
@@ -342,14 +339,13 @@ public abstract class Discovery extends Protocol {
     /* -------------------------- Private methods ---------------------------- */
 
 
-    protected View makeView(Vector mbrs) {
+    protected final View makeView(Vector mbrs) {
         Address coord;
         long id;
         ViewId view_id=new ViewId(local_addr);
 
         coord=view_id.getCoordAddress();
         id=view_id.getId();
-
         return new View(coord, id, mbrs);
     }
 

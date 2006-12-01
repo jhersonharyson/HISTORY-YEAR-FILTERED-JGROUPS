@@ -1,6 +1,7 @@
 package org.jgroups.protocols;
 
 import org.jgroups.Event;
+import org.jgroups.Global;
 import org.jgroups.Message;
 import org.jgroups.util.Buffer;
 import org.jgroups.util.ExposedByteArrayOutputStream;
@@ -9,6 +10,7 @@ import org.jgroups.util.Util;
 import java.io.*;
 import java.net.*;
 import java.util.Enumeration;
+import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -19,13 +21,13 @@ import java.util.Properties;
  * back via the regular transport (e.g. TCP) to the sender (discovery request contained sender's regular address,
  * e.g. 192.168.0.2:7800).
  * @author Bela Ban
- * @version $Id: MPING.java,v 1.12 2005/08/11 12:43:47 belaban Exp $
+ * @version $Id: MPING.java,v 1.19 2006/10/11 14:40:39 belaban Exp $
  */
 public class MPING extends PING implements Runnable {
     MulticastSocket     mcast_sock=null;
     Thread              receiver=null;
     InetAddress         bind_addr=null;
-    boolean             bind_to_all_interfaces=true;
+    boolean             bind_to_all_interfaces=false;
     int                 ip_ttl=16;
     InetAddress         mcast_addr=null;
     int                 mcast_port=7555;
@@ -33,7 +35,6 @@ public class MPING extends PING implements Runnable {
     /** Pre-allocated byte stream. Used for serializing datagram packets. Will grow as needed */
     final ExposedByteArrayOutputStream out_stream=new ExposedByteArrayOutputStream(512);
     byte                receive_buf[]=new byte[1024];
-    static final String IGNORE_BIND_ADDRESS_PROPERTY="ignore.bind.address";
 
 
     public String getName() {
@@ -82,22 +83,9 @@ public class MPING extends PING implements Runnable {
 
 
     public boolean setProperties(Properties props) {
-        String tmp=null, str;
-
-        // PropertyPermission not granted if running in an untrusted environment with JNLP.
-        try {
-            tmp=System.getProperty("bind.address");
-            if(Boolean.getBoolean(IGNORE_BIND_ADDRESS_PROPERTY)) {
-                tmp=null;
-            }
-        }
-        catch (SecurityException ex){
-        }
-
-        if(tmp != null)
-            str=tmp;
-        else
-            str=props.getProperty("bind_addr");
+        boolean ignore_systemprops=Util.isBindAddressPropertyIgnored();
+        String str=Util.getProperty(new String[]{Global.BIND_ADDR, Global.BIND_ADDR_OLD}, props, "bind_addr",
+                                    ignore_systemprops, null);
         if(str != null) {
             try {
                 bind_addr=InetAddress.getByName(str);
@@ -109,7 +97,7 @@ public class MPING extends PING implements Runnable {
             props.remove("bind_addr");
         }
 
-        str=props.getProperty("mcast_addr");
+        str=Util.getProperty(new String[]{Global.MPING_MCAST_ADDR}, props, "mcast_addr", false, "230.5.6.7");
         if(str != null) {
             try {
                 mcast_addr=InetAddress.getByName(str);
@@ -121,13 +109,13 @@ public class MPING extends PING implements Runnable {
             props.remove("mcast_addr");
         }
 
-        str=props.getProperty("mcast_port");
+        str=Util.getProperty(new String[]{Global.MPING_MCAST_PORT}, props, "mcast_port", false, "7555");
         if(str != null) {
             mcast_port=Integer.parseInt(str);
             props.remove("mcast_port");
         }
 
-        str=props.getProperty("ip_ttl");
+        str=Util.getProperty(new String[]{Global.MPING_IP_TTL}, props, "ip_ttl", false, "16");
         if(str != null) {
             ip_ttl=Integer.parseInt(str);
             props.remove("ip_ttl");
@@ -139,7 +127,7 @@ public class MPING extends PING implements Runnable {
             props.remove("bind_to_all_interfaces");
         }
 
-        if(mcast_addr == null)
+        if(mcast_addr == null) {
             try {
                 mcast_addr=InetAddress.getByName("230.5.6.7");
             }
@@ -147,8 +135,21 @@ public class MPING extends PING implements Runnable {
                 log.error("failed getting default mcast address", e);
                 return false;
             }
-
+        }
         return super.setProperties(props);
+    }
+
+
+    public void up(Event evt) {
+        if(evt.getType() == Event.CONFIG) {
+            if(bind_addr == null) {
+                Map config=(Map)evt.getArg();
+                bind_addr=(InetAddress)config.get("bind_addr");
+            }
+            passUp(evt);
+            return;
+        }
+        super.up(evt);
     }
 
 
@@ -208,7 +209,7 @@ public class MPING extends PING implements Runnable {
 
     private void startReceiver() {
         if(receiver == null || !receiver.isAlive()) {
-            receiver=new Thread(this, "ReceiverThread");
+            receiver=new Thread(Util.getGlobalThreadGroup(), this, "ReceiverThread");
             receiver.setDaemon(true);
             receiver.start();
             if(trace)
@@ -243,7 +244,7 @@ public class MPING extends PING implements Runnable {
             log.error("failed sending discovery request", ex);
         }
         finally {
-            Util.closeOutputStream(out);
+            Util.close(out);
         }
     }
 

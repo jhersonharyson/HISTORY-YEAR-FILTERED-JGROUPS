@@ -1,21 +1,15 @@
-// $Id: TCP.java,v 1.31 2005/09/29 12:24:37 belaban Exp $
+// $Id: TCP.java,v 1.37 2006/10/02 06:47:53 belaban Exp $
 
 package org.jgroups.protocols;
 
 
 import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Message;
 import org.jgroups.blocks.ConnectionTable;
 import org.jgroups.stack.IpAddress;
-import org.jgroups.util.BoundedList;
 
 import java.net.InetAddress;
-import java.net.UnknownHostException;
+import java.util.Collection;
 import java.util.Properties;
-import java.util.Vector;
-
-
 
 
 /**
@@ -29,33 +23,13 @@ import java.util.Vector;
  * registers with the connection table to receive all incoming messages.
  * @author Bela Ban
  */
-public class TCP extends TP implements ConnectionTable.Receiver {
+public class TCP extends BasicTCP implements ConnectionTable.Receiver {
     private ConnectionTable ct=null;
-    private InetAddress	    external_addr=null; // the IP address which is broadcast to other group members
-    private int             start_port=7800;    // find first available port starting at this port
-    private int	            end_port=0;         // maximum port to bind to
-    private long            reaper_interval=0;  // time in msecs between connection reaps
-    private long            conn_expire_time=0; // max time a conn can be idle before being reaped
-
-    /** List the maintains the currently suspected members. This is used so we don't send too many SUSPECT
-     * events up the stack (one per message !)
-     */
-    final BoundedList      suspected_mbrs=new BoundedList(20);
-
-    /** Should we drop unicast messages to suspected members or not */
-    boolean                skip_suspected_members=true;
-
-    /** Use separate send queues for each connection */
-    boolean                use_send_queues=true;
-
-    int                    recv_buf_size=150000;
-    int                    send_buf_size=150000;
-    int                    sock_conn_timeout=2000; // max time in millis for a socket creation in ConnectionTable
 
 
 
-    public TCP() {
-    }
+   public TCP() {
+   }
 
     public String getName() {
         return "TCP";
@@ -63,94 +37,12 @@ public class TCP extends TP implements ConnectionTable.Receiver {
 
 
     public int getOpenConnections()      {return ct.getNumConnections();}
-    public InetAddress getBindAddr() {return bind_addr;}
-    public void setBindAddr(InetAddress bind_addr) {this.bind_addr=bind_addr;}
-    public int getStartPort() {return start_port;}
-    public void setStartPort(int start_port) {this.start_port=start_port;}
-    public int getEndPort() {return end_port;}
-    public void setEndPort(int end_port) {this.end_port=end_port;}
-    public long getReaperInterval() {return reaper_interval;}
-    public void setReaperInterval(long reaper_interval) {this.reaper_interval=reaper_interval;}
-    public long getConnExpireTime() {return conn_expire_time;}
-    public void setConnExpireTime(long conn_expire_time) {this.conn_expire_time=conn_expire_time;}
-    public boolean isLoopback() {return loopback;}
-    public void setLoopback(boolean loopback) {this.loopback=loopback;}
-
-
     public String printConnections()     {return ct.toString();}
 
 
     /** Setup the Protocol instance acording to the configuration string */
     public boolean setProperties(Properties props) {
-        String str;
-
         super.setProperties(props);
-        str=props.getProperty("start_port");
-        if(str != null) {
-            start_port=Integer.parseInt(str);
-            props.remove("start_port");
-        }
-
-        str=props.getProperty("end_port");
-        if(str != null) {
-            end_port=Integer.parseInt(str);
-            props.remove("end_port");
-        }
-
-        str=props.getProperty("external_addr");
-        if(str != null) {
-            try {
-                external_addr=InetAddress.getByName(str);
-            }
-            catch(UnknownHostException unknown) {
-                if(log.isFatalEnabled()) log.fatal("(external_addr): host " + str + " not known");
-                return false;
-            }
-            props.remove("external_addr");
-        }
-
-        str=props.getProperty("reaper_interval");
-        if(str != null) {
-            reaper_interval=Long.parseLong(str);
-            props.remove("reaper_interval");
-        }
-
-        str=props.getProperty("conn_expire_time");
-        if(str != null) {
-            conn_expire_time=Long.parseLong(str);
-            props.remove("conn_expire_time");
-        }
-
-        str=props.getProperty("sock_conn_timeout");
-        if(str != null) {
-            sock_conn_timeout=Integer.parseInt(str);
-            props.remove("sock_conn_timeout");
-        }
-
-        str=props.getProperty("recv_buf_size");
-        if(str != null) {
-            recv_buf_size=Integer.parseInt(str);
-            props.remove("recv_buf_size");
-        }
-
-        str=props.getProperty("send_buf_size");
-        if(str != null) {
-            send_buf_size=Integer.parseInt(str);
-            props.remove("send_buf_size");
-        }
-
-        str=props.getProperty("skip_suspected_members");
-        if(str != null) {
-            skip_suspected_members=Boolean.valueOf(str).booleanValue();
-            props.remove("skip_suspected_members");
-        }
-
-        str=props.getProperty("use_send_queues");
-        if(str != null) {
-            use_send_queues=Boolean.valueOf(str).booleanValue();
-            props.remove("use_send_queues");
-        }
-
         if(props.size() > 0) {
             log.error("the following properties are not recognized: " + props);
             return false;
@@ -158,6 +50,13 @@ public class TCP extends TP implements ConnectionTable.Receiver {
         return true;
     }
 
+    public void send(Address dest, byte[] data, int offset, int length) throws Exception {
+        ct.send(dest, data, offset, length);
+    }
+
+    public void retainAll(Collection members) {
+        ct.retainAll(members);
+    }
 
     public void start() throws Exception {
         ct=getConnectionTable(reaper_interval,conn_expire_time,bind_addr,external_addr,start_port,end_port);
@@ -166,6 +65,8 @@ public class TCP extends TP implements ConnectionTable.Receiver {
         ct.setReceiveBufferSize(recv_buf_size);
         ct.setSendBufferSize(send_buf_size);
         ct.setSocketConnectionTimeout(sock_conn_timeout);
+        ct.setTcpNodelay(tcp_nodelay);
+        ct.setLinger(linger);
         local_addr=ct.getLocalAddress();
         if(additional_data != null && local_addr instanceof IpAddress)
             ((IpAddress)local_addr).setAdditionalData(additional_data);
@@ -178,16 +79,7 @@ public class TCP extends TP implements ConnectionTable.Receiver {
     }
 
 
-    protected void handleDownEvent(Event evt) {
-        super.handleDownEvent(evt);
-        if(evt.getType() == Event.VIEW_CHANGE) {
-            suspected_mbrs.removeAll();
-        }
-        else if(evt.getType() == Event.UNSUSPECT) {
-            suspected_mbrs.removeElement(evt.getArg());
-        }
-    }
-    
+
 
    /**
     * @param reaperInterval
@@ -214,76 +106,13 @@ public class TCP extends TP implements ConnectionTable.Receiver {
                connExpireTime=1000 * 60 * 5;
                if(warn) log.warn("conn_expire_time was 0, set it to " + connExpireTime);
            }
-           cTable=new ConnectionTable(this, bindAddress, externalAddress, startPort, endPort, 
+           cTable=new ConnectionTable(this, bindAddress, externalAddress, startPort, endPort,
                                       reaperInterval, connExpireTime);
        }
        return cTable;
    }
 
 
-    /** ConnectionTable.Receiver interface */
-    public void receive(Address sender, byte[] data, int offset, int length) {
-        super.receive(local_addr, sender, data, offset, length);
-    }
-
-
-
-
-    public void sendToAllMembers(byte[] data, int offset, int length) throws Exception {
-        Address dest;
-        Vector mbrs=(Vector)members.clone();
-        for(int i=0; i < mbrs.size(); i++) {
-            dest=(Address)mbrs.elementAt(i);
-            sendToSingleMember(dest, data, offset, length);
-        }
-    }
-
-    public void sendToSingleMember(Address dest, byte[] data, int offset, int length) throws Exception {
-        if(trace) log.trace("dest=" + dest + " (" + data.length + " bytes)");
-        if(skip_suspected_members) {
-            if(suspected_mbrs.contains(dest)) {
-                if(trace)
-                    log.trace("will not send unicast message to " + dest + " as it is currently suspected");
-                return;
-            }
-        }
-
-//        if(dest.equals(local_addr)) {
-//            if(!loopback) // if loopback, we discard the message (was already looped back)
-//                receive(dest, data, offset, length); // else we loop it back here
-//            return;
-//        }
-        try {
-            ct.send(dest, data, offset, length);
-        }
-        catch(Exception e) {
-            if(members.contains(dest)) {
-                if(!suspected_mbrs.contains(dest)) {
-                    suspected_mbrs.add(dest);
-                    passUp(new Event(Event.SUSPECT, dest));
-                }
-            }
-        }
-    }
-
-
-    public String getInfo() {
-        StringBuffer sb=new StringBuffer();
-        sb.append("connections: ").append(printConnections()).append("\n");
-        return sb.toString();
-    }
-
-
-    public void postUnmarshalling(Message msg, Address dest, Address src, boolean multicast) {
-        if(multicast)
-            msg.setDest(null);
-        else
-            msg.setDest(dest);
-    }
-
-    public void postUnmarshallingList(Message msg, Address dest, boolean multicast) {
-        postUnmarshalling(msg, dest, null, multicast);
-    }
 
 
 }

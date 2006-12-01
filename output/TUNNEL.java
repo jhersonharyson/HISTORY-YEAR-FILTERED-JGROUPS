@@ -1,13 +1,10 @@
-// $Id: TUNNEL.java,v 1.20 2005/12/08 09:35:28 belaban Exp $
+// $Id: TUNNEL.java,v 1.30 2006/12/31 06:26:58 belaban Exp $
 
 
 package org.jgroups.protocols;
 
 
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Message;
-import org.jgroups.View;
+import org.jgroups.*;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.RouterStub;
@@ -17,8 +14,8 @@ import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Properties;
 import java.util.Vector;
-
-
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 
 
 /**
@@ -42,7 +39,8 @@ public class TUNNEL extends Protocol implements Runnable {
     int router_port=0;
     Address local_addr=null;  // sock's local addr and local port
     Thread receiver=null;
-    RouterStub stub=null;
+    RouterStub stub=new RouterStub();
+    InetAddress bind_addr=null;
     private final Object stub_mutex=new Object();
 
     /** If true, messages sent to self are treated specially: unicast messages are
@@ -62,6 +60,8 @@ public class TUNNEL extends Protocol implements Runnable {
     long            reconnect_interval=5000;
 
 
+
+
     public TUNNEL() {
     }
 
@@ -71,7 +71,13 @@ public class TUNNEL extends Protocol implements Runnable {
     }
 
 
+    public boolean isConnected() {
+        return stub.isConnected();
+    }
 
+    public RouterStub getRouterStub() {
+        return stub;
+    }
 
     /*------------------------------ Protocol interface ------------------------------ */
 
@@ -83,27 +89,23 @@ public class TUNNEL extends Protocol implements Runnable {
         super.init();
     }
 
+
     public void start() throws Exception {
-        createTunnel();  // will generate and pass up a SET_LOCAL_ADDRESS event
+        super.start();
+        local_addr=stub.getLocalAddress();
         passUp(new Event(Event.SET_LOCAL_ADDRESS, local_addr));
     }
+
 
     public void stop() {
         if(receiver != null)
             receiver=null;
         teardownTunnel();
         stopReconnector();
+        local_addr=null;
     }
 
 
-
-    /**
-     * This prevents the up-handler thread to be created, which essentially is superfluous:
-     * messages are received from the network rather than from a layer below.
-     * DON'T REMOVE ! 
-     */
-    public void startUpHandler() {
-    }
 
     /** Setup the Protocol instance acording to the configuration string */
     public boolean setProperties(Properties props) {
@@ -145,6 +147,23 @@ public class TUNNEL extends Protocol implements Runnable {
             props.remove("loopback");
         }
 
+        boolean ignore_systemprops=Util.isBindAddressPropertyIgnored();
+        str=Util.getProperty(new String[]{Global.BIND_ADDR, Global.BIND_ADDR_OLD}, props, "bind_addr",
+                             ignore_systemprops, null);
+        if(str != null) {
+            try {
+                bind_addr=InetAddress.getByName(str);
+            }
+            catch(UnknownHostException unknown) {
+                log.error("(bind_addr): host " + str + " not known");
+                return false;
+            }
+            props.remove("bind_addr");
+        }
+
+        if(bind_addr != null)
+            stub.setBindAddress(bind_addr);
+
         if(props.size() > 0) {
             StringBuffer sb=new StringBuffer();
             for(Enumeration e=props.propertyNames(); e.hasMoreElements();) {
@@ -180,7 +199,7 @@ public class TUNNEL extends Protocol implements Runnable {
             msg.setSrc(local_addr);
 
         if(trace)
-            log.trace(msg + ", hdrs: " + msg.getHeaders());
+            log.trace(msg + ", hdrs: " + msg.printHeaders());
 
         // Don't send if destination is local address. Instead, switch dst and src and put in up_queue.
         // If multicast message, loopback a copy directly to us (but still multicast). Once we receive this,
@@ -192,10 +211,6 @@ public class TUNNEL extends Protocol implements Runnable {
             // copy.setDest(dest);
             evt=new Event(Event.MSG, copy);
 
-            /* Because Protocol.up() is never called by this bottommost layer, we call up() directly in the observer.
-               This allows e.g. PerfObserver to get the time of reception of a message */
-            if(observer != null)
-                observer.up(evt, up_queue.size());
             if(trace) log.trace("looped back local message " + copy);
             passUp(evt);
             if(dest != null && !dest.isMulticastAddress())
@@ -221,24 +236,16 @@ public class TUNNEL extends Protocol implements Runnable {
             throw new Exception("router_host and/or router_port not set correctly; tunnel cannot be created");
 
         synchronized(stub_mutex) {
-            stub=new RouterStub(router_host, router_port);
-            local_addr=stub.connect();
+            stub.connect(channel_name, router_host, router_port);
             if(additional_data != null && local_addr instanceof IpAddress)
                 ((IpAddress)local_addr).setAdditionalData(additional_data);
         }
-        if(local_addr == null)
-            throw new Exception("could not obtain local address !");
     }
 
 
     /** Tears the TCP connection to the router down */
     void teardownTunnel() {
-        synchronized(stub_mutex) {
-            if(stub != null) {
-                stub.disconnect();
-                stub=null;
-            }
-        }
+        stub.disconnect();
     }
 
     /*--------------------------- End of Protocol interface -------------------------- */
@@ -251,22 +258,27 @@ public class TUNNEL extends Protocol implements Runnable {
     public void run() {
         Message msg;
 
-        if(stub == null) {
-            if(log.isErrorEnabled()) log.error("router stub is null; cannot receive messages from router !");
-            return;
-        }
-
-        while(receiver != null) {
-            msg=stub.receive();
-            if(msg == null) {
-                if(receiver == null) break;
-                if(log.isTraceEnabled()) log.trace("received a null message. Trying to reconnect to router");
-                if(!stub.isConnected())
-                    startReconnector();
-                Util.sleep(5000);
-                continue;
+        while(receiver != null && Thread.currentThread().equals(receiver)) {
+            try {
+                msg=stub.receive();
+                if(msg == null) {
+                    if(receiver == null) break;
+                    if(log.isTraceEnabled()) log.trace("received a null message. Trying to reconnect to router");
+                    if(!stub.isConnected())
+                        startReconnector();
+                    Util.sleep(5000);
+                    continue;
+                }
+                handleIncomingMessage(msg);
             }
-            handleIncomingMessage(msg);
+            catch(Exception e) {
+                if(receiver == null || !Thread.currentThread().equals(receiver))
+                    return;
+                else {
+                    if(log.isTraceEnabled())
+                        log.trace("exception in receiver thread", e);
+                }
+            }
         }
     }
 
@@ -295,7 +307,7 @@ public class TUNNEL extends Protocol implements Runnable {
         }
 
          if(trace)
-             log.trace(msg + ", hdrs: " + msg.getHeaders());
+             log.trace(msg + ", hdrs: " + msg.printHeaders());
 
         /* Discard all messages destined for a channel with a different name */
 
@@ -339,7 +351,14 @@ public class TUNNEL extends Protocol implements Runnable {
                 if(log.isErrorEnabled()) log.error("CONNECT:  router stub is null!");
             }
             else {
-                stub.register(channel_name);
+                try {
+                    createTunnel();
+                }
+                catch(Exception e) {
+                    if(log.isErrorEnabled())
+                        log.error("failed connecting to GossipRouter at " + router_host + ":" + router_port);
+                    break;
+                }
             }
 
             receiver=new Thread(this, "TUNNEL receiver thread");
@@ -352,12 +371,12 @@ public class TUNNEL extends Protocol implements Runnable {
         case Event.DISCONNECT:
             if(receiver != null) {
                 receiver=null;
-                if(stub != null)
-                    stub.disconnect();
+                stub.disconnect();
             }
             teardownTunnel();
             passUp(new Event(Event.DISCONNECT_OK));
             passUp(new Event(Event.SET_LOCAL_ADDRESS, null));
+            local_addr=null;
             break;
 
         case Event.CONFIG:
@@ -411,10 +430,12 @@ public class TUNNEL extends Protocol implements Runnable {
 
         public void run() {
             while(Thread.currentThread().equals(my_thread)) {
-                if(stub.reconnect()) {
-                    stub.register(channel_name);
-                    if(log.isDebugEnabled()) log.debug("reconnected");
-                    return;
+                try {
+                    stub.reconnect();
+                    if(log.isTraceEnabled()) log.trace("reconnected");
+                    break;
+                }
+                catch(Exception e) {
                 }
                 Util.sleep(reconnect_interval);
             }
