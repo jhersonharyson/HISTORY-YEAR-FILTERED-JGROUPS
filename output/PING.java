@@ -1,11 +1,9 @@
-// $Id: PING.java,v 1.31 2006/12/11 15:38:56 belaban Exp $
 
 package org.jgroups.protocols;
 
 import org.jgroups.*;
 import org.jgroups.stack.GossipClient;
 import org.jgroups.stack.IpAddress;
-import org.jgroups.util.List;
 import org.jgroups.util.Util;
 
 import java.net.InetAddress;
@@ -25,6 +23,8 @@ import java.util.*;
  * The following properties are available
  * property: gossip_host - if you are using GOSSIP then this defines the host of the GossipRouter, default is null
  * property: gossip_port - if you are using GOSSIP then this defines the port of the GossipRouter, default is null
+ * @author Bela Ban
+ * @version $Id: PING.java,v 1.37 2007/11/29 11:27:08 belaban Exp $
  */
 public class PING extends Discovery {
     String       gossip_host=null;
@@ -32,7 +32,7 @@ public class PING extends Discovery {
     long         gossip_refresh=20000; // time in msecs after which the entry in GossipRouter will be refreshed
     GossipClient client;
     int          port_range=1;        // number of ports to be probed for initial membership
-    List         initial_hosts=null;  // hosts to be contacted for the initial membership
+    private List<Address> initial_hosts=null;  // hosts to be contacted for the initial membership
     public static final String name="PING";
 
 
@@ -121,24 +121,15 @@ public class PING extends Discovery {
 
     public void localAddressSet(Address addr) {
         // Add own address to initial_hosts if not present: we must always be able to ping ourself !
-        if(initial_hosts != null && local_addr != null) {
-            List hlist;
-            boolean inInitialHosts=false;
-            for(Enumeration en=initial_hosts.elements(); en.hasMoreElements() && !inInitialHosts;) {
-                hlist=(List)en.nextElement();
-                if(hlist.contains(local_addr)) {
-                    inInitialHosts=true;
-                }
-            }
-            if(!inInitialHosts) {
-                hlist=new List();
-                hlist.add(local_addr);
-                initial_hosts.add(hlist);
-                if(log.isDebugEnabled())
-                    log.debug("adding my address (" + local_addr + ") to initial_hosts; initial_hosts=" + initial_hosts);
+        if(initial_hosts != null && addr != null) {
+            if(initial_hosts.contains(addr)) {
+                initial_hosts.remove(addr);
+                if(log.isDebugEnabled()) log.debug("[SET_LOCAL_ADDRESS]: removing my own address (" + addr +
+                        ") from initial_hosts; initial_hosts=" + initial_hosts);
             }
         }
     }
+
 
 
     public void handleConnect() {
@@ -153,58 +144,53 @@ public class PING extends Discovery {
 
 
 
-    public void sendGetMembersRequest() {
-        Message msg;
-        PingHeader hdr;
-        java.util.List gossip_rsps;
+    public void sendGetMembersRequest(String cluster_name) {
+        Message       msg;
+        PingHeader    hdr;
+        List<Address> gossip_rsps;
 
         if(client != null) {
             gossip_rsps=client.getMembers(group_addr);
-            if(gossip_rsps != null && gossip_rsps.size() > 0) {
+            if(gossip_rsps != null && !gossip_rsps.isEmpty()) {
                 // Set a temporary membership in the UDP layer, so that the following multicast
                 // will be sent to all of them
-                Event view_event=new Event(Event.TMP_VIEW, makeView(new Vector(gossip_rsps)));
-                passDown(view_event); // needed e.g. by failure detector or UDP
+                Event view_event=new Event(Event.TMP_VIEW, makeView(new Vector<Address>(gossip_rsps)));
+                down_prot.down(view_event); // needed e.g. by failure detector or UDP
             }
             else {
-                passUp(new Event(Event.FIND_INITIAL_MBRS_OK, null));
+                //do nothing
                 return;
             }
 
-            if(gossip_rsps.size() > 0) {
+            if(!gossip_rsps.isEmpty()) {
                 for(Iterator it=gossip_rsps.iterator(); it.hasNext();) {
                     Address dest=(Address)it.next();
                     msg=new Message(dest, null, null);  // unicast msg
                     msg.setFlag(Message.OOB);
-                    msg.putHeader(getName(), new PingHeader(PingHeader.GET_MBRS_REQ, null));
-                    passDown(new Event(Event.MSG, msg));
+                    msg.putHeader(getName(), new PingHeader(PingHeader.GET_MBRS_REQ, cluster_name));
+                    down_prot.down(new Event(Event.MSG, msg));
                 }
             }
 
             Util.sleep(500);
         }
         else {
-            if(initial_hosts != null && initial_hosts.size() > 0) {
-                IpAddress h;
-                List hlist;
-                msg=new Message(null);
-                msg.setFlag(Message.OOB);
-                msg.putHeader(getName(), new PingHeader(PingHeader.GET_MBRS_REQ, null));
-                for(Enumeration en=initial_hosts.elements(); en.hasMoreElements();) {
-                    hlist=(List)en.nextElement();
-                    boolean isMember=false;
-                    for(Enumeration hen=hlist.elements(); hen.hasMoreElements() && !isMember;) {
-                        h=(IpAddress)hen.nextElement();
-                        msg.setDest(h);
-                        if(trace)
-                            log.trace("[FIND_INITIAL_MBRS] sending PING request to " + msg.getDest());
-                        passDown(new Event(Event.MSG, msg.copy()));
-                    }
+            if(initial_hosts != null && !initial_hosts.isEmpty()) {
+                for(Address addr: initial_hosts) {
+                    // if(tmpMbrs.contains(addr)) {
+                    // ; // continue; // changed as suggested by Mark Kopec
+                    // }
+                    msg=new Message(addr, null, null);
+                    msg.setFlag(Message.OOB);
+                    msg.putHeader(name, new PingHeader(PingHeader.GET_MBRS_REQ, cluster_name));
+
+                    if(log.isTraceEnabled()) log.trace("[FIND_INITIAL_MBRS] sending PING request to " + msg.getDest());
+                    down_prot.down(new Event(Event.MSG, msg));
                 }
             }
             else {
                 // 1. Mcast GET_MBRS_REQ message
-                hdr=new PingHeader(PingHeader.GET_MBRS_REQ, null);
+                hdr=new PingHeader(PingHeader.GET_MBRS_REQ, cluster_name);
                 msg=new Message(null);  // mcast msg
                 msg.setFlag(Message.OOB);
                 msg.putHeader(getName(), hdr); // needs to be getName(), so we might get "MPING" !
@@ -214,7 +200,7 @@ public class PING extends Discovery {
     }
 
     void sendMcastDiscoveryRequest(Message discovery_request) {
-        passDown(new Event(Event.MSG, discovery_request));
+        down_prot.down(new Event(Event.MSG, discovery_request));
     }
 
     /* -------------------------- Private methods ---------------------------- */
@@ -224,27 +210,29 @@ public class PING extends Discovery {
     /**
      * Input is "daddy[8880],sindhu[8880],camille[5555]. Return List of IpAddresses
      */
-    private List createInitialHosts(String l) throws UnknownHostException {
-        List tmp=new List();
+    private List<Address> createInitialHosts(String l) throws UnknownHostException {
         StringTokenizer tok=new StringTokenizer(l, ",");
-        String t;
+        String          t;
+        IpAddress       addr;
+        java.util.List<Address> retval=new ArrayList<Address>();
 
         while(tok.hasMoreTokens()) {
             try {
-                t=tok.nextToken();
+                t=tok.nextToken().trim();
                 String host=t.substring(0, t.indexOf('['));
+                host=host.trim();
                 int port=Integer.parseInt(t.substring(t.indexOf('[') + 1, t.indexOf(']')));
-                List hosts=new List();
                 for(int i=port; i < port + port_range; i++) {
-                    hosts.add(new IpAddress(host, i));
+                    addr=new IpAddress(host, i);
+                    retval.add(addr);
                 }
-                tmp.add(hosts);
             }
             catch(NumberFormatException e) {
                 if(log.isErrorEnabled()) log.error("exeption is " + e);
             }
         }
-        return tmp;
+
+        return retval;
     }
 
 

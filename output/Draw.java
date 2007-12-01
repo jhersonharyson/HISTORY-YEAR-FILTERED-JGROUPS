@@ -1,4 +1,4 @@
-// $Id: Draw.java,v 1.38 2006/12/31 06:26:59 belaban Exp $
+// $Id: Draw.java,v 1.51 2007/09/07 04:56:34 belaban Exp $
 
 
 package org.jgroups.demos;
@@ -12,10 +12,8 @@ import javax.management.MBeanServer;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
+import java.io.*;
 
 
 /**
@@ -27,7 +25,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     String                         groupname="DrawGroupDemo";
     private Channel                channel=null;
     private int                    member_size=1;
-    final boolean                  first=true;
+    static final boolean           first=true;
     private JFrame                 mainFrame=null;
     private JPanel                 sub_panel=null;
     private DrawPanel              panel=null;
@@ -35,21 +33,25 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     private final Random           random=new Random(System.currentTimeMillis());
     private final Font             default_font=new Font("Helvetica",Font.PLAIN,12);
     private final Color            draw_color=selectColor();
-    private final Color background_color=Color.white;
+    private static final Color     background_color=Color.white;
     boolean                        no_channel=false;
     boolean                        jmx;
     private boolean                use_state=false;
+    private long                   state_timeout=5000;
 
 
-    public Draw(String props, boolean no_channel, boolean jmx, boolean use_state) throws Exception {
+    public Draw(String props, boolean no_channel, boolean jmx, boolean use_state, long state_timeout,
+                boolean use_blocking) throws Exception {
         this.no_channel=no_channel;
         this.jmx=jmx;
         this.use_state=use_state;
+        this.state_timeout=state_timeout;
         if(no_channel)
             return;
 
         channel=new JChannel(props);
-        // channel.setOpt(Channel.BLOCK, Boolean.TRUE);
+        if(use_blocking)
+            channel.setOpt(Channel.BLOCK, Boolean.TRUE);
         channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
         channel.setReceiver(this);
         channel.addChannelListener(this);
@@ -60,6 +62,16 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
         channel.setReceiver(this);
         channel.addChannelListener(this);
+    }
+
+
+    public Draw(Channel channel, boolean use_state, long state_timeout) throws Exception {
+        this.channel=channel;
+        channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
+        channel.setReceiver(this);
+        channel.addChannelListener(this);
+        this.use_state=use_state;
+        this.state_timeout=state_timeout;
     }
 
 
@@ -79,7 +91,9 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
        boolean          no_channel=false;
        boolean          jmx=false;
        boolean          use_state=false;
+       boolean          use_blocking=false;
        String           group_name=null;
+       long             state_timeout=5000;
 
         for(int i=0; i < args.length; i++) {
             if("-help".equals(args[i])) {
@@ -106,13 +120,25 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
                 use_state=true;
                 continue;
             }
+            if("-use_blocking".equals(args[i])) {
+                use_blocking=true;
+                continue;
+            }
+            if("-timeout".equals(args[i])) {
+                state_timeout=Long.parseLong(args[++i]);
+                continue;
+            }
+            if("-bind_addr".equals(args[i])) {
+                System.setProperty("jgroups.bind_addr", args[++i]);
+                continue;
+            }
 
             help();
             return;
         }
 
         try {
-            draw=new Draw(props, no_channel, jmx, use_state);
+            draw=new Draw(props, no_channel, jmx, use_state, state_timeout, use_blocking);
             if(group_name != null)
                 draw.setGroupName(group_name);
             draw.go();
@@ -126,7 +152,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
 
     static void help() {
         System.out.println("\nDraw [-help] [-no_channel] [-props <protocol stack definition>]" +
-                           " [-groupname <name>] [-state]");
+                           " [-groupname <name>] [-state] [-use_blocking] [-timeout <state timeout>] [-bind_addr <addr>]");
         System.out.println("-no_channel: doesn't use JGroups at all, any drawing will be relected on the " +
                            "whiteboard directly");
         System.out.println("-props: argument can be an old-style protocol stack specification, or it can be " +
@@ -144,7 +170,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
 
 
     public void go() throws Exception {
-        if(!no_channel) {
+        if(!no_channel && !use_state) {
             channel.connect(groupname);
             if(jmx) {
                 MBeanServer server=Util.getMBeanServer();
@@ -173,15 +199,15 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         mainFrame.setBackground(background_color);
         clear_button.setForeground(Color.blue);
         leave_button.setForeground(Color.blue);
-        setTitle();
         mainFrame.pack();
         mainFrame.setLocation(15, 25);
         mainFrame.setBounds(new Rectangle(250, 250));
 
         if(!no_channel && use_state) {
-            channel.getState(null, 5000);
+            channel.connect(groupname,null,null, state_timeout);
         }
         mainFrame.setVisible(true);
+        setTitle();
     }
 
 
@@ -213,7 +239,8 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     public void receive(Message msg) {
         byte[] buf=msg.getRawBuffer();
         if(buf == null) {
-            System.err.println("received null buffer from " + msg.getSrc() + ", headers: " + msg.printHeaders());
+            System.err.println("[" + channel.getLocalAddress() + "] received null buffer from " + msg.getSrc() +
+                    ", headers: " + msg.printHeaders());
             return;
         }
 
@@ -262,7 +289,35 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
 
     public void setState(byte[] state) {
         panel.setState(state);
+    }
 
+
+    public void getState(OutputStream ostream) {
+        try {
+            try {
+                panel.writeState(ostream);
+            }
+            catch(IOException e) {
+                e.printStackTrace();
+            }
+        }
+        finally {
+            Util.close(ostream);
+        }
+    }
+
+    public void setState(InputStream istream) {
+        try {
+            try {
+                panel.readState(istream);
+            }
+            catch(IOException e) {
+                e.printStackTrace();
+            }
+        }
+        finally {
+            Util.close(istream);
+        }
     }
 
     /* --------------- Callbacks --------------- */
@@ -275,8 +330,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     }
 
     public void sendClearPanelMsg() {
-        int                  tmp[]=new int[1]; tmp[0]=0;
-        DrawCommand          comm=new DrawCommand(DrawCommand.CLEAR);
+        DrawCommand comm=new DrawCommand(DrawCommand.CLEAR);
 
         try {
             byte[] buf=Util.streamableToByteBuffer(comm);
@@ -357,15 +411,15 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
 
         public DrawPanel(boolean use_state) {
             if(use_state)
-                state=new LinkedHashMap();
+                state=new LinkedHashMap<Point,Color>();
             else
                 state=null;
-            createOffscreenImage();
+            createOffscreenImage(false);
             addMouseMotionListener(this);
             addComponentListener(new ComponentAdapter() {
                 public void componentResized(ComponentEvent e) {
                     if(getWidth() <= 0 || getHeight() <= 0) return;
-                    createOffscreenImage();
+                    createOffscreenImage(false);
                 }
             });
         }
@@ -386,8 +440,68 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         }
 
 
-        final void createOffscreenImage() {
+        public void setState(byte[] buf) {
+            synchronized(state) {
+                try {
+                    Map<Point,Color> tmp=(Map<Point,Color>)Util.objectFromByteBuffer(buf);
+                    state.clear();
+                    state.putAll(tmp);
+                    System.out.println("received state: " + buf.length + " bytes, " + state.size() + " entries");
+                    createOffscreenImage(true);
+                }
+                catch(Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        public void writeState(OutputStream outstream) throws IOException {
+            synchronized(state) {
+                if(state != null) {
+                    DataOutputStream dos=new DataOutputStream(outstream);
+                    dos.writeInt(state.size());
+                    Point point;
+                    Color col;
+                    for(Map.Entry<Point,Color> entry: state.entrySet()) {
+                        point=entry.getKey();
+                        col=entry.getValue();
+                        dos.writeInt(point.x);
+                        dos.writeInt(point.y);
+                        dos.writeInt(col.getRGB());
+                    }
+                    dos.flush();
+                }
+            }
+        }
+
+
+        public void readState(InputStream instream) throws IOException {
+            DataInputStream in=new DataInputStream(instream);
+            Map<Point,Color> new_state=new HashMap<Point,Color>();
+            int num=in.readInt();
+            Point point;
+            Color col;
+            for(int i=0; i < num; i++) {
+                point=new Point(in.readInt(), in.readInt());
+                col=new Color(in.readInt());
+                new_state.put(point, col);
+            }
+
+            synchronized(state) {
+                state.clear();
+                state.putAll(new_state);
+                System.out.println("read state: " + state.size() + " entries");
+                createOffscreenImage(true);
+            }
+        }
+
+
+        final void createOffscreenImage(boolean discard_image) {
             d=getSize();
+            if(discard_image) {
+                img=null;
+                imgsize=null;
+            }
             if(img == null || imgsize == null || imgsize.width != d.width || imgsize.height != d.height) {
                 img=createImage(d.width, d.height);
                 if(img != null) {
@@ -419,7 +533,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
             try {
                 byte[] buf=Util.streamableToByteBuffer(comm);
                 channel.send(new Message(null, null, buf));
-                Thread.yield(); // gives the repainter some breath
+                // Thread.yield();
             }
             catch(Exception ex) {
                 System.err.println(ex);
@@ -462,19 +576,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         }
 
 
-        public void setState(byte[] buf) {
-            synchronized(state) {
-                try {
-                    Map tmp=(Map)Util.objectFromByteBuffer(buf);
-                    state.clear();
-                    state.putAll(tmp);
-                    System.out.println("received state: " + buf.length + " bytes, " + state.size() + " entries");
-                }
-                catch(Exception e) {
-                    e.printStackTrace();
-                }
-            }
-        }
+
 
 
         /** Draw the entire panel from the state */

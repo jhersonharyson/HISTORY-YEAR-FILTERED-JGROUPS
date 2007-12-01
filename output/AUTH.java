@@ -47,7 +47,7 @@ public class AUTH extends Protocol{
             }
         }
 
-        if(props.size() > 0) {
+        if(!props.isEmpty()) {
             //this should never happen as everything is read in to the AuthToken instance
             if(log.isErrorEnabled()){
                 log.error("AUTH.setProperties(): the following properties are not recognized: " + props);
@@ -91,10 +91,10 @@ public class AUTH extends Protocol{
      * (e.g. removing headers from a MSG event type, or updating the internal membership list
      * when receiving a VIEW_CHANGE event).
      * Finally the event is either a) discarded, or b) an event is sent down
-     * the stack using <code>passDown()</code> or c) the event (or another event) is sent up
-     * the stack using <code>passUp()</code>.
+     * the stack using <code>down_prot.down()</code> or c) the event (or another event) is sent up
+     * the stack using <code>up_prot.up()</code>.
      */
-    public void up(Event evt) {
+    public Object up(Event evt) {
         GMS.GmsHeader hdr = isJoinMessage(evt);
         if((hdr != null) && (hdr.getType() == GMS.GmsHeader.JOIN_REQ)){
             if(log.isDebugEnabled()){
@@ -113,46 +113,58 @@ public class AUTH extends Protocol{
                         if(log.isDebugEnabled()){
                             log.debug("AUTH passing up event");
                         }
-                        passUp(evt);
+                        up_prot.up(evt);
                     }else{
                         //invalid token
                         if(log.isWarnEnabled()){
                             log.warn("AUTH failed to validate AuthHeader token");
                         }
-                        passDown(createFailureEvent(msg.getSrc(), "Authentication failed"));
+                        sendRejectionMessage(msg.getSrc(), createFailureEvent(msg.getSrc(), "Authentication failed"));
                     }
                 }else{
                     //Invalid AUTH Header - need to send failure message
                     if(log.isWarnEnabled()){
                         log.warn("AUTH failed to get valid AuthHeader from Message");
                     }
-                    passDown(createFailureEvent(msg.getSrc(), "Failed to find valid AuthHeader in Message"));
+                    sendRejectionMessage(msg.getSrc(), createFailureEvent(msg.getSrc(), "Failed to find valid AuthHeader in Message"));
                 }
             }else{
                 if(log.isDebugEnabled()){
                     log.debug("No AUTH Header Found");
                 }
                 //should be a failure
-                passDown(createFailureEvent(msg.getSrc(), "Failed to find an AuthHeader in Message"));
+                sendRejectionMessage(msg.getSrc(), createFailureEvent(msg.getSrc(), "Failed to find an AuthHeader in Message"));
             }
         }else{
             //if debug
             if(log.isDebugEnabled()){
                 log.debug("Message not a JOIN_REQ - ignoring it");
             }
-            passUp(evt);
+            return up_prot.up(evt);
         }
+        return null;
+    }
+
+
+    private void sendRejectionMessage(Address dest, Event join_rsp) {
+        if(dest == null) {
+            log.error("destination is null, cannot send JOIN rejection message to null destination");
+            return;
+        }
+        down_prot.down(new Event(Event.ENABLE_UNICASTS_TO, dest));
+        down_prot.down(join_rsp);
+        down_prot.down(new Event(Event.DISABLE_UNICASTS_TO, dest));
     }
 
     /**
      * An event is to be sent down the stack. The layer may want to examine its type and perform
      * some action on it, depending on the event's type. If the event is a message MSG, then
      * the layer may need to add a header to it (or do nothing at all) before sending it down
-     * the stack using <code>passDown()</code>. In case of a GET_ADDRESS event (which tries to
+     * the stack using <code>down_prot.down()</code>. In case of a GET_ADDRESS event (which tries to
      * retrieve the stack's address from one of the bottom layers), the layer may need to send
-     * a new response event back up the stack using <code>passUp()</code>.
+     * a new response event back up the stack using <code>up_prot.up()</code>.
      */
-    public void down(Event evt) {
+    public Object down(Event evt) {
         GMS.GmsHeader hdr = isJoinMessage(evt);
         if((hdr != null) && (hdr.getType() == GMS.GmsHeader.JOIN_REQ)){
             if(log.isDebugEnabled()){
@@ -175,7 +187,7 @@ public class AUTH extends Protocol{
             }
         }
 
-        passDown(evt);
+        return down_prot.down(evt);
     }
 
     /**

@@ -4,9 +4,9 @@ package org.jgroups.protocols.pbcast;
 import org.jgroups.*;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.StateTransferInfo;
-import org.jgroups.util.Promise;
 import org.jgroups.util.Streamable;
 import org.jgroups.util.Util;
+import org.jgroups.util.Digest;
 
 import java.io.*;
 import java.util.*;
@@ -19,7 +19,7 @@ import java.util.*;
  * its current state S. Then the member returns both S and D to the requester. The requester
  * first sets its digest to D and then returns the state to the application.
  * @author Bela Ban
- * @version $Id: STATE_TRANSFER.java,v 1.48 2006/12/22 14:45:51 belaban Exp $
+ * @version $Id: STATE_TRANSFER.java,v 1.76 2007/09/17 07:03:35 belaban Exp $
  */
 public class STATE_TRANSFER extends Protocol {
     Address        local_addr=null;
@@ -34,16 +34,12 @@ public class STATE_TRANSFER extends Protocol {
     /** set to true while waiting for a STATE_RSP */
     boolean        waiting_for_state_response=false;
 
-    Digest         digest=null;
-    final HashMap  map=new HashMap(); // to store configuration information
+    final Map<String,Object>  map=new HashMap<String,Object>(); // to store configuration information
     long           start, stop; // to measure state transfer time
     int            num_state_reqs=0;
     long           num_bytes_sent=0;
     double         avg_state_size=0;
-    final static   String name="STATE_TRANSFER";
-    boolean        use_flush=false;
-    long           flush_timeout=4000;
-    Promise        flush_promise;   
+    final static   String name="STATE_TRANSFER";    
     boolean        flushProtocolInStack = false;
 
 
@@ -58,7 +54,7 @@ public class STATE_TRANSFER extends Protocol {
 
     public Vector requiredDownServices() {
         Vector retval=new Vector();
-        retval.addElement(new Integer(Event.GET_DIGEST_STATE));
+        retval.addElement(new Integer(Event.GET_DIGEST));
         retval.addElement(new Integer(Event.SET_DIGEST));
         return retval;
     }
@@ -72,13 +68,19 @@ public class STATE_TRANSFER extends Protocol {
 
 
     public boolean setProperties(Properties props) {
-        super.setProperties(props);
-
-        use_flush=Util.parseBoolean(props, "use_flush", false);        
-        flush_promise=new Promise();
-        
-        flush_timeout = Util.parseLong(props, "flush_timeout", flush_timeout);       
-        if(props.size() > 0) {
+        super.setProperties(props);             
+        String str=props.getProperty("use_flush");   
+        if(str != null) {
+            log.warn("use_flush has been deprecated and its value will be ignored");
+            props.remove("use_flush");
+        } 
+        str=props.getProperty("flush_timeout");   
+        if(str != null) {
+            log.warn("flush_timeout has been deprecated and its value will be ignored");
+            props.remove("flush_timeout");
+        }     
+                                             
+        if(!props.isEmpty()) {
             log.error("the following properties are not recognized: " + props);
             return false;
         }
@@ -92,11 +94,7 @@ public class STATE_TRANSFER extends Protocol {
 
 
     public void start() throws Exception {
-        passUp(new Event(Event.CONFIG, map));
-        if(!flushProtocolInStack && use_flush){
-           log.warn("use_flush property is true, however, FLUSH protocol not found in stack");
-           use_flush = false;
-        }
+        up_prot.up(new Event(Event.CONFIG, map));        
     }
 
     public void stop() {
@@ -105,35 +103,11 @@ public class STATE_TRANSFER extends Protocol {
     }
 
 
-    public void up(Event evt) {
-        Message     msg;
-
+    public Object up(Event evt) {
         switch(evt.getType()) {
 
-        case Event.BECOME_SERVER:
-            break;
-
-        case Event.SET_LOCAL_ADDRESS:
-            local_addr=(Address)evt.getArg();
-            break;
-
-        case Event.TMP_VIEW:
-        case Event.VIEW_CHANGE:
-            handleViewChange((View)evt.getArg());
-            break;
-
-        case Event.GET_DIGEST_STATE_OK:
-            synchronized(state_requesters) {
-                digest=(Digest)evt.getArg();
-                if(log.isDebugEnabled())
-                    log.debug("GET_DIGEST_STATE_OK: digest is " + digest + "\npassUp(GET_APPLSTATE)");
-
-                requestApplicationStates();
-            }
-            return;
-
         case Event.MSG:
-            msg=(Message)evt.getArg();
+            Message msg=(Message)evt.getArg();
             StateHeader hdr=(StateHeader)msg.getHeader(name);
             if(hdr == null)
                 break;
@@ -143,28 +117,36 @@ public class STATE_TRANSFER extends Protocol {
                 handleStateReq(hdr);
                 break;
             case StateHeader.STATE_RSP:
-                handleStateRsp(hdr, msg.getBuffer());
-                if(use_flush) {
-            		stopFlush();
-            	}
+                handleStateRsp(hdr, msg.getBuffer());               
                 break;
             default:
                 if(log.isErrorEnabled()) log.error("type " + hdr.type + " not known in StateHeader");
                 break;
             }
-            return;
+            return null;
+
+        case Event.SET_LOCAL_ADDRESS:
+            local_addr=(Address)evt.getArg();
+            break;
+
+        case Event.TMP_VIEW:
+        case Event.VIEW_CHANGE:
+            handleViewChange((View)evt.getArg());
+            break;
+            
+        case Event.CONFIG :
+            Map<String,Object> config = (Map<String,Object>) evt.getArg();
+            if(config != null && config.containsKey("state_transfer")){
+				log.error("Protocol stack cannot contain two state transfer protocols. Remove either one of them");
+			}
+            break;           
         }
-        passUp(evt);
+        return up_prot.up(evt);
     }
 
 
 
-    public void down(Event evt) {
-        byte[] state;
-        Address target, requester;
-        StateTransferInfo info;
-        StateHeader hdr;
-
+    public Object down(Event evt) {
         switch(evt.getType()) {
 
             case Event.TMP_VIEW:
@@ -172,9 +154,10 @@ public class STATE_TRANSFER extends Protocol {
                 handleViewChange((View)evt.getArg());
                 break;
 
-            // generated by JChannel.getState(). currently, getting the state from more than 1 mbr is not implemented
+                // generated by JChannel.getState(). currently, getting the state from more than 1 mbr is not implemented
             case Event.GET_STATE:
-                info=(StateTransferInfo)evt.getArg();
+                Address target;
+                StateTransferInfo info=(StateTransferInfo)evt.getArg();
                 if(info.target == null) {
                     target=determineCoordinator();
                 }
@@ -187,110 +170,34 @@ public class STATE_TRANSFER extends Protocol {
                 }
                 if(target == null) {
                     if(log.isDebugEnabled()) log.debug("GET_STATE: first member (no state)");
-                    passUp(new Event(Event.GET_STATE_OK, new StateTransferInfo()));
+                    up_prot.up(new Event(Event.GET_STATE_OK, new StateTransferInfo()));
                 }
-                else {
-                    boolean successfulFlush = false;
-                    if(use_flush) {
-                       successfulFlush = startFlush(flush_timeout, 5);
-                    }
-                    if (successfulFlush){
-                       log.info("Successful flush at " + local_addr);
-                    }
+                else {                    
                     Message state_req=new Message(target, null, null);
                     state_req.putHeader(name, new StateHeader(StateHeader.STATE_REQ, local_addr, state_id++, null, info.state_id));
                     if(log.isDebugEnabled()) log.debug("GET_STATE: asking " + target + " for state");
 
-                    // suspend sending and handling of mesage garbage collection gossip messages,
+                    // suspend sending and handling of message garbage collection gossip messages,
                     // fixes bugs #943480 and #938584). Wake up when state has been received
                     if(log.isDebugEnabled())
                         log.debug("passing down a SUSPEND_STABLE event");
-                    passDown(new Event(Event.SUSPEND_STABLE, new Long(info.timeout)));
+                    down_prot.down(new Event(Event.SUSPEND_STABLE, new Long(info.timeout)));
                     waiting_for_state_response=true;
                     start=System.currentTimeMillis();
-                    passDown(new Event(Event.MSG, state_req));
+                    down_prot.down(new Event(Event.MSG, state_req));
                 }
-                return;                 // don't pass down any further !
-
-            case Event.GET_APPLSTATE_OK:
-                info=(StateTransferInfo)evt.getArg();
-                state=info.state;
-                String id=info.state_id;
-                synchronized(state_requesters) {
-                    if(state_requesters.size() == 0) {
-                        if(warn)
-                            log.warn("GET_APPLSTATE_OK: received application state, but there are no requesters !");
-                        return;
-                    }
-                    if(isDigestNeeded()){
-	                    if(digest == null) {
-	                        if(warn) log.warn("GET_APPLSTATE_OK: received application state, but there is no digest !");
-                        }
-	                    else {
-	                        digest=digest.copy();
-                        }
-                    }
-                    if(stats) {
-                        num_state_reqs++;
-                        if(state != null)
-                            num_bytes_sent+=state.length;
-                        avg_state_size=num_bytes_sent / num_state_reqs;
-                    }
-
-                    Set requesters=(Set)state_requesters.get(id);
-                    if(requesters == null || requesters.size() == 0) {
-                        log.warn("received state for id=" + id + ", but there are no requesters for this ID");
-                    }
-                    else {
-                        for(Iterator it=requesters.iterator(); it.hasNext();) {
-                            requester=(Address)it.next();
-                            final Message state_rsp=new Message(requester, null, state);
-                            hdr=new StateHeader(StateHeader.STATE_RSP, local_addr, 0, digest, id);
-                            state_rsp.putHeader(name, hdr);
-                            if(trace)
-                                log.trace("sending state for ID=" + id + " to " + requester + " (" + state.length + " bytes)");
-
-                            // This has to be done in a separate thread, so we don't block on FC
-                            // (see http://jira.jboss.com/jira/browse/JGRP-225 for details). This will be reverted once
-                            // we have the threadless stack  (http://jira.jboss.com/jira/browse/JGRP-181)
-                            // and out-of-band messages (http://jira.jboss.com/jira/browse/JGRP-205)
-                            new Thread() {
-                                public void run() {
-                                   passDown(new Event(Event.MSG, state_rsp));
-                                }
-                            }.start();
-                            // passDown(new Event(Event.MSG, state_rsp));
-                        }
-                        state_requesters.remove(id);
-                    }
-                }
-                return;             // don't pass down any further !
-            case Event.SUSPEND_OK:
-            	if(use_flush) {
-            		flush_promise.setResult(Boolean.TRUE);
-            	}
-            	break;
-            case Event.SUSPEND_FAILED :
-               if (use_flush){                  
-                    flush_promise.setResult(Boolean.FALSE);
-               }
-               break;   
+                return null;                 // don't pass down any further !         
                 
             case Event.CONFIG :
-               Map config = (Map) evt.getArg();               
-               if(config != null && config.containsKey("flush_timeout")){
-                  Long ftimeout = (Long) config.get("flush_timeout");
-                  use_flush = true;                  
-                  flush_timeout = ftimeout.longValue();                               
-               }
-               if((config != null && !config.containsKey("flush_suported"))){                                   
-                  flushProtocolInStack = true;                              
-               }
-               break;     
+                Map<String,Object> config = (Map<String,Object>) evt.getArg();                
+                if(config != null && config.containsKey("flush_supported")){
+                    flushProtocolInStack = true;                                       
+                }
+                break;
 
         }
 
-        passDown(evt);              // pass on to the layer below us
+        return down_prot.down(evt);              // pass on to the layer below us
     }
 
 
@@ -312,17 +219,82 @@ public class STATE_TRANSFER extends Protocol {
 	 * @return true if use of digests is required, false otherwise
 	 */
 	private boolean isDigestNeeded(){
-		return !use_flush;
+		return !flushProtocolInStack;
 	}
 
-    private void requestApplicationStates() {
+    private void requestApplicationStates(Address requester, Digest digest, boolean open_barrier) {
+        Set appl_ids=new HashSet(state_requesters.keySet());
+        String id;
+
+        List<StateTransferInfo> responses=new LinkedList<StateTransferInfo>();
+        for(Iterator it=appl_ids.iterator(); it.hasNext();) {
+            id=(String)it.next();
+            StateTransferInfo info=new StateTransferInfo(requester, id, 0L, null);
+            StateTransferInfo rsp=(StateTransferInfo)up_prot.up(new Event(Event.GET_APPLSTATE, info));
+            responses.add(rsp);
+        }
+        if(open_barrier)
+            down_prot.down(new Event(Event.OPEN_BARRIER));
+        for(StateTransferInfo rsp: responses) {
+            sendApplicationStateResponse(rsp, digest);
+        }
+    }
+
+
+    private void sendApplicationStateResponse(StateTransferInfo rsp, Digest digest) {
+        byte[]          state=rsp.state;
+        String          id=rsp.state_id;
+        List<Message>   responses=null;
+
         synchronized(state_requesters) {
-            Set appl_ids=new HashSet(state_requesters.keySet());
-            String id;
-            for(Iterator it=appl_ids.iterator(); it.hasNext();) {
-                id=(String)it.next();
-                StateTransferInfo info=new StateTransferInfo(null, id, 0L, null);
-                passUp(new Event(Event.GET_APPLSTATE, info));
+            if(state_requesters.isEmpty()) {
+                if(log.isWarnEnabled())
+                    log.warn("GET_APPLSTATE_OK: received application state, but there are no requesters !");
+                return;
+            }
+            if(stats) {
+                num_state_reqs++;
+                if(state != null)
+                    num_bytes_sent+=state.length;
+                avg_state_size=num_bytes_sent / num_state_reqs;
+            }
+
+            Set requesters=(Set)state_requesters.get(id);
+            if(requesters == null || requesters.isEmpty()) {
+                log.warn("received state for id=" + id + ", but there are no requesters for this ID");
+            }
+            else {
+                Address requester;
+                responses=new LinkedList<Message>();
+                for(Iterator it=requesters.iterator(); it.hasNext();) {
+                    requester=(Address)it.next();
+                    Message state_rsp=new Message(requester, null, state);
+                    StateHeader hdr=new StateHeader(StateHeader.STATE_RSP, local_addr, 0, digest, id);
+                    state_rsp.putHeader(name, hdr);
+                    responses.add(state_rsp);
+                }
+                state_requesters.remove(id);
+            }
+        }
+
+        if(responses != null && !responses.isEmpty()) {
+            for(Message state_rsp: responses) {
+                if(log.isTraceEnabled()) {
+                    int length=state != null? state.length : 0;
+                    log.trace("sending state for ID=" + id + " to " + state_rsp.getDest() + " (" + length + " bytes)");
+                }
+                down_prot.down(new Event(Event.MSG, state_rsp));
+
+                // This has to be done in a separate thread, so we don't block on FC
+                // (see http://jira.jboss.com/jira/browse/JGRP-225 for details). This will be reverted once
+                // we have the threadless stack  (http://jira.jboss.com/jira/browse/JGRP-181)
+                // and out-of-band messages (http://jira.jboss.com/jira/browse/JGRP-205)
+//                new Thread() {
+//                    public void run() {
+//                        down_prot.down(new Event(Event.MSG, state_rsp));
+//                    }
+//                }.start();
+                // down_prot.down(new Event(Event.MSG, state_rsp));
             }
         }
     }
@@ -348,7 +320,7 @@ public class STATE_TRANSFER extends Protocol {
         boolean send_up_null_state_rsp=false;
 
         synchronized(members) {
-            old_coord=(Address)(members.size() > 0? members.firstElement() : null);
+            old_coord=(Address)(!members.isEmpty()? members.firstElement() : null);
             members.clear();
             members.addAll(new_members);
 
@@ -362,7 +334,7 @@ public class STATE_TRANSFER extends Protocol {
         }
 
         if(send_up_null_state_rsp) {
-            if(warn)
+            if(log.isWarnEnabled())
                 log.warn("discovered that the state provider (" + old_coord + ") crashed; will return null state to application");
             StateHeader hdr=new StateHeader(StateHeader.STATE_RSP, local_addr, 0, null, null);
             handleStateRsp(hdr, null); // sends up null GET_STATE_OK
@@ -375,7 +347,7 @@ public class STATE_TRANSFER extends Protocol {
      * we add the sender to the requester list and send a GET_APPLSTATE event up.
      */
     private void handleStateReq(StateHeader hdr) {
-        Object sender=hdr.sender;
+        Address sender=hdr.sender;
         if(sender == null) {
             if(log.isErrorEnabled()) log.error("sender is null !");
             return;
@@ -383,7 +355,7 @@ public class STATE_TRANSFER extends Protocol {
 
         String id=hdr.state_id; // id could be null, which means get the entire state
         synchronized(state_requesters) {
-            boolean empty=state_requesters.size() == 0;
+            boolean empty=state_requesters.isEmpty();
             Set requesters=(Set)state_requesters.get(id);
             if(requesters == null) {
                 requesters=new HashSet();
@@ -392,12 +364,25 @@ public class STATE_TRANSFER extends Protocol {
             requesters.add(sender);
 
             if(!isDigestNeeded()) { // state transfer is in progress, digest was already requested
-                requestApplicationStates();
+                requestApplicationStates(sender, null, false);
             }
-            else if(empty){
-                digest=null;
-                if(log.isDebugEnabled()) log.debug("passing down GET_DIGEST_STATE");
-                passDown(new Event(Event.GET_DIGEST_STATE));
+            else if(empty) {
+                if(!flushProtocolInStack) {
+                    down_prot.down(new Event(Event.CLOSE_BARRIER));
+                }
+                Digest digest=(Digest)down_prot.down(new Event(Event.GET_DIGEST));
+                if(log.isDebugEnabled())
+                    log.debug("digest is " + digest + ", getting application state");
+                try {
+                    requestApplicationStates(sender, digest, !flushProtocolInStack);
+                }
+                catch(Throwable t) {
+                    if(log.isErrorEnabled())
+                        log.error("failed getting state from application", t);
+                    if(!flushProtocolInStack) {
+                        down_prot.down(new Event(Event.OPEN_BARRIER));
+                    }
+                }
             }
         }
     }
@@ -408,15 +393,16 @@ public class STATE_TRANSFER extends Protocol {
         Address sender=hdr.sender;
         Digest tmp_digest=hdr.my_digest;
         String id=hdr.state_id;
+        Address state_sender=hdr.sender;
 
         waiting_for_state_response=false;
         if(isDigestNeeded()){
 	        if(tmp_digest == null) {
-	            if(warn)
+	            if(log.isWarnEnabled())
 	                log.warn("digest received from " + sender + " is null, skipping setting digest !");
 	        }
 	        else
-	            passDown(new Event(Event.SET_DIGEST, tmp_digest)); // set the digest (e.g. in NAKACK)
+	            down_prot.down(new Event(Event.SET_DIGEST, tmp_digest)); // set the digest (e.g. in NAKACK)
         }
         stop=System.currentTimeMillis();
 
@@ -425,48 +411,17 @@ public class STATE_TRANSFER extends Protocol {
         // collection protocol (e.g. STABLE)
         if(log.isDebugEnabled())
             log.debug("passing down a RESUME_STABLE event");
-        passDown(new Event(Event.RESUME_STABLE));
+        down_prot.down(new Event(Event.RESUME_STABLE));
 
         if(state == null) {
-            if(warn)
+            if(log.isWarnEnabled())
                 log.warn("state received from " + sender + " is null, will return null state to application");
         }
         else
             log.debug("received state, size=" + state.length + " bytes. Time=" + (stop-start) + " milliseconds");
-        StateTransferInfo info=new StateTransferInfo(null, id, 0L, state);
-        passUp(new Event(Event.GET_STATE_OK, info));
+        StateTransferInfo info=new StateTransferInfo(state_sender, id, 0L, state);
+        up_prot.up(new Event(Event.GET_STATE_OK, info));
     }
-
-    private boolean startFlush(long timeout,int numberOfAttempts) {
-        boolean successfulFlush=false;
-        flush_promise.reset();
-        passUp(new Event(Event.SUSPEND));
-        try {            
-            Boolean r = (Boolean)flush_promise.getResultWithTimeout(timeout);
-            successfulFlush = r.booleanValue();            
-        }
-        catch(TimeoutException e) {
-           log.warn("Initiator of flush and state requesting member " + local_addr
-                 + " timed out waiting for flush responses after " 
-                 + flush_timeout + " msec");
-        }
-        
-        if(!successfulFlush && numberOfAttempts>0){
-           long backOffSleepTime = Util.random(5000);
-           if(log.isInfoEnabled())               
-              log.info("Flush in progress detected at " + local_addr + ". Backing off for "
-                    + backOffSleepTime + " ms. Attempts left " + numberOfAttempts);
-           
-           Util.sleepRandom(backOffSleepTime);
-           successfulFlush = startFlush(flush_timeout,--numberOfAttempts);            
-        }              
-        return successfulFlush;
-    }
-
-    private void stopFlush() {
-        passUp(new Event(Event.RESUME));
-    }
-
 
     /* ------------------------ End of Private Methods ------------------------------ */
 
@@ -487,6 +442,7 @@ public class STATE_TRANSFER extends Protocol {
         Address sender;             // sender of state STATE_REQ or STATE_RSP
         Digest  my_digest=null;     // digest of sender (if type is STATE_RSP)
         String  state_id=null;      // for partial state transfer
+        private static final long serialVersionUID=4457830093491204405L;
 
 
         public StateHeader() {  // for externalization
@@ -544,7 +500,7 @@ public class STATE_TRANSFER extends Protocol {
 
 
         public String toString() {
-            StringBuffer sb=new StringBuffer();
+            StringBuilder sb=new StringBuilder();
             sb.append("type=").append(type2Str(type));
             if(sender != null) sb.append(", sender=").append(sender).append(" id=").append(id);
             if(my_digest != null) sb.append(", digest=").append(my_digest);
@@ -571,7 +527,13 @@ public class STATE_TRANSFER extends Protocol {
             out.writeLong(id);
             out.writeByte(type);
             out.writeObject(my_digest);
-            out.writeUTF(state_id);
+            if(state_id == null) {
+                out.writeBoolean(false);
+            }
+            else {
+                out.writeBoolean(true);
+                out.writeUTF(state_id);
+            }
         }
 
 
@@ -580,7 +542,8 @@ public class STATE_TRANSFER extends Protocol {
             id=in.readLong();
             type=in.readByte();
             my_digest=(Digest)in.readObject();
-            state_id=in.readUTF();
+            if(in.readBoolean())
+                state_id=in.readUTF();
         }
 
 
@@ -601,8 +564,8 @@ public class STATE_TRANSFER extends Protocol {
             state_id=Util.readString(in);
         }
 
-        public long size() {
-            long retval=Global.LONG_SIZE + Global.BYTE_SIZE; // id and type
+        public int size() {
+            int retval=Global.LONG_SIZE + Global.BYTE_SIZE; // id and type
 
             retval+=Util.size(sender);
 

@@ -3,8 +3,14 @@ package org.jgroups.protocols;
 
 import org.jgroups.*;
 import org.jgroups.stack.Protocol;
+import org.jgroups.util.Promise;
+import org.jgroups.util.TimeScheduler;
 
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 
 /**
@@ -23,34 +29,41 @@ import java.util.*;
  * <li>num_ping_requests - the number of GET_MBRS_REQ messages to be sent (min=1), distributed over timeout ms
  * </ul>
  * @author Bela Ban
- * @version $Id: Discovery.java,v 1.18 2006/12/22 14:45:52 belaban Exp $
+ * @version $Id: Discovery.java,v 1.37 2007/11/29 11:27:36 belaban Exp $
  */
 public abstract class Discovery extends Protocol {
-    final Vector  members=new Vector(11);
-    Address       local_addr=null;
-    String        group_addr=null;
-    long          timeout=3000;
-    int           num_initial_members=2;
-    boolean       is_server=false;
-    PingWaiter    ping_waiter;
-
+    final Vector<Address>	members=new Vector<Address>(11);
+    Address					local_addr=null;
+    String					group_addr=null;
+    long					timeout=3000;
+    int						num_initial_members=2;
+    boolean					is_server=false;
+    TimeScheduler			timer=null;
 
     /** Number of GET_MBRS_REQ messages to be sent (min=1), distributed over timeout ms */
-    int           num_ping_requests=2;
+    int                     num_ping_requests=2;
+    int                     num_discovery_requests=0;
 
-    int           num_discovery_requests=0;
+
+    private final Set<Responses> ping_responses=new HashSet<Responses>();
+    private final PingSenderTask sender=new PingSenderTask(timeout, num_ping_requests);
+    
+
+    
+    public void init() throws Exception {
+        if(stack != null && stack.timer != null)
+            timer=stack.timer;
+        else
+            throw new Exception("timer cannot be retrieved from protocol stack");
+    }
 
 
     /** Called after local_addr was set */
     public void localAddressSet(Address addr) {
     }
 
-    public abstract void sendGetMembersRequest();
+    public abstract void sendGetMembersRequest(String cluster_name);
 
-
-    /** Called when CONNECT_OK has been received */
-    public void handleConnectOK() {
-    }
 
     public void handleDisconnect() {
     }
@@ -63,9 +76,7 @@ public abstract class Discovery extends Protocol {
     }
 
     public void setTimeout(long timeout) {
-        this.timeout=timeout;
-        if(ping_waiter != null)
-            ping_waiter.setTimeout(timeout);
+        this.timeout=timeout;        
     }
 
     public int getNumInitialMembers() {
@@ -73,9 +84,7 @@ public abstract class Discovery extends Protocol {
     }
 
     public void setNumInitialMembers(int num_initial_members) {
-        this.num_initial_members=num_initial_members;
-        if(ping_waiter != null)
-            ping_waiter.setNumRsps(num_initial_members);
+        this.num_initial_members=num_initial_members;        
     }
 
     public int getNumPingRequests() {
@@ -91,8 +100,8 @@ public abstract class Discovery extends Protocol {
     }
 
 
-    public Vector providedUpServices() {
-        Vector ret=new Vector(1);
+    public Vector<Integer> providedUpServices() {
+        Vector<Integer> ret=new Vector<Integer>(1);
         ret.addElement(new Integer(Event.FIND_INITIAL_MBRS));
         return ret;
     }
@@ -134,7 +143,7 @@ public abstract class Discovery extends Protocol {
                 num_ping_requests=1;
         }
 
-        if(props.size() > 0) {
+        if(!props.isEmpty()) {
             StringBuffer sb=new StringBuffer();
             for(Enumeration e=props.propertyNames(); e.hasMoreElements();) {
                 sb.append(e.nextElement().toString());
@@ -155,32 +164,46 @@ public abstract class Discovery extends Protocol {
 
     public void start() throws Exception {
         super.start();
-        PingSender ping_sender=new PingSender(timeout, num_ping_requests, this);
-        if(ping_waiter == null)
-            ping_waiter=new PingWaiter(timeout, num_initial_members, this, ping_sender);
     }
 
     public void stop() {
-        is_server=false;
-        if(ping_waiter != null)
-            ping_waiter.stop();
+        is_server=false;        
     }
 
     /**
-     * Finds the initial membership
-     * @return Vector<PingRsp>
+     * Finds the initial membership: sends a GET_MBRS_REQ to all members, waits 'timeout' ms or
+     * until 'num_initial_members' have been retrieved
+     * @return List<PingRsp>
      */
-    public Vector findInitialMembers() {
-        return ping_waiter != null? ping_waiter.findInitialMembers() : null;
+    public List<PingRsp> findInitialMembers(Promise promise) {
+        num_discovery_requests++;
+
+        final Responses rsps=new Responses(num_initial_members, promise);
+        synchronized(ping_responses) {
+            ping_responses.add(rsps);
+        }
+
+        sender.start(group_addr);
+        try {
+            return rsps.get(timeout);
+        }
+        catch(Exception e) {
+            return null;
+        }
+        finally {
+        	sender.stop();
+            synchronized(ping_responses) {
+                ping_responses.remove(rsps);
+            }
+        }
     }
 
+
     public String findInitialMembersAsString() {
-        Vector results=findInitialMembers();
-        if(results == null || results.size() == 0) return "<empty>";
-        PingRsp rsp;
-        StringBuffer sb=new StringBuffer();
-        for(Iterator it=results.iterator(); it.hasNext();) {
-            rsp=(PingRsp)it.next();
+    	List<PingRsp> results=findInitialMembers(null);
+        if(results == null || results.isEmpty()) return "<empty>";
+        StringBuilder sb=new StringBuilder();
+        for(PingRsp rsp: results) {
             sb.append(rsp).append("\n");
         }
         return sb.toString();
@@ -209,7 +232,7 @@ public abstract class Discovery extends Protocol {
      * @param evt - the event that has been sent from the layer below
      */
 
-    public void up(Event evt) {
+    public Object up(Event evt) {
         Message msg, rsp_msg;
         PingHeader rsp_hdr;
         PingRsp rsp;
@@ -221,18 +244,34 @@ public abstract class Discovery extends Protocol {
             msg=(Message)evt.getArg();
             PingHeader hdr=(PingHeader)msg.getHeader(getName());
             if(hdr == null) {
-                passUp(evt);
-                return;
+                return up_prot.up(evt);
             }
 
             switch(hdr.type) {
 
             case PingHeader.GET_MBRS_REQ:   // return Rsp(local_addr, coord)
                 if(local_addr != null && msg.getSrc() != null && local_addr.equals(msg.getSrc())) {
-                    return;
+                    return null;
                 }
+
+                if(group_addr == null || hdr.cluster_name == null) {
+                    if(log.isWarnEnabled())
+                        log.warn("group_addr (" + group_addr + ") or cluster_name of header (" + hdr.cluster_name
+                        + ") is null; passing up discovery request from " + msg.getSrc() + ", but this should not" +
+                                "be the case");
+                }
+                else {
+                    if(!group_addr.equals(hdr.cluster_name)) {
+                        if(log.isWarnEnabled())
+                            log.warn("discarding discovery request for cluster '" + hdr.cluster_name + "' from " +
+                                    msg.getSrc() + "; our cluster name is '" + group_addr + "'. " +
+                                    "Please separate your clusters cleanly.");
+                        return null;
+                    }
+                }
+
                 synchronized(members) {
-                    coord=members.size() > 0 ? (Address)members.firstElement() : local_addr;
+                    coord=!members.isEmpty()? members.firstElement() : local_addr;
                 }
 
                 PingRsp ping_rsp=new PingRsp(local_addr, coord, is_server);
@@ -240,40 +279,41 @@ public abstract class Discovery extends Protocol {
                 rsp_msg.setFlag(Message.OOB);
                 rsp_hdr=new PingHeader(PingHeader.GET_MBRS_RSP, ping_rsp);
                 rsp_msg.putHeader(getName(), rsp_hdr);
-                if(trace)
+                if(log.isTraceEnabled())
                     log.trace("received GET_MBRS_REQ from " + msg.getSrc() + ", sending response " + rsp_hdr);
-                passDown(new Event(Event.MSG, rsp_msg));
-                return;
+                down_prot.down(new Event(Event.MSG, rsp_msg));
+                return null;
 
             case PingHeader.GET_MBRS_RSP:   // add response to vector and notify waiting thread
                 rsp=hdr.arg;
 
-                if(trace)
+                if(log.isTraceEnabled())
                     log.trace("received GET_MBRS_RSP, rsp=" + rsp);
-                ping_waiter.addResponse(rsp);
-                return;
+                // myfuture.addResponse(rsp);
+
+                synchronized(ping_responses) {
+                    for(Responses rsps: ping_responses)
+                        rsps.addResponse(rsp);
+                }
+                return null;
 
             default:
-                if(warn) log.warn("got PING header with unknown type (" + hdr.type + ')');
-                return;
+                if(log.isWarnEnabled()) log.warn("got PING header with unknown type (" + hdr.type + ')');
+                return null;
             }
 
-
         case Event.SET_LOCAL_ADDRESS:
-            passUp(evt);
+            up_prot.up(evt);
             local_addr=(Address)evt.getArg();
             localAddressSet(local_addr);
             break;
 
-        case Event.CONNECT_OK:
-            handleConnectOK();
-            passUp(evt);
-            break;
-
         default:
-            passUp(evt);            // Pass up to the layer above us
+            up_prot.up(evt);            // Pass up to the layer above us
             break;
         }
+
+        return null;
     }
 
 
@@ -283,54 +323,50 @@ public abstract class Discovery extends Protocol {
      * the layer may need to add a header to it (or do nothing at all) before sending it down
      * the stack using <code>PassDown</code>. In case of a GET_ADDRESS event (which tries to
      * retrieve the stack's address from one of the bottom layers), the layer may need to send
-     * a new response event back up the stack using <code>passUp()</code>.
+     * a new response event back up the stack using <code>up_prot.up()</code>.
      * The PING protocol is interested in several different down events,
      * Event.FIND_INITIAL_MBRS - sent by the GMS layer and expecting a GET_MBRS_OK
      * Event.TMP_VIEW and Event.VIEW_CHANGE - a view change event
      * Event.BECOME_SERVER - called after client has joined and is fully working group member
      * Event.CONNECT, Event.DISCONNECT.
      */
-    public void down(Event evt) {
+    public Object down(Event evt) {
 
         switch(evt.getType()) {
 
         case Event.FIND_INITIAL_MBRS:   // sent by GMS layer, pass up a GET_MBRS_OK event
             // sends the GET_MBRS_REQ to all members, waits 'timeout' ms or until 'num_initial_members' have been retrieved
-            num_discovery_requests++;
-            ping_waiter.start();
-            break;
+            return findInitialMembers((Promise)evt.getArg());
 
         case Event.TMP_VIEW:
         case Event.VIEW_CHANGE:
-            Vector tmp;
+            Vector<Address> tmp;
             if((tmp=((View)evt.getArg()).getMembers()) != null) {
                 synchronized(members) {
                     members.clear();
                     members.addAll(tmp);
                 }
             }
-            passDown(evt);
-            break;
+            return down_prot.down(evt);
 
         case Event.BECOME_SERVER: // called after client has joined and is fully working group member
-            passDown(evt);
+            down_prot.down(evt);
             is_server=true;
-            break;
+            return null;
 
         case Event.CONNECT:
+        case Event.CONNECT_WITH_STATE_TRANSFER:    
             group_addr=(String)evt.getArg();
-            passDown(evt);
+            Object ret=down_prot.down(evt);
             handleConnect();
-            break;
+            return ret;
 
         case Event.DISCONNECT:
             handleDisconnect();
-            passDown(evt);
-            break;
+            return down_prot.down(evt);
 
         default:
-            passDown(evt);          // Pass on to the layer below us
-            break;
+            return down_prot.down(evt);          // Pass on to the layer below us
         }
     }
 
@@ -339,7 +375,8 @@ public abstract class Discovery extends Protocol {
     /* -------------------------- Private methods ---------------------------- */
 
 
-    protected final View makeView(Vector mbrs) {
+    @SuppressWarnings("unchecked")
+	protected final View makeView(Vector mbrs) {
         Address coord;
         long id;
         ViewId view_id=new ViewId(local_addr);
@@ -349,6 +386,198 @@ public abstract class Discovery extends Protocol {
         return new View(coord, id, mbrs);
     }
 
+    
+
+    class PingSenderTask {
+        private double		interval;
+		private Future		senderFuture;
+
+        public PingSenderTask(long timeout, int num_requests) {
+            interval=timeout / (double)num_requests;
+        }
+
+        public synchronized void start(final String cluster_name) {
+            if(senderFuture == null || senderFuture.isDone()) {
+                senderFuture=timer.scheduleWithFixedDelay(new Runnable() {
+                    public void run() {
+                        try {
+                            sendGetMembersRequest(cluster_name);
+                        }
+                        catch(Exception ex) {
+                            if(log.isErrorEnabled())
+                                log.error("failed sending discovery request", ex);
+                        }
+                    }
+                }, 0, (long)interval, TimeUnit.MILLISECONDS);
+            }
+        }
+
+        public synchronized void stop() {
+            if(senderFuture != null) {
+                senderFuture.cancel(true);
+                senderFuture=null;
+            }
+        }
+    }
+
+
+    private static class Responses {
+        final Promise       promise;
+        final List<PingRsp> ping_rsps=new LinkedList<PingRsp>();
+        final int           num_expected_rsps;
+
+        public Responses(int num_expected_rsps, Promise promise) {
+            this.num_expected_rsps=num_expected_rsps;
+            this.promise=promise != null? promise : new Promise();
+        }
+
+        public void addResponse(PingRsp rsp) {
+            if(rsp == null)
+                return;
+            promise.getLock().lock();
+            try {
+                if(!ping_rsps.contains(rsp)) {
+                    ping_rsps.add(rsp);
+                    if(ping_rsps.size() >= num_expected_rsps)
+                        promise.getCond().signalAll();
+                }
+            }
+            finally {
+                promise.getLock().unlock();
+            }
+        }
+
+        public List<PingRsp> get(long timeout) throws InterruptedException, ExecutionException, TimeoutException {
+            long start_time=System.currentTimeMillis(), time_to_wait=timeout;
+
+            promise.getLock().lock();
+            try {
+                while(ping_rsps.size() < num_expected_rsps && time_to_wait > 0 && !promise.hasResult()) {
+                    promise.getCond().await(time_to_wait, TimeUnit.MILLISECONDS);
+                    time_to_wait=timeout - (System.currentTimeMillis() - start_time);
+                }
+                return new LinkedList<PingRsp>(ping_rsps);
+            }
+            finally {
+                promise.getLock().unlock();
+            }
+        }
+
+    }
+    
+
+//    private static class MyFuture implements Future<List<PingRsp>> {
+//        final int num_expected_rsps;
+//        @GuardedBy("lock")
+//        final List<PingRsp> responses=new LinkedList<PingRsp>();
+//        @GuardedBy("lock")
+//        volatile boolean cancelled=false;
+//        @GuardedBy("lock")
+//        volatile boolean done=false;
+//        final Lock lock;
+//        Condition all_responses_received;
+//
+//
+//        public MyFuture(int num_expected_rsps) {
+//            this.num_expected_rsps=num_expected_rsps;
+//            this.lock=new ReentrantLock();
+//            all_responses_received=lock.newCondition();
+//        }
+//
+//        public MyFuture(int num_expected_rsps, Lock lock, Condition cond) {
+//            this.num_expected_rsps=num_expected_rsps;
+//            this.lock=lock;
+//            all_responses_received=cond;
+//        }
+//
+//        public boolean cancel(boolean b) {
+//            lock.lock();
+//            try {
+//                boolean retval=!cancelled;
+//                cancelled=true;
+//                responses.clear();
+//                all_responses_received.signalAll();
+//                return retval;
+//            }
+//            finally {
+//                lock.unlock();
+//            }
+//        }
+//
+//        public boolean isCancelled() {
+//            return cancelled;
+//        }
+//
+//        public boolean isDone() {
+//            return done;
+//        }
+//
+//        public List<PingRsp> get() throws InterruptedException, ExecutionException {
+//            lock.lock();
+//            try {
+//                while(responses.size() < num_expected_rsps && !cancelled) {
+//                    all_responses_received.await();
+//                }
+//                return _get();
+//            }
+//            finally {
+//                lock.unlock();
+//            }
+//        }
+//
+//        public List<PingRsp> get(long timeout, TimeUnit timeUnit) throws InterruptedException, ExecutionException, TimeoutException {
+//            long start_time=System.currentTimeMillis(), time_to_wait=timeout;
+//
+//            lock.lock();
+//            try {
+//                while(responses.size() < num_expected_rsps && time_to_wait > 0 && !cancelled) {
+//                    all_responses_received.await(time_to_wait, TimeUnit.MILLISECONDS);
+//                    time_to_wait=timeout - (System.currentTimeMillis() - start_time);
+//                }
+//                if(responses.size() >= num_expected_rsps || time_to_wait <= 0)
+//                    done=true;
+//                return _get();
+//            }
+//            finally {
+//                lock.unlock();
+//            }
+//        }
+//
+//
+//        void addResponse(PingRsp rsp) {
+//            if(rsp == null)
+//                return;
+//            lock.lock();
+//            try {
+//                if(!responses.contains(rsp)) {
+//                    responses.add(rsp);
+//                    if(responses.size() >= num_expected_rsps)
+//                        done=true;
+//                    all_responses_received.signalAll();
+//                }
+//            }
+//            finally {
+//                lock.unlock();
+//            }
+//        }
+//
+//        void reset() {
+//            lock.lock();
+//            try {
+//                cancelled=false;
+//                done=false;
+//                responses.clear();
+//                all_responses_received.signalAll();
+//            }
+//            finally {
+//                lock.unlock();
+//            }
+//        }
+//
+//        private List<PingRsp> _get() {
+//            return cancelled? null : new LinkedList<PingRsp>(responses);
+//        }
+//    }
 
 
 }
