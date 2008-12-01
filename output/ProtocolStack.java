@@ -1,15 +1,15 @@
+// $Id: ProtocolStack.java,v 1.27.6.1 2007/04/27 06:26:38 belaban Exp $
 
 package org.jgroups.stack;
 
 import org.jgroups.*;
 import org.jgroups.conf.ClassConfigurator;
-import org.jgroups.protocols.TP;
-import org.jgroups.util.*;
+import org.jgroups.util.Promise;
+import org.jgroups.util.TimeScheduler;
 
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
+
+
 
 
 /**
@@ -20,81 +20,48 @@ import java.util.concurrent.locks.ReentrantLock;
  * The ProtocolStack makes use of the Configurator to setup and initialize stacks, and to
  * destroy them again when not needed anymore
  * @author Bela Ban
- * @version $Id: ProtocolStack.java,v 1.60 2007/12/03 13:17:08 belaban Exp $
  */
 public class ProtocolStack extends Protocol implements Transport {
-    
-    public static final int ABOVE = 1; // used by insertProtocol()
-    public static final int BELOW = 2; // used by insertProtocol()
+    private Protocol                top_prot=null;
+    private Protocol                bottom_prot=null;
+    private final Configurator      conf=new Configurator();
+    private String                  setup_string;
+    private JChannel                channel=null;
+    private boolean                 stopped=true;
+    public TimeScheduler            timer=new TimeScheduler();
 
-    protected final PatternedThreadFactory thread_factory;
-    protected final PatternedThreadFactory timer_thread_factory;
-    public final TimeScheduler timer;
-    private Protocol top_prot = null;
-    private Protocol bottom_prot = null;
-    private String setup_string;
-    private JChannel channel = null;
-    private volatile boolean stopped = true;
+    /** Used to sync on START/START_OK events for start()*/
+    Promise                         start_promise=null;
 
+    /** used to sync on STOP/STOP_OK events for stop() */
+    Promise                         stop_promise=null;
 
-    static {
-        singleton_transports=new ConcurrentHashMap<String,Tuple<TP,Short>>();
-    }
-
-
-    /** Locks acquired by protocol below, need to get released on down().
-     * See http://jira.jboss.com/jira/browse/JGRP-535 for details */
-    private final Map<Thread, ReentrantLock> locks=new ConcurrentHashMap<Thread,ReentrantLock>();
+    public static final int         ABOVE=1; // used by insertProtocol()
+    public static final int         BELOW=2; // used by insertProtocol()
 
 
-    /** Holds the shared transports, keyed by 'TP.singleton_name'.
-     * The values are the transport and the use count for start() (decremented by stop() */
-    private static final ConcurrentMap<String,Tuple<TP,Short>> singleton_transports;
 
-
-    public ProtocolStack(JChannel channel, String setup_string) throws ChannelException {               
-        this(newThreadFactory(Util.getGlobalThreadGroup(),"",false),channel,setup_string);
-    }
-    
-    public ProtocolStack(ThreadFactory factory, JChannel channel, String setup_string) throws ChannelException {
-        this.thread_factory=new PatternedThreadFactory(factory,null);
+    public ProtocolStack(JChannel channel, String setup_string) throws ChannelException {
         this.setup_string=setup_string;
         this.channel=channel;
         ClassConfigurator.getInstance(true); // will create the singleton
-        this.timer_thread_factory=new PatternedThreadFactory(
-                newThreadFactory(new ThreadGroup(Util.getGlobalThreadGroup(), "Timers"), "Timer", true),
-                null);
-        timer= new TimeScheduler(timer_thread_factory);
     }
-
-
 
     /** Only used by Simulator; don't use */
-    public ProtocolStack() throws ChannelException {
-        this(null,null,null);
-    }
-    
-    public ThreadFactory getThreadFactory(){
-        return thread_factory;
+    public ProtocolStack() {
+
     }
 
-    public Map<Thread,ReentrantLock> getLocks() {
-        return locks;
-    }
 
     public Channel getChannel() {
         return channel;
     }
 
-    public int getTimerThreads() {
-        return timer.getCorePoolSize();
-    }
-
     /** Returns all protocols in a list, from top to bottom. <em>These are not copies of protocols,
      so modifications will affect the actual instances !</em> */
-    public Vector<Protocol> getProtocols() {
-        Protocol         p;
-        Vector<Protocol> v=new Vector<Protocol>();
+    public Vector getProtocols() {
+        Protocol p;
+        Vector   v=new Vector();
 
         p=top_prot;
         while(p != null) {
@@ -104,23 +71,13 @@ public class ProtocolStack extends Protocol implements Transport {
         return v;
     }
 
-    /** Returns the bottom most protocol */
-    public Protocol getTransport() {
-        Vector<Protocol> prots=getProtocols();
-        return !prots.isEmpty()? prots.lastElement() : null;
-    }
-
-    public static ConcurrentMap<String, Tuple<TP, Short>> getSingletonTransports() {
-        return singleton_transports;
-    }
-
     /**
      *
      * @return Map<String,Map<key,val>>
      */
-    public Map<String,Object> dumpStats() {
+    public Map dumpStats() {
         Protocol p;
-        Map<String,Object> retval=new HashMap<String,Object>(), tmp;
+        Map retval=new HashMap(), tmp;
         String prot_name;
 
         p=top_prot;
@@ -135,7 +92,7 @@ public class ProtocolStack extends Protocol implements Transport {
     }
 
     public String dumpTimerQueue() {
-        return timer.dumpTaskQueue();
+        return timer != null ? timer.dumpTaskQueue() : "";
     }
 
     /**
@@ -143,7 +100,7 @@ public class ProtocolStack extends Protocol implements Transport {
      * the properties for each protocol will also be printed.
      */
     public String printProtocolSpec(boolean include_properties) {
-        StringBuilder sb=new StringBuilder();
+        StringBuffer sb=new StringBuffer();
         Protocol     prot=top_prot;
         Properties   tmpProps;
         String       name;
@@ -175,7 +132,7 @@ public class ProtocolStack extends Protocol implements Transport {
     }
 
     public String printProtocolSpecAsXML() {
-        StringBuilder sb=new StringBuilder();
+        StringBuffer sb=new StringBuffer();
         Protocol     prot=bottom_prot;
         Properties   tmpProps;
         String       name;
@@ -215,12 +172,18 @@ public class ProtocolStack extends Protocol implements Transport {
 
 
     public void setup() throws Exception {
+        if(timer == null) {
+            timer=new TimeScheduler();
+            timer.start();
+        }
         if(top_prot == null) {
-            top_prot=Configurator.setupProtocolStack(setup_string, this);
+            top_prot=conf.setupProtocolStack(setup_string, this);
+            if(top_prot == null)
+                throw new Exception("couldn't create protocol stack");
             top_prot.setUpProtocol(this);
-            bottom_prot=Configurator.getBottommostProtocol(top_prot);
-            List<Protocol> protocols=getProtocols();
-            Configurator.initProtocolStack(protocols);         // calls init() on each protocol, from bottom to top
+            bottom_prot=conf.getBottommostProtocol(top_prot);
+            conf.initProtocolStack(bottom_prot);         // calls init() on each protocol, from bottom to top
+            conf.startProtocolStack(bottom_prot);        // sets up queues and threads
         }
     }
 
@@ -237,7 +200,7 @@ public class ProtocolStack extends Protocol implements Transport {
      * @exception Exception Will be thrown when the new protocol cannot be created
      */
     public Protocol createProtocol(String prot_spec) throws Exception {
-        return Configurator.createProtocol(prot_spec, this);
+        return conf.createProtocol(prot_spec, this);
     }
 
 
@@ -257,7 +220,7 @@ public class ProtocolStack extends Protocol implements Transport {
      * @exception Exception Will be thrown when the new protocol cannot be created, or inserted.
      */
     public void insertProtocol(Protocol prot, int position, String neighbor_prot) throws Exception {
-        Configurator.insertProtocol(prot, position, neighbor_prot, this);
+        conf.insertProtocol(prot, position, neighbor_prot, this);
     }
 
 
@@ -271,8 +234,8 @@ public class ProtocolStack extends Protocol implements Transport {
      *                  (otherwise the stack won't be created), the name refers to just 1 protocol.
      * @exception Exception Thrown if the protocol cannot be stopped correctly.
      */
-    public Protocol removeProtocol(String prot_name) throws Exception {
-        return Configurator.removeProtocol(top_prot, prot_name);
+    public void removeProtocol(String prot_name) throws Exception {
+        conf.removeProtocol(prot_name);
     }
 
 
@@ -291,15 +254,20 @@ public class ProtocolStack extends Protocol implements Transport {
 
 
     public void destroy() {
-        if(top_prot != null) {
-            Configurator.destroyProtocolStack(getProtocols());           // destroys msg queues and threads
-            top_prot=null;
-        }        
-        try {
-            timer.stop();
+        if(timer != null) {
+            try {
+                timer.stop();
+                timer.cancel();
+                timer=null;
+            }
+            catch(Exception ex) {
+            }
         }
-        catch(Exception ex) {
-        }        
+
+        if(top_prot != null) {
+            conf.stopProtocolStack(top_prot);           // destroys msg queues and threads
+            top_prot=null;
+        }
     }
 
 
@@ -309,15 +277,38 @@ public class ProtocolStack extends Protocol implements Transport {
      * <em>from top to bottom</em>.
      * Each layer can perform some initialization, e.g. create a multicast socket
      */
-    public void startStack(String cluster_name) throws Exception {
+    public void startStack() throws Exception {
+        Object start_result=null;
         if(stopped == false) return;
 
-        timer.start();
-        Configurator.startProtocolStack(getProtocols(), cluster_name, singleton_transports);
+
+
+        if(start_promise == null)
+            start_promise=new Promise();
+        else
+            start_promise.reset();
+
+        down(new Event(Event.START));
+        start_result=start_promise.getResult(0);
+        if(start_result != null && start_result instanceof Throwable) {
+            if(start_result instanceof Exception)
+                throw (Exception)start_result;
+            else
+                throw new Exception("failed starting stack: " + start_result);
+        }
+
         stopped=false;
     }
 
 
+
+    public void startUpHandler() {
+        // DON'T REMOVE !!!!  Avoids a superfluous thread
+    }
+
+    public void startDownHandler() {
+        // DON'T REMOVE !!!!  Avoids a superfluous thread
+    }
 
 
     /**
@@ -327,9 +318,16 @@ public class ProtocolStack extends Protocol implements Transport {
      * <li>Calls stop() on the protocol
      * </ol>
      */
-    public void stopStack() {       
+    public void stopStack() {
         if(stopped) return;
-        Configurator.stopProtocolStack(getProtocols(), singleton_transports);
+
+        if(stop_promise == null)
+            stop_promise=new Promise();
+        else
+            stop_promise.reset();
+
+        down(new Event(Event.STOP));
+        stop_promise.getResult(5000);
         stopped=true;
     }
 
@@ -339,6 +337,10 @@ public class ProtocolStack extends Protocol implements Transport {
      */
     public void flushEvents() {
 
+    }
+
+    public void stopInternal() {
+        // do nothing, DON'T REMOVE !!!!
     }
 
 
@@ -364,107 +366,50 @@ public class ProtocolStack extends Protocol implements Transport {
 
 
 
-    public Object up(Event evt) {
-        switch(evt.getType()){
-            case Event.INFO:
-                Map<String, Object> info=(Map<String, Object>)evt.getArg();
-                if(info.containsKey("thread_naming_pattern")) {
-                    ThreadNamingPattern thread_naming_pattern=(ThreadNamingPattern)info.get("thread_naming_pattern");
-                    thread_factory.setThreadNamingPattern(thread_naming_pattern);
-                    timer_thread_factory.setThreadNamingPattern(thread_naming_pattern);
-                }
+    public void up(Event evt) {
+        switch(evt.getType()) {
+            case Event.START_OK:
+                if(start_promise != null)
+                    start_promise.setResult(evt.getArg());
+                return;
+            case Event.STOP_OK:
+                if(stop_promise != null)
+                    stop_promise.setResult(evt.getArg());
+                return;
         }
-        return channel.up(evt);
+
+        if(channel != null)
+            channel.up(evt);
     }
 
 
 
-    public Object down(Event evt) {
-        ReentrantLock lock=locks.remove(Thread.currentThread());
-        if(lock != null && lock.isHeldByCurrentThread()) {
-            lock.unlock();
-            if(log.isTraceEnabled())
-                log.trace("released lock held by " + Thread.currentThread());
-        }
+
+    public void down(Event evt) {
         if(top_prot != null)
-            return top_prot.down(evt);
-        return null;
-    }
-    
-    public static ThreadFactory newThreadFactory(ThreadGroup group,String baseName, boolean createDaemons){
-        return new DefaultThreadFactory(group,baseName, createDaemons);
+            top_prot.receiveDownEvent(evt);
+        else
+            log.error("no down protocol available !");
     }
 
-    public static ThreadFactory newThreadFactory(ThreadNamingPattern pattern,ThreadGroup group,String baseName, boolean createDaemons){
-        return new PatternedThreadFactory(new DefaultThreadFactory(group,baseName, createDaemons),pattern);
+
+
+    protected void receiveUpEvent(Event evt) {
+        up(evt);
     }
-    
-    static class DefaultThreadFactory implements ThreadFactory{
-        
-        private final ThreadGroup group;
-        private final String baseName;
-        private final boolean createDaemons;   
-        
-        public DefaultThreadFactory(ThreadGroup group,String baseName, boolean createDaemons){
-            this.group = group;
-            this.baseName = baseName;
-            this.createDaemons = createDaemons;               
-        }
-              
-        public Thread newThread(Runnable r, String name) {
-            return newThread(group, r, name);
-        }      
 
-        public Thread newThread(Runnable r) {
-            return newThread(group, r, baseName);                      
-        }
-        
-        public Thread newThread(ThreadGroup group, Runnable r, String name) {
-            Thread thread = new Thread(group, r, name);
-            thread.setDaemon(createDaemons);
-            return thread;
-        }
-    }
-    
-    static class PatternedThreadFactory implements ThreadFactory{
 
-        private final ThreadFactory f;
-        private ThreadNamingPattern pattern;
-        
-        public PatternedThreadFactory(ThreadFactory factory,
-                ThreadNamingPattern pattern){
-            
-            f = factory;
-            this.pattern = pattern;           
-        }
-        
-        public void setThreadNamingPattern(ThreadNamingPattern pattern) {
-            this.pattern = pattern;           
-        }
 
-        public Thread newThread(Runnable r, String name) {
-            Thread newThread = f.newThread(r, name);
-            if(pattern!=null)
-                pattern.renameThread(newThread);
-                
-            return newThread;
-        }
+    /** Override with null functionality: we don't need any threads to be started ! */
+    public void startWork() {}
 
-        public Thread newThread(Runnable r) {
-            Thread newThread = f.newThread(r);
-            if(pattern!=null)
-                pattern.renameThread(newThread);
-                
-            return newThread;
-        }        
-        
-        public Thread newThread(ThreadGroup group, Runnable r, String name) {
-            Thread newThread = f.newThread(group, r, name);
-            if(pattern!=null)
-                pattern.renameThread(newThread);
-                
-            return newThread;
-        }              
-    }
+    /** Override with null functionality: we don't need any threads to be started ! */
+    public void stopWork()  {}
+
+
+    /*----------------------- End of Protocol functionality ---------------------------*/
+
+
+
+
 }
-

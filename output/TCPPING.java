@@ -1,4 +1,4 @@
-// $Id: TCPPING.java,v 1.33 2007/11/29 11:27:08 belaban Exp $
+// $Id: TCPPING.java,v 1.28.2.1 2007/04/27 08:03:52 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -33,10 +33,10 @@ import java.net.UnknownHostException;
  * @author Bela Ban
  */
 public class TCPPING extends Discovery {
-    int                 port_range=1;        // number of ports to be probed for initial membership
+    int             port_range=1;        // number of ports to be probed for initial membership
 
     /** List<IpAddress> */
-    List<Address>       initial_hosts=null;  // hosts to be contacted for the initial membership
+    ArrayList       initial_hosts=null;  // hosts to be contacted for the initial membership
     final static String name="TCPPING";
 
 
@@ -45,15 +45,6 @@ public class TCPPING extends Discovery {
         return name;
     }
 
-    /**
-     * Returns the list of initial hosts as configured by the user via XML. Note that the returned list is mutable, so
-     * careful with changes !
-     * @return List<Address> list of initial hosts. This variable is only set after the channel has been created and
-     * set Properties() has been called
-     */
-    public List<Address> getInitialHosts() {
-        return initial_hosts;
-    }
 
 
     public boolean setProperties(Properties props) {
@@ -97,7 +88,7 @@ public class TCPPING extends Discovery {
     }
 
 
-    public void sendGetMembersRequest(String cluster_name) {
+    public void sendGetMembersRequest() {
         Message msg;
 
         for(Iterator it=initial_hosts.iterator(); it.hasNext();) {
@@ -106,11 +97,10 @@ public class TCPPING extends Discovery {
                // ; // continue; // changed as suggested by Mark Kopec
             // }
             msg=new Message(addr, null, null);
-            msg.setFlag(Message.OOB);
-            msg.putHeader(name, new PingHeader(PingHeader.GET_MBRS_REQ, cluster_name));
+            msg.putHeader(name, new PingHeader(PingHeader.GET_MBRS_REQ, null));
 
             if(log.isTraceEnabled()) log.trace("[FIND_INITIAL_MBRS] sending PING request to " + msg.getDest());
-            down_prot.down(new Event(Event.MSG, msg));
+            passDown(new Event(Event.MSG, msg));
         }
     }
 
@@ -121,11 +111,11 @@ public class TCPPING extends Discovery {
     /**
      * Input is "daddy[8880],sindhu[8880],camille[5555]. Return List of IpAddresses
      */
-    private List<Address> createInitialHosts(String l) throws UnknownHostException {
+    private ArrayList createInitialHosts(String l) throws UnknownHostException {
         StringTokenizer tok=new StringTokenizer(l, ",");
         String          t;
         IpAddress       addr;
-        List<Address>   retval=new ArrayList<Address>();
+        ArrayList       retval=new ArrayList();
 
         while(tok.hasMoreTokens()) {
             try {

@@ -1,9 +1,9 @@
+// $Id: ParticipantGmsImpl.java,v 1.22 2006/08/03 09:20:58 belaban Exp $
 
 package org.jgroups.protocols.pbcast;
 
 import org.jgroups.*;
 import org.jgroups.util.Promise;
-import org.jgroups.util.Digest;
 
 import java.util.Vector;
 import java.util.Iterator;
@@ -11,13 +11,9 @@ import java.util.Collection;
 import java.util.LinkedHashSet;
 
 
-/**
- * @author Bela Ban
- * @version $Id: ParticipantGmsImpl.java,v 1.29 2007/09/18 20:05:21 vlada Exp $
- */
 public class ParticipantGmsImpl extends GmsImpl {
-    private final Vector<Address>   suspected_mbrs=new Vector<Address>(11);
-    private final Promise<Boolean>  leave_promise=new Promise<Boolean>();
+    private final Vector     suspected_mbrs=new Vector(11);
+    private final Promise    leave_promise=new Promise();
 
 
     public ParticipantGmsImpl(GMS g) {
@@ -34,10 +30,6 @@ public class ParticipantGmsImpl extends GmsImpl {
     public void join(Address mbr) {
         wrongMethod("join");
     }
-    
-    public void joinWithStateTransfer(Address mbr) {
-        wrongMethod("join");
-    }
 
 
     /**
@@ -47,7 +39,7 @@ public class ParticipantGmsImpl extends GmsImpl {
     public void leave(Address mbr) {
         Address coord;
         int max_tries=3;
-        Boolean result;
+        Object result;
 
         leave_promise.reset();
 
@@ -64,9 +56,11 @@ public class ParticipantGmsImpl extends GmsImpl {
 
             if(log.isDebugEnabled()) log.debug("sending LEAVE request to " + coord + " (local_addr=" + gms.local_addr + ")");
             sendLeaveMessage(coord, mbr);
-            result=leave_promise.getResult(gms.leave_timeout);
-            if(result != null)
-                break;
+            synchronized(leave_promise) {
+                result=leave_promise.getResult(gms.leave_timeout);
+                if(result != null)
+                    break;
+            }
         }
         gms.becomeClient();
     }
@@ -85,15 +79,22 @@ public class ParticipantGmsImpl extends GmsImpl {
         }
     }
 
-    public void handleLeaveResponse() {       
-        leave_promise.setResult(true);  // unblocks thread waiting in leave()
+    public void handleLeaveResponse() {
+        if(leave_promise == null) {
+            if(log.isErrorEnabled()) log.error("leave_promise is null");
+            return;
+        }
+        synchronized(leave_promise) {
+            leave_promise.setResult(Boolean.TRUE);  // unblocks thread waiting in leave()
+        }
     }
 
 
     public void suspect(Address mbr) {
-        Collection<Request> suspected=new LinkedHashSet<Request>(1);
-        suspected.add(new Request(Request.SUSPECT,mbr,true,null));
-        handleMembershipChange(suspected);
+        Collection emptyVector=new LinkedHashSet(0);
+        Collection suspected=new LinkedHashSet(1);
+        suspected.add(mbr);
+        handleMembershipChange(emptyVector, emptyVector, suspected);
     }
 
 
@@ -104,17 +105,12 @@ public class ParticipantGmsImpl extends GmsImpl {
     }
 
 
-    public void handleMembershipChange(Collection<Request> requests) {
-        Collection<Address> suspectedMembers=new LinkedHashSet<Address>(requests.size());
-        for(Request req: requests) {
-            if(req.type == Request.SUSPECT)
-                suspectedMembers.add(req.mbr);
-        }
-        
-        if(suspectedMembers.isEmpty())
+    public void handleMembershipChange(Collection newMembers, Collection leavingMembers, Collection suspectedMembers) {
+        if(suspectedMembers == null || suspectedMembers.isEmpty())
             return;
 
-        for(Address mbr: suspectedMembers) {
+        for(Iterator i=suspectedMembers.iterator(); i.hasNext();) {
+            Address mbr=(Address)i.next();
             if(!suspected_mbrs.contains(mbr))
                 suspected_mbrs.addElement(mbr);
         }
@@ -128,8 +124,9 @@ public class ParticipantGmsImpl extends GmsImpl {
 
             suspected_mbrs.removeAllElements();
             gms.becomeCoordinator();
-            for(Address mbr: suspectedMembers) {
-                gms.getViewHandler().add(new Request(Request.SUSPECT, mbr, true, null));
+            for(Iterator i=suspectedMembers.iterator(); i.hasNext();) {
+                Address mbr=(Address)i.next();
+                gms.getViewHandler().add(new GMS.Request(GMS.Request.SUSPECT, mbr, true, null));
                 gms.ack_collector.suspect(mbr);
             }
         }
@@ -168,7 +165,7 @@ public class ParticipantGmsImpl extends GmsImpl {
             suspected_mbrs.removeAllElements();
             gms.becomeCoordinator();
             // gms.getImpl().suspect(mbr);
-            gms.getViewHandler().add(new Request(Request.SUSPECT, mbr, true, null));
+            gms.getViewHandler().add(new GMS.Request(GMS.Request.SUSPECT, mbr, true, null));
             gms.ack_collector.suspect(mbr);
         }
     }*/
@@ -190,21 +187,20 @@ public class ParticipantGmsImpl extends GmsImpl {
      */
     boolean wouldIBeCoordinator() {
         Address new_coord;
-        Vector<Address> mbrs=gms.members.getMembers(); // getMembers() returns a *copy* of the membership vector
+        Vector mbrs=gms.members.getMembers(); // getMembers() returns a *copy* of the membership vector
         mbrs.removeAll(suspected_mbrs);
         if(mbrs.size() < 1) return false;
-        new_coord=mbrs.firstElement();
+        new_coord=(Address)mbrs.elementAt(0);
         return gms.local_addr.equals(new_coord);
     }
 
 
     void sendLeaveMessage(Address coord, Address mbr) {
         Message msg=new Message(coord, null, null);
-        msg.setFlag(Message.OOB);
         GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.LEAVE_REQ, mbr);
 
         msg.putHeader(gms.getName(), hdr);
-        gms.getDownProtocol().down(new Event(Event.MSG, msg));
+        gms.passDown(new Event(Event.MSG, msg));
     }
 
 

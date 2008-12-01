@@ -1,4 +1,4 @@
-// $Id: TCP.java,v 1.46 2007/11/27 15:05:23 belaban Exp $
+// $Id: TCP.java,v 1.37.2.1 2007/04/27 08:03:50 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -6,7 +6,6 @@ package org.jgroups.protocols;
 import org.jgroups.Address;
 import org.jgroups.blocks.ConnectionTable;
 import org.jgroups.stack.IpAddress;
-import org.jgroups.util.PortsManager;
 
 import java.net.InetAddress;
 import java.util.Collection;
@@ -24,7 +23,7 @@ import java.util.Properties;
  * registers with the connection table to receive all incoming messages.
  * @author Bela Ban
  */
-public class TCP extends BasicTCP implements ConnectionTable.Receiver { // , BasicConnectionTable.ConnectionListener {
+public class TCP extends BasicTCP implements ConnectionTable.Receiver {
     private ConnectionTable ct=null;
 
 
@@ -44,7 +43,7 @@ public class TCP extends BasicTCP implements ConnectionTable.Receiver { // , Bas
     /** Setup the Protocol instance acording to the configuration string */
     public boolean setProperties(Properties props) {
         super.setProperties(props);
-        if(!props.isEmpty()) {
+        if(props.size() > 0) {
             log.error("the following properties are not recognized: " + props);
             return false;
         }
@@ -55,35 +54,26 @@ public class TCP extends BasicTCP implements ConnectionTable.Receiver { // , Bas
         ct.send(dest, data, offset, length);
     }
 
-    public void retainAll(Collection<Address> members) {
+    public void retainAll(Collection members) {
         ct.retainAll(members);
     }
 
     public void start() throws Exception {
-        ct=getConnectionTable(reaper_interval,conn_expire_time,bind_addr,external_addr,start_port,end_port,pm);
-        // ct.addConnectionListener(this);
+        ct=getConnectionTable(reaper_interval,conn_expire_time,bind_addr,external_addr,start_port,end_port);
         ct.setUseSendQueues(use_send_queues);
-        ct.setSendQueueSize(send_queue_size);
         // ct.addConnectionListener(this);
         ct.setReceiveBufferSize(recv_buf_size);
         ct.setSendBufferSize(send_buf_size);
         ct.setSocketConnectionTimeout(sock_conn_timeout);
-        ct.setPeerAddressReadTimeout(peer_addr_read_timeout);
         ct.setTcpNodelay(tcp_nodelay);
         ct.setLinger(linger);
         local_addr=ct.getLocalAddress();
         if(additional_data != null && local_addr instanceof IpAddress)
             ((IpAddress)local_addr).setAdditionalData(additional_data);
-        
-        //http://jira.jboss.com/jira/browse/JGRP-626
-        //we first start threads in TP
         super.start();
-        //and then we kick off acceptor thread for CT
-        ct.start();
     }
 
     public void stop() {
-        //and for stopping we do vice versa
         ct.stop();
         super.stop();
     }
@@ -102,11 +92,10 @@ public class TCP extends BasicTCP implements ConnectionTable.Receiver { // , Bas
     * ConnectionTable.
     */
    protected ConnectionTable getConnectionTable(long reaperInterval, long connExpireTime, InetAddress bindAddress,
-                                                InetAddress externalAddress, int startPort, int endPort,
-                                                PortsManager pm) throws Exception {
+                                                InetAddress externalAddress, int startPort, int endPort) throws Exception {
        ConnectionTable cTable;
        if(reaperInterval == 0 && connExpireTime == 0) {
-           cTable=new ConnectionTable(this, bindAddress, externalAddress, startPort, endPort, pm);
+           cTable=new ConnectionTable(this, bindAddress, externalAddress, startPort, endPort);
        }
        else {
            if(reaperInterval == 0) {
@@ -118,19 +107,12 @@ public class TCP extends BasicTCP implements ConnectionTable.Receiver { // , Bas
                if(log.isWarnEnabled()) log.warn("conn_expire_time was 0, set it to " + connExpireTime);
            }
            cTable=new ConnectionTable(this, bindAddress, externalAddress, startPort, endPort,
-                                      reaperInterval, connExpireTime, pm);
-       }       
-       cTable.setThreadFactory(getProtocolStack().getThreadFactory());
+                                      reaperInterval, connExpireTime);
+       }
        return cTable;
    }
 
 
-//    public void connectionOpened(Address peer_addr) {
-//    }
-//
-//    public void connectionClosed(Address peer_addr) {
-//        if(log.isTraceEnabled())
-//            log.trace("removing connection to " + peer_addr + " from connection table as peer closed connection");
-//        ct.remove(peer_addr);
-//    }
+
+
 }

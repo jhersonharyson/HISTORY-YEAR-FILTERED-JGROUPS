@@ -1,9 +1,10 @@
 package org.jgroups.blocks;
 
 import junit.framework.Test;
+import junit.framework.TestCase;
 import junit.framework.TestSuite;
 import org.jgroups.Channel;
-import org.jgroups.tests.ChannelTestBase;
+import org.jgroups.JChannel;
 import org.jgroups.util.Rsp;
 import org.jgroups.util.RspList;
 import org.jgroups.util.Util;
@@ -13,9 +14,10 @@ import java.util.Iterator;
 import java.util.Vector;
 
 
-public class RpcDispatcherSerializationTest extends ChannelTestBase {
-    private Channel channel, channel2;
+public class RpcDispatcherSerializationTest extends TestCase {
+    private JChannel channel, channel2;
     private RpcDispatcher disp, disp2;
+    private String props=null;
 
 
     public RpcDispatcherSerializationTest(String testName) {
@@ -39,13 +41,13 @@ public class RpcDispatcherSerializationTest extends ChannelTestBase {
 
     protected void setUp() throws Exception {
         super.setUp();
-        channel=createChannel("A");
+        channel=new JChannel(props);
         channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
         disp=new RpcDispatcher(channel, null, null, this);
         channel.connect("RpcDispatcherSerializationTestGroup");
 
 
-        channel2=createChannel("A");
+        channel2=new JChannel(props);
         disp2=new RpcDispatcher(channel2, null, null, this);
         channel2.connect("RpcDispatcherSerializationTestGroup");
     }
@@ -86,7 +88,7 @@ public class RpcDispatcherSerializationTest extends ChannelTestBase {
         assertEquals(members.size(), rsps.size());
         for(int i=0; i < rsps.size(); i++) {
             Rsp rsp=(Rsp)rsps.elementAt(i);
-            assertTrue("response value is " + rsp.getValue(), rsp.getValue() instanceof NoSuchMethodException);
+            assertTrue(rsp.getValue() instanceof NoSuchMethodException);
         }
     }
 

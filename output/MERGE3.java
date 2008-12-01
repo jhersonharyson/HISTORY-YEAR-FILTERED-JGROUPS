@@ -1,4 +1,4 @@
-// $Id: MERGE3.java,v 1.17 2007/02/12 13:28:11 belaban Exp $
+// $Id: MERGE3.java,v 1.9.6.1 2006/12/13 14:00:12 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -12,7 +12,8 @@ import java.io.IOException;
 import java.io.ObjectInput;
 import java.io.ObjectOutput;
 import java.util.*;
-import java.util.concurrent.Future;
+
+
 
 
 /**
@@ -38,7 +39,6 @@ public class MERGE3 extends Protocol {
     boolean is_coord=false;
     final Vector  mbrs=new Vector();
     TimeScheduler timer=null;
-    Future announcer_task_future=null;
     CoordinatorAnnouncer announcer_task=null;
     final Set announcements=Collections.synchronizedSet(new HashSet());
 
@@ -84,8 +84,9 @@ public class MERGE3 extends Protocol {
             props.remove("use_separate_thread");
         }
 
-        if(!props.isEmpty()) {
+        if(props.size() > 0) {
             log.error("MERGE2.setProperties(): the following properties are not recognized: " + props);
+
             return false;
         }
         return true;
@@ -96,13 +97,28 @@ public class MERGE3 extends Protocol {
     }
 
 
+    /**
+     * This prevents the up-handler thread to be created, which is not needed in the protocol.
+     * DON'T REMOVE ! 
+     */
+    public void startUpHandler() {
+    }
 
-    public Object up(Event evt) {
+
+    /**
+     * This prevents the down-handler thread to be created, which is not needed in the protocol.
+     * DON'T REMOVE ! 
+     */
+    public void startDownHandler() {
+    }
+
+
+    public void up(Event evt) {
         switch(evt.getType()) {
 
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                CoordAnnouncement hdr=(CoordAnnouncement)msg.getHeader(getName());
+                CoordAnnouncement hdr=(CoordAnnouncement)msg.removeHeader(getName());
                 if(hdr != null) {
                     if(hdr.coord_addr != null && is_coord) {
                         boolean contains;
@@ -111,7 +127,7 @@ public class MERGE3 extends Protocol {
                         if(log.isDebugEnabled()) {
                             if(contains)
                                 log.debug("discarded duplicate announcement: " + hdr.coord_addr +
-                                        ", announcements=" + announcements);
+                                          ", announcements=" + announcements);
                             else
                                 log.debug("received announcement: " + hdr.coord_addr + ", announcements=" + announcements);
                         }
@@ -120,28 +136,31 @@ public class MERGE3 extends Protocol {
                             processAnnouncements();
                         }
                     }
-                    return null;
                 }
                 else
-                    return up_prot.up(evt);
+                    passUp(evt);
+                break;
 
             case Event.SET_LOCAL_ADDRESS:
                 local_addr=(Address)evt.getArg();
+                passUp(evt);
+                break;
+
+            default:
+                passUp(evt);            // Pass up to the layer above us
                 break;
         }
-
-        return up_prot.up(evt);
     }
 
 
-    public Object down(Event evt) {
+    public void down(Event evt) {
         Vector tmp;
         Address coord;
 
         switch(evt.getType()) {
 
             case Event.VIEW_CHANGE:
-                down_prot.down(evt);
+                passDown(evt);
                 tmp=((View)evt.getArg()).getMembers();
                 mbrs.clear();
                 mbrs.addAll(tmp);
@@ -159,30 +178,32 @@ public class MERGE3 extends Protocol {
                     }
                 }
                 break;
+
+            default:
+                passDown(evt);          // Pass on to the layer below us
+                break;
         }
-        return down_prot.down(evt);
     }
 
 
     void startCoordAnnouncerTask() {
-        if(announcer_task_future == null || announcer_task_future.isDone()) {
+        if(announcer_task == null) {
             announcements.add(local_addr);
             announcer_task=new CoordinatorAnnouncer();
-            announcer_task_future=timer.scheduleWithDynamicInterval(announcer_task);
+            timer.add(announcer_task);
             if(log.isDebugEnabled())
                 log.debug("coordinator announcement task started, announcements=" + announcements);
         }
     }
 
     void stopCoordAnnouncerTask() {
-        if(announcer_task_future != null) {
-            announcer_task_future.cancel(false);
-            announcer_task_future=null;
+        if(announcer_task != null) {
+            announcer_task.stop();
+            announcer_task=null;
+            announcements.clear();
+            if(log.isDebugEnabled())
+                log.debug("coordinator announcement task stopped");
         }
-        announcer_task=null;
-        announcements.clear();
-        if(log.isDebugEnabled())
-            log.debug("coordinator announcement task stopped");
     }
 
 
@@ -200,7 +221,7 @@ public class MERGE3 extends Protocol {
         Message coord_announcement=new Message(); // multicast to all
         CoordAnnouncement hdr=new CoordAnnouncement(coord);
         coord_announcement.putHeader(getName(), hdr);
-        down_prot.down(new Event(Event.MSG, coord_announcement));
+        passDown(new Event(Event.MSG, coord_announcement));
     }
 
     void processAnnouncements() {
@@ -213,14 +234,14 @@ public class MERGE3 extends Protocol {
                 if(use_separate_thread) {
                     Thread merge_notifier=new Thread(Util.getGlobalThreadGroup(), "merge notifier thread") {
                         public void run() {
-                            up_prot.up(evt);
+                            passUp(evt);
                         }
                     };
                     merge_notifier.setDaemon(true);
                     merge_notifier.start();
                 }
                 else {
-                    up_prot.up(evt);
+                    passUp(evt);
                 }
             }
             announcements.clear();
@@ -230,6 +251,20 @@ public class MERGE3 extends Protocol {
 
 
     class CoordinatorAnnouncer implements TimeScheduler.Task {
+        boolean cancelled=false;
+
+        public void start() {
+            cancelled=false;
+        }
+
+        public void stop() {
+            cancelled=true;
+        }
+
+        public boolean cancelled() {
+            return cancelled;
+        }
+
         public long nextInterval() {
             return computeInterval();
         }

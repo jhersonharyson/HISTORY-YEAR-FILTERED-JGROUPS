@@ -9,8 +9,6 @@ import org.jgroups.util.Streamable;
 
 import java.io.*;
 import java.util.Properties;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
@@ -19,11 +17,11 @@ import java.util.zip.Inflater;
  * Compresses the payload of a message. Goal is to reduce the number of messages sent across the wire.
  * Should ideally be layered somewhere above a fragmentation protocol (e.g. FRAG).
  * @author Bela Ban
- * @version $Id: COMPRESS.java,v 1.19 2007/05/01 10:55:10 belaban Exp $
+ * @version $Id: COMPRESS.java,v 1.12.2.1 2007/04/27 08:03:50 belaban Exp $
  */
 public class COMPRESS extends Protocol {
-    BlockingQueue<Deflater> deflater_pool=null;
-    BlockingQueue<Inflater> inflater_pool=null;
+    Deflater[] deflater_pool=null;
+    Inflater[] inflater_pool=null;
 
 
     /** Values are from 0-9 (0=no compression, 9=best compression) */
@@ -35,6 +33,8 @@ public class COMPRESS extends Protocol {
     /** Number of inflaters/deflaters, for concurrency, increase this to the max number of concurrent requests possible */
     int pool_size=2;
 
+    private int inflater_index=0;
+    private int deflater_index=0;
 
     final static String name="COMPRESS";
 
@@ -43,22 +43,48 @@ public class COMPRESS extends Protocol {
     }
 
 
-    public void init() throws Exception {
-        deflater_pool=new ArrayBlockingQueue<Deflater>(pool_size);
-        for(int i=0; i < pool_size; i++) {
-            deflater_pool.add(new Deflater(compression_level));
+    private final int getInflaterIndex() {
+        synchronized(this) {
+            int retval=inflater_index++;
+            if(inflater_index >= pool_size) {
+                inflater_index=0;
+            }
+            return retval;
         }
-        inflater_pool=new ArrayBlockingQueue<Inflater>(pool_size);
-        for(int i=0; i < pool_size; i++) {
-            inflater_pool.add(new Inflater());
+    }
+
+
+    private final int getDeflaterIndex() {
+        synchronized(this) {
+            int retval=deflater_index++;
+            if(deflater_index >= pool_size) {
+                deflater_index=0;
+            }
+            return retval;
+        }
+    }
+
+
+    public void init() throws Exception {
+        deflater_pool=new Deflater[pool_size];
+        for(int i=0; i < deflater_pool.length; i++) {
+            deflater_pool[i]=new Deflater(compression_level);
+        }
+        inflater_pool=new Inflater[pool_size];
+        for(int i=0; i < inflater_pool.length; i++) {
+            inflater_pool[i]=new Inflater();
         }
     }
 
     public void destroy() {
-        for(Deflater deflater: deflater_pool)
+        for(int i=0; i < deflater_pool.length; i++) {
+            Deflater deflater=deflater_pool[i];
             deflater.end();
-        for(Inflater inflater: inflater_pool)
+        }
+        for(int i=0; i < inflater_pool.length; i++) {
+            Inflater inflater=inflater_pool[i];
             inflater.end();
+        }
     }
 
 
@@ -88,7 +114,7 @@ public class COMPRESS extends Protocol {
             props.remove("pool_size");
         }
 
-        if(!props.isEmpty()) {
+        if(props.size() > 0) {
             log.error("the following properties are not recognized: " + props);
             return false;
         }
@@ -104,7 +130,7 @@ public class COMPRESS extends Protocol {
      * are used)
      * @param evt
      */
-    public Object down(Event evt) {
+    public void down(Event evt) {
         if(evt.getType() == Event.MSG) {
             Message msg=(Message)evt.getArg();
             int length=msg.getLength(); // takes offset/length (if set) into account
@@ -112,32 +138,25 @@ public class COMPRESS extends Protocol {
                 byte[] payload=msg.getRawBuffer(); // here we get the ref so we can avoid copying
                 byte[] compressed_payload=new byte[length];
                 int compressed_size;
-                Deflater deflater=null;
-                try {
-                    deflater=deflater_pool.take();
+                int tmp_index=getDeflaterIndex();
+                Deflater deflater=deflater_pool[tmp_index]; // must be guaranteed to be non-null !
+                synchronized(deflater) {
                     deflater.reset();
                     deflater.setInput(payload, msg.getOffset(), length);
                     deflater.finish();
                     deflater.deflate(compressed_payload);
                     compressed_size=deflater.getTotalOut();
-                    byte[] new_payload=new byte[compressed_size];
-                    System.arraycopy(compressed_payload, 0, new_payload, 0, compressed_size);
-                    msg.setBuffer(new_payload);
-                    msg.putHeader(name, new CompressHeader(length));
-                    if(log.isTraceEnabled())
-                        log.trace("compressed payload from " + length + " bytes to " + compressed_size + " bytes");
                 }
-                catch(InterruptedException e) {
-                    Thread.currentThread().interrupt(); // set interrupt flag again
-                    throw new RuntimeException(e);
-                }
-                finally {
-                    if(deflater != null)
-                        deflater_pool.offer(deflater);
-                }
+                byte[] new_payload=new byte[compressed_size];
+                System.arraycopy(compressed_payload, 0, new_payload, 0, compressed_size);
+                msg.setBuffer(new_payload);
+                msg.putHeader(name, new CompressHeader(length));
+                if(log.isTraceEnabled())
+                    log.trace("compressed payload from " + length + " bytes to " + compressed_size + " bytes (inflater #" +
+                    tmp_index + ")");
             }
         }
-        return down_prot.down(evt);
+        passDown(evt);
     }
 
 
@@ -146,43 +165,35 @@ public class COMPRESS extends Protocol {
      * If there is no header, we pass the message up. Otherwise we uncompress the payload to its original size.
      * @param evt
      */
-    public Object up(Event evt) {
+    public void up(Event evt) {
         if(evt.getType() == Event.MSG) {
             Message msg=(Message)evt.getArg();
-            CompressHeader hdr=(CompressHeader)msg.getHeader(name);
+            CompressHeader hdr=(CompressHeader)msg.removeHeader(name);
             if(hdr != null) {
                 byte[] compressed_payload=msg.getRawBuffer();
                 if(compressed_payload != null && compressed_payload.length > 0) {
                     int original_size=hdr.original_size;
                     byte[] uncompressed_payload=new byte[original_size];
-                    Inflater inflater=null;
-                    try {
-                        inflater=inflater_pool.take();
+                    int tmp_index=getInflaterIndex();
+                    Inflater inflater=inflater_pool[tmp_index];
+                    synchronized(inflater) {
                         inflater.reset();
                         inflater.setInput(compressed_payload, msg.getOffset(), msg.getLength());
                         try {
                             inflater.inflate(uncompressed_payload);
                             if(log.isTraceEnabled())
                                 log.trace("uncompressed " + compressed_payload.length + " bytes to " + original_size +
-                                        " bytes");
+                                        " bytes (deflater #" + tmp_index + ")");
                             msg.setBuffer(uncompressed_payload);
                         }
                         catch(DataFormatException e) {
                             if(log.isErrorEnabled()) log.error("exception on uncompression", e);
                         }
                     }
-                    catch(InterruptedException e) {
-                        Thread.currentThread().interrupt(); // set the interrupt bit again, so caller can handle it
-                    }
-                    finally {
-                        if(inflater != null)
-                            inflater_pool.offer(inflater);
-                    }
-
                 }
             }
         }
-        return up_prot.up(evt);
+        passUp(evt);
     }
 
 
@@ -202,7 +213,7 @@ public class COMPRESS extends Protocol {
         }
 
 
-        public int size() {
+        public long size() {
             return Global.INT_SIZE;
         }
 

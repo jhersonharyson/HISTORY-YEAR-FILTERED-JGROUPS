@@ -1,3 +1,4 @@
+// $Id: FRAG.java,v 1.32.2.1 2007/04/27 08:03:51 belaban Exp $
 
 package org.jgroups.protocols;
 
@@ -27,7 +28,7 @@ import java.util.*;
  * multicast messages.
  * @author Bela Ban
  * @author Filip Hanik
- * @version $Id: FRAG.java,v 1.39 2007/09/07 11:42:44 belaban Exp $
+ * @version $Id: FRAG.java,v 1.32.2.1 2007/04/27 08:03:51 belaban Exp $
  */
 public class FRAG extends Protocol {
     private int frag_size=8192;  // conservative value
@@ -71,19 +72,11 @@ public class FRAG extends Protocol {
             props.remove("frag_size");
         }
 
-        if(!props.isEmpty()) {
+        if(props.size() > 0) {
             log.error("FRAG.setProperties(): the following properties are not recognized: " + props);
             return false;
         }
         return true;
-    }
-
-    public void init() throws Exception {
-        super.init();
-        Map<String,Object> info=new HashMap<String,Object>(1);
-        info.put("frag_size", frag_size);
-        up_prot.up(new Event(Event.INFO, info));
-        down_prot.down(new Event(Event.INFO, info));
     }
 
     public void resetStats() {
@@ -96,7 +89,7 @@ public class FRAG extends Protocol {
      * Fragment a packet if larger than frag_size (add a header). Otherwise just pass down. Only
      * add a header if framentation is needed !
      */
-    public Object down(Event evt) {
+    public void down(Event evt) {
         switch(evt.getType()) {
 
         case Event.MSG:
@@ -105,12 +98,12 @@ public class FRAG extends Protocol {
             num_sent_msgs++;
             if(size > frag_size) {
                 if(log.isTraceEnabled()) {
-                    StringBuilder sb=new StringBuilder("message size is ");
+                    StringBuffer sb=new StringBuffer("message size is ");
                     sb.append(size).append(", will fragment (frag_size=").append(frag_size).append(')');
                     log.trace(sb.toString());
                 }
                 fragment(msg);  // Fragment and pass down
-                return null;
+                return;
             }
             break;
 
@@ -137,28 +130,28 @@ public class FRAG extends Protocol {
             break;
 
         case Event.CONFIG:
-            Object ret=down_prot.down(evt);
+            passDown(evt);
             if(log.isDebugEnabled()) log.debug("received CONFIG event: " + evt.getArg());
-            handleConfigEvent((Map<String,Object>)evt.getArg());
-            return ret;
+            handleConfigEvent((HashMap)evt.getArg());
+            return;
         }
 
-        return down_prot.down(evt);  // Pass on to the layer below us
+        passDown(evt);  // Pass on to the layer below us
     }
 
 
     /**
      * If event is a message, if it is fragmented, re-assemble fragments into big message and pass up the stack.
      */
-    public Object up(Event evt) {
+    public void up(Event evt) {
         switch(evt.getType()) {
 
         case Event.MSG:
             Message msg=(Message)evt.getArg();
-            FragHeader hdr=(FragHeader)msg.getHeader(name);
-            if(hdr != null) { // needs to be defragmented
-                unfragment(msg, hdr); // Unfragment and possibly pass up
-                return null;
+            Object obj=msg.getHeader(name);
+            if(obj != null && obj instanceof FragHeader) { // needs to be defragmented
+                unfragment(msg); // Unfragment and possibly pass up
+                return;
             }
             else {
                 num_received_msgs++;
@@ -166,13 +159,13 @@ public class FRAG extends Protocol {
             break;
 
         case Event.CONFIG:
-            Object ret=up_prot.up(evt);
+            passUp(evt);
             if(log.isDebugEnabled()) log.debug("received CONFIG event: " + evt.getArg());
-            handleConfigEvent((Map<String,Object>)evt.getArg());
-            return ret;
+            handleConfigEvent((HashMap)evt.getArg());
+            return;
         }
 
-        return up_prot.up(evt); // Pass up to the layer above us by default
+        passUp(evt); // Pass up to the layer above us by default
     }
 
 
@@ -198,6 +191,7 @@ public class FRAG extends Protocol {
         Address            dest=msg.getDest(), src=msg.getSrc();
         long               id=curr_id++; // used as seqnos
         int                num_frags;
+        int size;
 
         try {
             // Write message into a byte buffer and fragment it
@@ -215,7 +209,7 @@ public class FRAG extends Protocol {
             num_sent_frags+=num_frags;
 
             if(log.isTraceEnabled()) {
-                StringBuilder sb=new StringBuilder();
+                StringBuffer sb=new StringBuffer();
                 sb.append("fragmenting packet to ").append(dest != null ? dest.toString() : "<all members>");
                 sb.append(" (size=").append(buffer.length).append(") into ").append(num_frags);
                 sb.append(" fragment(s) [frag_size=").append(frag_size).append(']');
@@ -227,7 +221,7 @@ public class FRAG extends Protocol {
                 hdr=new FragHeader(id, i, num_frags);
                 frag_msg.putHeader(name, hdr);
                 evt=new Event(Event.MSG, frag_msg);
-                down_prot.down(evt);
+                passDown(evt);
             }
         }
         catch(Exception e) {
@@ -246,10 +240,11 @@ public class FRAG extends Protocol {
      * 4. Set headers and buffer in msg
      * 5. Pass msg up the stack
      */
-    private void unfragment(Message msg, FragHeader hdr) {
+    private void unfragment(Message msg) {
         FragmentationTable   frag_table;
         Address              sender=msg.getSrc();
         Message              assembled_msg;
+        FragHeader           hdr=(FragHeader)msg.removeHeader(name);
         byte[]               m;
         ByteArrayInputStream bis;
         DataInputStream      in=null;
@@ -275,7 +270,7 @@ public class FRAG extends Protocol {
                 if(log.isTraceEnabled()) log.trace("assembled_msg is " + assembled_msg);
                 assembled_msg.setSrc(sender); // needed ? YES, because fragments have a null src !!
                 num_received_msgs++;
-                up_prot.up(new Event(Event.MSG, assembled_msg));
+                passUp(new Event(Event.MSG, assembled_msg));
             }
             catch(Exception e) {
                 log.error("failed unfragmenting a message", e);
@@ -287,7 +282,7 @@ public class FRAG extends Protocol {
     }
 
 
-    void handleConfigEvent(Map<String,Object> map) {
+    void handleConfigEvent(HashMap map) {
         if(map == null) return;
         if(map.containsKey("frag_size")) {
             frag_size=((Integer)map.get("frag_size")).intValue();
@@ -394,7 +389,7 @@ public class FRAG extends Protocol {
 
         public String toString() {
             Map.Entry entry;
-            StringBuilder buf=new StringBuilder("Fragmentation list contains ");
+            StringBuffer buf=new StringBuffer("Fragmentation list contains ");
             synchronized(frag_tables) {
                 buf.append(frag_tables.size()).append(" tables\n");
                 for(Iterator it=frag_tables.entrySet().iterator(); it.hasNext();) {
@@ -497,7 +492,7 @@ public class FRAG extends Protocol {
              * debug only
              */
             public String toString() {
-                StringBuilder ret=new StringBuilder();
+                StringBuffer ret=new StringBuffer();
                 ret.append("[tot_frags=").append(tot_frags).append(", number_of_frags_recvd=").append(number_of_frags_recvd).append(']');
                 return ret.toString();
             }
@@ -544,7 +539,7 @@ public class FRAG extends Protocol {
         }
 
         public String toString() {
-            StringBuilder buf=new StringBuilder("Fragmentation Table Sender:").append(sender).append("\n\t");
+            StringBuffer buf=new StringBuffer("Fragmentation Table Sender:").append(sender).append("\n\t");
             java.util.Enumeration e=this.h.elements();
             while(e.hasMoreElements()) {
                 Entry entry=(Entry)e.nextElement();

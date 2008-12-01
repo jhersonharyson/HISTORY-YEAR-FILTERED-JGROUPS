@@ -1,10 +1,11 @@
-// $Id: Draw.java,v 1.51 2007/09/07 04:56:34 belaban Exp $
+// $Id: Draw.java,v 1.34 2006/11/17 13:39:18 belaban Exp $
 
 
 package org.jgroups.demos;
 
 
 import org.jgroups.*;
+import org.jgroups.debug.Debugger;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.util.Util;
 
@@ -12,8 +13,9 @@ import javax.management.MBeanServer;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.util.*;
-import java.io.*;
+import java.util.Random;
+
+
 
 
 /**
@@ -25,7 +27,8 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     String                         groupname="DrawGroupDemo";
     private Channel                channel=null;
     private int                    member_size=1;
-    static final boolean           first=true;
+    Debugger                       debugger=null;
+    final boolean                  first=true;
     private JFrame                 mainFrame=null;
     private JPanel                 sub_panel=null;
     private DrawPanel              panel=null;
@@ -33,25 +36,23 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     private final Random           random=new Random(System.currentTimeMillis());
     private final Font             default_font=new Font("Helvetica",Font.PLAIN,12);
     private final Color            draw_color=selectColor();
-    private static final Color     background_color=Color.white;
+    private final Color background_color=Color.white;
     boolean                        no_channel=false;
     boolean                        jmx;
-    private boolean                use_state=false;
-    private long                   state_timeout=5000;
 
 
-    public Draw(String props, boolean no_channel, boolean jmx, boolean use_state, long state_timeout,
-                boolean use_blocking) throws Exception {
+    public Draw(String props, boolean debug, boolean no_channel, boolean jmx) throws Exception {
         this.no_channel=no_channel;
         this.jmx=jmx;
-        this.use_state=use_state;
-        this.state_timeout=state_timeout;
         if(no_channel)
             return;
 
         channel=new JChannel(props);
-        if(use_blocking)
-            channel.setOpt(Channel.BLOCK, Boolean.TRUE);
+        // channel.setOpt(Channel.BLOCK, Boolean.TRUE);
+        if(debug) {
+            debugger=new Debugger((JChannel)channel);
+            debugger.start();
+        }
         channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
         channel.setReceiver(this);
         channel.addChannelListener(this);
@@ -62,16 +63,6 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
         channel.setReceiver(this);
         channel.addChannelListener(this);
-    }
-
-
-    public Draw(Channel channel, boolean use_state, long state_timeout) throws Exception {
-        this.channel=channel;
-        channel.setOpt(Channel.AUTO_RECONNECT, Boolean.TRUE);
-        channel.setReceiver(this);
-        channel.addChannelListener(this);
-        this.use_state=use_state;
-        this.state_timeout=state_timeout;
     }
 
 
@@ -88,17 +79,19 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
    public static void main(String[] args) {
        Draw             draw=null;
        String           props=null;
+       boolean          debug=false;
        boolean          no_channel=false;
        boolean          jmx=false;
-       boolean          use_state=false;
-       boolean          use_blocking=false;
        String           group_name=null;
-       long             state_timeout=5000;
 
         for(int i=0; i < args.length; i++) {
             if("-help".equals(args[i])) {
                 help();
                 return;
+            }
+            if("-debug".equals(args[i])) {
+                debug=true;
+                continue;
             }
             if("-props".equals(args[i])) {
                 props=args[++i];
@@ -116,29 +109,37 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
                 group_name=args[++i];
                 continue;
             }
-            if("-state".equals(args[i])) {
-                use_state=true;
-                continue;
-            }
-            if("-use_blocking".equals(args[i])) {
-                use_blocking=true;
-                continue;
-            }
-            if("-timeout".equals(args[i])) {
-                state_timeout=Long.parseLong(args[++i]);
-                continue;
-            }
-            if("-bind_addr".equals(args[i])) {
-                System.setProperty("jgroups.bind_addr", args[++i]);
-                continue;
-            }
 
             help();
             return;
         }
 
+        if(props == null) {
+            props="UDP(down_thread=false;mcast_send_buf_size=640000;mcast_port=45566;discard_incompatible_packets=true;" +
+                    "ucast_recv_buf_size=20000000;mcast_addr=228.10.10.10;up_thread=false;loopback=false;" +
+                    "mcast_recv_buf_size=25000000;max_bundle_size=64000;max_bundle_timeout=30;" +
+                    "use_incoming_packet_handler=true;use_outgoing_packet_handler=false;" +
+                    "ucast_send_buf_size=640000;tos=16;enable_bundling=true;ip_ttl=2):" +
+                  "PING(timeout=2000;down_thread=false;num_initial_members=3;up_thread=false):" +
+                  "MERGE2(max_interval=10000;down_thread=false;min_interval=5000;up_thread=false):" +
+                  "FD(timeout=2000;max_tries=3;down_thread=false;up_thread=false):" +
+                  "VERIFY_SUSPECT(timeout=1500;down_thread=false;up_thread=false):" +
+                  "pbcast.NAKACK(max_xmit_size=60000;down_thread=false;use_mcast_xmit=false;gc_lag=0;" +
+                    "discard_delivered_msgs=true;up_thread=false;retransmit_timeout=100,200,300,600,1200,2400,4800):" +
+                  "UNICAST(timeout=300,600,1200,2400,3600;down_thread=false;up_thread=false):" +
+                    "pbcast.STABLE(stability_delay=1000;desired_avg_gossip=50000;max_bytes=400000;down_thread=false;" +
+                    "up_thread=false):" +
+                  "VIEW_SYNC(down_thread=false;avg_send_interval=60000;up_thread=false):" +
+                    "pbcast.GMS(print_local_addr=true;join_timeout=3000;down_thread=false;" +
+                    "join_retry_timeout=2000;up_thread=false;shun=true):" +
+                  "FC(max_credits=2000000;down_thread=false;up_thread=false;min_threshold=0.10):" +
+                  "FRAG2(frag_size=60000;down_thread=false;up_thread=false):" +
+                    "pbcast.STATE_TRANSFER(down_thread=false;up_thread=false)";
+        }
+
+
         try {
-            draw=new Draw(props, no_channel, jmx, use_state, state_timeout, use_blocking);
+            draw=new Draw(props, debug, no_channel, jmx);
             if(group_name != null)
                 draw.setGroupName(group_name);
             draw.go();
@@ -151,8 +152,9 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
 
 
     static void help() {
-        System.out.println("\nDraw [-help] [-no_channel] [-props <protocol stack definition>]" +
-                           " [-groupname <name>] [-state] [-use_blocking] [-timeout <state timeout>] [-bind_addr <addr>]");
+        System.out.println("\nDraw [-help] [-debug] [-no_channel] [-props <protocol stack definition>]" +
+                           " [-groupname <name>]");
+        System.out.println("-debug: brings up a visual debugger");
         System.out.println("-no_channel: doesn't use JGroups at all, any drawing will be relected on the " +
                            "whiteboard directly");
         System.out.println("-props: argument can be an old-style protocol stack specification, or it can be " +
@@ -170,7 +172,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
 
 
     public void go() throws Exception {
-        if(!no_channel && !use_state) {
+        if(!no_channel) {
             channel.connect(groupname);
             if(jmx) {
                 MBeanServer server=Util.getMBeanServer();
@@ -179,11 +181,10 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
                             "\nDraw needs to be run with an MBeanServer present, or inside JDK 5");
                 JmxConfigurator.registerChannel((JChannel)channel, server, "jgroups", channel.getClusterName(), true);
             }
-
         }
         mainFrame=new JFrame();
         mainFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        panel=new DrawPanel(use_state);
+        panel=new DrawPanel();
         panel.setBackground(background_color);
         sub_panel=new JPanel();
         mainFrame.getContentPane().add("Center", panel);
@@ -199,15 +200,11 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         mainFrame.setBackground(background_color);
         clear_button.setForeground(Color.blue);
         leave_button.setForeground(Color.blue);
+        setTitle();
         mainFrame.pack();
         mainFrame.setLocation(15, 25);
         mainFrame.setBounds(new Rectangle(250, 250));
-
-        if(!no_channel && use_state) {
-            channel.connect(groupname,null,null, state_timeout);
-        }
         mainFrame.setVisible(true);
-        setTitle();
     }
 
 
@@ -239,8 +236,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     public void receive(Message msg) {
         byte[] buf=msg.getRawBuffer();
         if(buf == null) {
-            System.err.println("[" + channel.getLocalAddress() + "] received null buffer from " + msg.getSrc() +
-                    ", headers: " + msg.printHeaders());
+            System.err.println("received null buffer from " + msg.getSrc() + ", headers: " + msg.getHeaders());
             return;
         }
 
@@ -283,42 +279,6 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     }
 
 
-    public byte[] getState() {
-        return panel.getState();
-    }
-
-    public void setState(byte[] state) {
-        panel.setState(state);
-    }
-
-
-    public void getState(OutputStream ostream) {
-        try {
-            try {
-                panel.writeState(ostream);
-            }
-            catch(IOException e) {
-                e.printStackTrace();
-            }
-        }
-        finally {
-            Util.close(ostream);
-        }
-    }
-
-    public void setState(InputStream istream) {
-        try {
-            try {
-                panel.readState(istream);
-            }
-            catch(IOException e) {
-                e.printStackTrace();
-            }
-        }
-        finally {
-            Util.close(istream);
-        }
-    }
 
     /* --------------- Callbacks --------------- */
 
@@ -330,7 +290,8 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
     }
 
     public void sendClearPanelMsg() {
-        DrawCommand comm=new DrawCommand(DrawCommand.CLEAR);
+        int                  tmp[]=new int[1]; tmp[0]=0;
+        DrawCommand          comm=new DrawCommand(DrawCommand.CLEAR);
 
         try {
             byte[] buf=Util.streamableToByteBuffer(comm);
@@ -402,117 +363,33 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
 
 
     private class DrawPanel extends JPanel implements MouseMotionListener {
-        final Dimension         preferred_size=new Dimension(235, 170);
-        Image                   img=null; // for drawing pixels
-        Dimension               d, imgsize=null;
-        Graphics                gr=null;
-        final Map<Point,Color>  state;
+        final Dimension        preferred_size=new Dimension(235, 170);
+        Image            img=null; // for drawing pixels
+        Dimension        d, imgsize=null;
+        Graphics         gr=null;
 
 
-        public DrawPanel(boolean use_state) {
-            if(use_state)
-                state=new LinkedHashMap<Point,Color>();
-            else
-                state=null;
-            createOffscreenImage(false);
+        public DrawPanel() {
+            createOffscreenImage();
             addMouseMotionListener(this);
             addComponentListener(new ComponentAdapter() {
                 public void componentResized(ComponentEvent e) {
                     if(getWidth() <= 0 || getHeight() <= 0) return;
-                    createOffscreenImage(false);
+                    createOffscreenImage();
                 }
             });
         }
 
 
-        public byte[] getState() {
-            byte[] retval=null;
-            if(state == null) return null;
-            synchronized(state) {
-                try {
-                    retval=Util.objectToByteBuffer(state);
-                }
-                catch(Exception e) {
-                    e.printStackTrace();
-                }
-            }
-            return retval;
-        }
 
-
-        public void setState(byte[] buf) {
-            synchronized(state) {
-                try {
-                    Map<Point,Color> tmp=(Map<Point,Color>)Util.objectFromByteBuffer(buf);
-                    state.clear();
-                    state.putAll(tmp);
-                    System.out.println("received state: " + buf.length + " bytes, " + state.size() + " entries");
-                    createOffscreenImage(true);
-                }
-                catch(Exception e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-
-        public void writeState(OutputStream outstream) throws IOException {
-            synchronized(state) {
-                if(state != null) {
-                    DataOutputStream dos=new DataOutputStream(outstream);
-                    dos.writeInt(state.size());
-                    Point point;
-                    Color col;
-                    for(Map.Entry<Point,Color> entry: state.entrySet()) {
-                        point=entry.getKey();
-                        col=entry.getValue();
-                        dos.writeInt(point.x);
-                        dos.writeInt(point.y);
-                        dos.writeInt(col.getRGB());
-                    }
-                    dos.flush();
-                }
-            }
-        }
-
-
-        public void readState(InputStream instream) throws IOException {
-            DataInputStream in=new DataInputStream(instream);
-            Map<Point,Color> new_state=new HashMap<Point,Color>();
-            int num=in.readInt();
-            Point point;
-            Color col;
-            for(int i=0; i < num; i++) {
-                point=new Point(in.readInt(), in.readInt());
-                col=new Color(in.readInt());
-                new_state.put(point, col);
-            }
-
-            synchronized(state) {
-                state.clear();
-                state.putAll(new_state);
-                System.out.println("read state: " + state.size() + " entries");
-                createOffscreenImage(true);
-            }
-        }
-
-
-        final void createOffscreenImage(boolean discard_image) {
+        final void createOffscreenImage() {
             d=getSize();
-            if(discard_image) {
-                img=null;
-                imgsize=null;
-            }
             if(img == null || imgsize == null || imgsize.width != d.width || imgsize.height != d.height) {
                 img=createImage(d.width, d.height);
-                if(img != null) {
+                if(img != null)
                     gr=img.getGraphics();
-                    if(gr != null && state != null) {
-                        drawState();
-                    }
-                }
                 imgsize=d;
             }
-            repaint();
         }
 
 
@@ -533,7 +410,7 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
             try {
                 byte[] buf=Util.streamableToByteBuffer(comm);
                 channel.send(new Message(null, null, buf));
-                // Thread.yield();
+                Thread.yield(); // gives the repainter some breath
             }
             catch(Exception ex) {
                 System.err.println(ex);
@@ -551,15 +428,9 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
          */
         public void drawPoint(DrawCommand c) {
             if(c == null || gr == null) return;
-            Color col=new Color(c.r, c.g, c.b);
-            gr.setColor(col);
+            gr.setColor(new Color(c.r, c.g, c.b));
             gr.fillOval(c.x, c.y, 10, 10);
             repaint();
-            if(state != null) {
-                synchronized(state) {
-                    state.put(new Point(c.x, c.y), col);
-                }
-            }
         }
 
 
@@ -567,34 +438,6 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         public void clear() {
             if(gr == null) return;
             gr.clearRect(0, 0, getSize().width, getSize().height);
-            repaint();
-            if(state != null) {
-                synchronized(state) {
-                    state.clear();
-                }
-            }
-        }
-
-
-
-
-
-        /** Draw the entire panel from the state */
-        public void drawState() {
-            // clear();
-            Map.Entry entry;
-            Point pt;
-            Color col;
-            synchronized(state) {
-                for(Iterator it=state.entrySet().iterator(); it.hasNext();) {
-                    entry=(Map.Entry)it.next();
-                    pt=(Point)entry.getKey();
-                    col=(Color)entry.getValue();
-                    gr.setColor(col);
-                    gr.fillOval(pt.x, pt.y, 10, 10);
-
-                }
-            }
             repaint();
         }
 
@@ -612,6 +455,10 @@ public class Draw extends ExtendedReceiverAdapter implements ActionListener, Cha
         }
 
     }
+
+
+
+
 
 }
 

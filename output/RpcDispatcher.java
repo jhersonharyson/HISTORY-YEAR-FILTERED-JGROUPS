@@ -1,4 +1,4 @@
-// $Id: RpcDispatcher.java,v 1.30 2007/07/30 07:05:40 belaban Exp $
+// $Id: RpcDispatcher.java,v 1.26.2.1 2006/12/04 13:52:51 belaban Exp $
 
 package org.jgroups.blocks;
 
@@ -139,16 +139,10 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
     }
 
 
-
     public RspList callRemoteMethods(Vector dests, String method_name, Object[] args,
                                      Class[] types, int mode, long timeout, boolean use_anycasting) {
-        return callRemoteMethods(dests, method_name, args, types, mode, timeout, use_anycasting, null);
-    }
-
-    public RspList callRemoteMethods(Vector dests, String method_name, Object[] args,
-                                     Class[] types, int mode, long timeout, boolean use_anycasting, RspFilter filter) {
         MethodCall method_call=new MethodCall(method_name, args, types);
-        return callRemoteMethods(dests, method_call, mode, timeout, use_anycasting, false, filter);
+        return callRemoteMethods(dests, method_call, mode, timeout, use_anycasting);
     }
 
 
@@ -170,28 +164,17 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
     }
 
     public RspList callRemoteMethods(Vector dests, MethodCall method_call, int mode, long timeout, boolean use_anycasting) {
-        return callRemoteMethods(dests, method_call, mode, timeout, use_anycasting, false);
-    }
-
-    public RspList callRemoteMethods(Vector dests, MethodCall method_call, int mode, long timeout,
-                                     boolean use_anycasting, boolean oob) {
-        return callRemoteMethods(dests, method_call, mode, timeout, use_anycasting, oob, null);
-    }
-
-
-    public RspList callRemoteMethods(Vector dests, MethodCall method_call, int mode, long timeout,
-                                     boolean use_anycasting, boolean oob, RspFilter filter) {
-        if(dests != null && dests.isEmpty()) {
+        if(dests != null && dests.size() == 0) {
             // don't send if dest list is empty
             if(log.isTraceEnabled())
                 log.trace(new StringBuffer("destination list of ").append(method_call.getName()).
-                        append("() is empty: no need to send message"));
+                          append("() is empty: no need to send message"));
             return new RspList();
         }
 
         if(log.isTraceEnabled())
             log.trace(new StringBuffer("dests=").append(dests).append(", method_call=").append(method_call).
-                    append(", mode=").append(mode).append(", timeout=").append(timeout));
+                      append(", mode=").append(mode).append(", timeout=").append(timeout));
 
         byte[] buf;
         try {
@@ -206,12 +189,11 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         }
 
         Message msg=new Message(null, null, buf);
-        if(oob)
-            msg.setFlag(Message.OOB);
-        RspList  retval=super.castMessage(dests, msg, mode, timeout, use_anycasting, filter);
+        RspList  retval=super.castMessage(dests, msg, mode, timeout, use_anycasting);
         if(log.isTraceEnabled()) log.trace("responses: " + retval);
         return retval;
     }
+
 
 
     public Object callRemoteMethod(Address dest, String method_name, Object[] args,
@@ -227,10 +209,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
     }
 
     public Object callRemoteMethod(Address dest, MethodCall method_call, int mode, long timeout) throws Throwable {
-        return callRemoteMethod(dest, method_call, mode, timeout, false);
-    }
-
-    public Object callRemoteMethod(Address dest, MethodCall method_call, int mode, long timeout, boolean oob) throws Throwable {
         byte[]   buf=null;
         Message  msg=null;
         Object   retval=null;
@@ -240,8 +218,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
         buf=req_marshaller != null? req_marshaller.objectToByteBuffer(method_call) : Util.objectToByteBuffer(method_call);
         msg=new Message(dest, null, buf);
-        if(oob)
-            msg.setFlag(Message.OOB);
         retval=super.sendMessage(msg, mode, timeout);
         if(log.isTraceEnabled()) log.trace("retval: " + retval);
         if(retval instanceof Throwable)
@@ -282,7 +258,7 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             return e;
         }
 
-        if(!(body instanceof MethodCall)) {
+        if(body == null || !(body instanceof MethodCall)) {
             if(log.isErrorEnabled()) log.error("message does not contain a MethodCall object");
             return null;
         }

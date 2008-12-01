@@ -14,7 +14,7 @@ import java.util.*;
 /**
  * Implementation of total order protocol using a sequencer. Consult doc/design/SEQUENCER.txt for details
  * @author Bela Ban
- * @version $Id: SEQUENCER.java,v 1.20 2007/10/24 09:01:11 belaban Exp $
+ * @version $Id: SEQUENCER.java,v 1.11.2.2 2007/10/25 08:11:51 belaban Exp $
  */
 public class SEQUENCER extends Protocol {
     private Address           local_addr=null, coord=null;
@@ -23,7 +23,7 @@ public class SEQUENCER extends Protocol {
     private long              seqno=0;
 
     /** Map<seqno, Message>: maintains messages forwarded to the coord which which no ack has been received yet */
-    private final Map<Long,Message>          forward_table=new TreeMap<Long,Message>();
+    private final Map               forward_table=new TreeMap();
 
     /** Map<Address, seqno>: maintains the highest seqnos seen for a given member */
     private final SeqnoTable received_table=new SeqnoTable(0);
@@ -46,10 +46,10 @@ public class SEQUENCER extends Protocol {
         forwarded_msgs=bcast_msgs=received_forwards=received_bcasts=0L;
     }
 
-    public Map<String,Object> dumpStats() {
-        Map<String,Object> m=super.dumpStats();
+    public Map dumpStats() {
+        Map m=super.dumpStats();
         if(m == null)
-            m=new HashMap<String,Object>();
+            m=new HashMap();
         m.put("forwarded", new Long(forwarded_msgs));
         m.put("broadcast", new Long(bcast_msgs));
         m.put("received_forwards", new Long(received_forwards));
@@ -65,7 +65,7 @@ public class SEQUENCER extends Protocol {
     public boolean setProperties(Properties props) {
         super.setProperties(props);
 
-        if(!props.isEmpty()) {
+        if(props.size() > 0) {
             log.error("the following properties are not recognized: " + props);
             return false;
         }
@@ -78,8 +78,8 @@ public class SEQUENCER extends Protocol {
         }
     }
 
-    
-    public Object down(Event evt) {
+
+    public void down(Event evt) {
         switch(evt.getType()) {
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
@@ -94,7 +94,7 @@ public class SEQUENCER extends Protocol {
                     else {
                         broadcast(msg);
                     }
-                    return null; // don't pass down
+                    return; // don't pass down
                 }
                 break;
 
@@ -102,13 +102,13 @@ public class SEQUENCER extends Protocol {
                 handleViewChange((View)evt.getArg());
                 break;
         }
-        return down_prot.down(evt);
+        passDown(evt);
     }
 
 
 
 
-    public Object up(Event evt) {
+    public void up(Event evt) {
         Message msg;
         SequencerHeader hdr;
 
@@ -130,15 +130,15 @@ public class SEQUENCER extends Protocol {
                             if(log.isErrorEnabled())
                                 log.warn("I (" + local_addr + ") am not the coord and don't handle " +
                                         "FORWARD requests, ignoring request");
-                            return null;
+                            return;
                         }
                         broadcast(msg);
                         received_forwards++;
-                        return null;
+                        return;
                     case SequencerHeader.BCAST:
                         deliver(msg, hdr);  // deliver a copy and return (discard the original msg)
                         received_bcasts++;
-                        return null;
+                        return;
                 }
                 break;
 
@@ -147,7 +147,7 @@ public class SEQUENCER extends Protocol {
                 break;
         }
 
-        return up_prot.up(evt);
+        passUp(evt);
     }
 
 
@@ -155,8 +155,8 @@ public class SEQUENCER extends Protocol {
     /* --------------------------------- Private Methods ----------------------------------- */
 
     private void handleViewChange(View v) {
-        Vector<Address> members=v.getMembers();
-        if(members.isEmpty()) return;
+        Vector members=v.getMembers();
+        if(members.size() == 0) return;
 
         Address prev_coord=coord;
         coord=(Address)members.firstElement();
@@ -178,13 +178,13 @@ public class SEQUENCER extends Protocol {
      * from being inserted until we're done, that's why there's synchronization.
      */
     private void resendMessagesInForwardTable() {
-        Map<Long,Message> copy;
+        Message   msg;
         synchronized(forward_table) {
-            copy=new TreeMap<Long,Message>(forward_table);
-        }
-        for(Message msg: copy.values()) {
-            msg.setDest(coord);
-            down_prot.down(new Event(Event.MSG, msg));
+            for(Iterator it=forward_table.values().iterator(); it.hasNext();) {
+                msg=(Message)it.next();
+                msg.setDest(coord);
+                passDown(new Event(Event.MSG, msg));
+            }
         }
     }
 
@@ -194,7 +194,7 @@ public class SEQUENCER extends Protocol {
         synchronized(forward_table) {
             forward_table.put(new Long(seqno), msg);
         }
-        down_prot.down(new Event(Event.MSG, msg));
+        passDown(new Event(Event.MSG, msg));
         forwarded_msgs++;
     }
 
@@ -203,7 +203,7 @@ public class SEQUENCER extends Protocol {
         hdr.type=SequencerHeader.BCAST; // we change the type of header, but leave the tag intact
         msg.setDest(null); // mcast
         msg.setSrc(local_addr); // the coord is sending it - this will be replaced with sender in deliver()
-        down_prot.down(new Event(Event.MSG, msg));
+        passDown(new Event(Event.MSG, msg));
         bcast_msgs++;
     }
 
@@ -242,7 +242,7 @@ public class SEQUENCER extends Protocol {
         // pass a copy of the message up the stack
         Message tmp=msg.copy(true);
         tmp.setSrc(original_sender);
-        up_prot.up(new Event(Event.MSG, tmp));
+        passUp(new Event(Event.MSG, tmp));
     }
 
     /* ----------------------------- End of Private Methods -------------------------------- */
@@ -277,7 +277,7 @@ public class SEQUENCER extends Protocol {
         }
 
         public String toString() {
-            StringBuilder sb=new StringBuilder(64);
+            StringBuffer sb=new StringBuffer(64);
             sb.append(printType());
             if(tag != null)
                 sb.append(" (tag=").append(tag).append(")");
@@ -297,6 +297,7 @@ public class SEQUENCER extends Protocol {
             out.writeObject(tag);
         }
 
+
         public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
             type=in.readByte();
             tag=(ViewId)in.readObject();
@@ -312,8 +313,8 @@ public class SEQUENCER extends Protocol {
             tag=(ViewId)Util.readStreamable(ViewId.class, in);
         }
 
-        public int size() {
-            int size=Global.BYTE_SIZE *2; // type + presence byte
+        public long size() {
+            long size=Global.BYTE_SIZE *2; // type + presence byte
             if(tag != null)
                 size+=tag.serializedSize();
             return size;
