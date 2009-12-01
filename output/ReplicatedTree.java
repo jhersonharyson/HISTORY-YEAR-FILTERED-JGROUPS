@@ -1,11 +1,12 @@
-// $Id: ReplicatedTree.java,v 1.15 2006/07/31 09:21:58 belaban Exp $
+// $Id: ReplicatedTree.java,v 1.21 2009/06/17 16:29:00 belaban Exp $
 
 package org.jgroups.blocks;
 
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.jgroups.logging.Log;
+import org.jgroups.logging.LogFactory;
 import org.jgroups.*;
+import org.jgroups.annotations.Unsupported;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.util.Queue;
 import org.jgroups.util.QueueClosedException;
@@ -24,6 +25,7 @@ import java.util.*;
  * @author Bela Ban Jan 17 2002
  * @author <a href="mailto:aolias@yahoo.com">Alfonso Olias-Sanz</a>
  */
+@Unsupported
 public class ReplicatedTree implements Runnable, MessageListener, MembershipListener {
     public static final String SEPARATOR="/";
     final static int INDENT=4;
@@ -55,8 +57,8 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
             "pbcast.NAKACK(gc_lag=50;retransmit_timeout=600,1200,2400,4800):" +
             "UNICAST(timeout=5000):" +
             "FRAG(frag_size=16000;down_thread=false;up_thread=false):" +
-            "pbcast.GMS(join_timeout=5000;join_retry_timeout=2000;" +
-            "shun=false;print_local_addr=true):" +
+            "pbcast.GMS(join_timeout=5000;" +
+            "print_local_addr=true):" +
             "pbcast.STATE_TRANSFER";
     // "PERF(details=true)";
 
@@ -132,7 +134,7 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
     }
 
     public Address getLocalAddress() {
-        return channel != null? channel.getLocalAddress() : null;
+        return channel != null? channel.getAddress() : null;
     }
 
     public Vector getMembers() {
@@ -430,7 +432,7 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
 
 
     public String toString() {
-        StringBuffer sb=new StringBuffer();
+        StringBuilder sb=new StringBuilder();
         int indent=0;
         Map children;
 
@@ -702,12 +704,12 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
         Node curr=root, node;
         StringTokenizer tok;
         String name;
-        StringBuffer sb=null;
+        StringBuilder sb=null;
 
         if(fqn == null || fqn.equals(SEPARATOR) || "".equals(fqn))
             return curr;
 
-        sb=new StringBuffer();
+        sb=new StringBuilder();
         tok=new StringTokenizer(fqn, SEPARATOR);
         while(tok.countTokens() > 1) {
             name=tok.nextToken();
@@ -898,7 +900,7 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
                 children.clear();
         }
 
-        void print(StringBuffer sb, int indent) {
+        void print(StringBuilder sb, int indent) {
             printIndent(sb, indent);
             sb.append(SEPARATOR).append(name);
             if(children != null && children.size() > 0) {
@@ -910,7 +912,7 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
             }
         }
 
-        void printIndent(StringBuffer sb, int indent) {
+        void printIndent(StringBuilder sb, int indent) {
             if(sb != null) {
                 for(int i=0; i < indent; i++)
                     sb.append(' ');
@@ -919,7 +921,7 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
 
 
         public String toString() {
-            StringBuffer sb=new StringBuffer();
+            StringBuilder sb=new StringBuilder();
             if(name != null) sb.append("\nname=" + name);
             if(fqn != null) sb.append("\nfqn=" + fqn);
             if(data != null) sb.append("\ndata=" + data);
@@ -988,7 +990,7 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
         }
 
         public String toString() {
-            StringBuffer sb=new StringBuffer();
+            StringBuilder sb=new StringBuilder();
             sb.append(type2String(type)).append(" (");
             if(fqn != null) sb.append(" fqn=" + fqn);
             switch(type) {
@@ -1038,8 +1040,8 @@ public class ReplicatedTree implements Runnable, MessageListener, MembershipList
                 "pbcast.NAKACK(gc_lag=50;retransmit_timeout=600,1200,2400,4800):" +
                 "UNICAST(timeout=5000):" +
                 "FRAG(frag_size=16000;down_thread=false;up_thread=false):" +
-                "pbcast.GMS(join_timeout=5000;join_retry_timeout=2000;" +
-                "shun=false;print_local_addr=true):" +
+                "pbcast.GMS(join_timeout=5000;" +
+                "print_local_addr=true):" +
                 "pbcast.STATE_TRANSFER";
         // "PERF(details=true)";
 

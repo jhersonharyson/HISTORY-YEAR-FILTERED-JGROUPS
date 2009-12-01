@@ -1,109 +1,97 @@
-// $Id: ConnectTest.java,v 1.9 2006/11/22 19:33:07 vlada Exp $
 
 package org.jgroups.tests;
 
 
-import org.jgroups.Channel;
-import org.jgroups.Message;
-import org.jgroups.MessageListener;
-import org.jgroups.View;
-import org.jgroups.blocks.PullPushAdapter;
+import org.jgroups.*;
+import org.jgroups.protocols.TP;
+import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Promise;
 import org.jgroups.util.Util;
+import org.jgroups.util.UUID;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.Test;
 
 
 /**
  * Runs through multiple channel connect and disconnects, without closing the channel.
+ * @version $Id: ConnectTest.java,v 1.21 2009/04/09 09:11:16 belaban Exp $
  */
+@Test(groups=Global.STACK_DEPENDENT,sequential=true)
 public class ConnectTest extends ChannelTestBase {
-    Channel channel;
-    final int TIMES=10;    
+    JChannel channel, coordinator;
 
-    public ConnectTest(String name) {
-        super(name);
-    }
 
-    public void tearDown() throws Exception {        
-        if(channel != null) {
-            channel.close();
-            channel = null;
-        }
-        super.tearDown();
-    }
-
-    void doIt(int times) {
-        for(int i=0; i < times; i++) {
-            System.out.println("\nAttempt #" + (i + 1));
-            System.out.print("Connecting to channel: ");
-            try {
-                channel.connect("ConnectTest");
-                System.out.println("-- connected: " + channel.getView() + " --");
-            }
-            catch(Exception e) {
-                System.out.println("-- connection failed --");
-                System.err.println(e);
-            }
-            System.out.print("Disconnecting from channel: ");
-            channel.disconnect();
-            System.out.println("-- disconnected --");
-        }
+    @AfterMethod
+    void tearDown() throws Exception {
+        Util.close(channel, coordinator);
     }
 
 
+
+    @Test
     public void testConnectAndDisconnect() throws Exception {
-        System.out.print("Creating channel: ");
-        channel=createChannel();
-        System.out.println("-- created --");
-        doIt(TIMES);
-        System.out.print("Closing channel: ");
-        channel.close();
-        System.out.println("-- closed --");
-        System.out.println("Remaining threads are:");
-        Util.printThreads();
+        channel=createChannel(true);
+        final String GROUP=getUniqueClusterName("ConnectTest");
+        for(int i=0; i < 5; i++) {
+            System.out.print("Attempt #" + (i + 1));
+            channel.connect(GROUP);
+            System.out.println(": OK");
+            channel.disconnect();
+        }
     }
 
+    @Test
     public void testDisconnectConnectOne() throws Exception {
-        channel=createChannel();
-        channel.connect("testgroup1");
+        channel=createChannel(true);
+        changeProps(channel);
+        channel.connect("ConnectTest.testgroup-1");
         channel.disconnect();
-        channel.connect("testgroup2");
+        channel.connect("ConnectTest.testgroup-2");
         View view=channel.getView();
-        assertEquals(1, view.size());
-        assertTrue(view.containsMember(channel.getLocalAddress()));
-        channel.close();
-        System.out.println("Remaining threads are:");
-        Util.printThreads();
+        assert view.size() == 1;
+        assert view.containsMember(channel.getAddress());
     }
 
 
     /**
      * Tests connect-disconnect-connect sequence for a group with two members
      **/
+    @Test
     public void testDisconnectConnectTwo() throws Exception {
         View     view;
-        Channel coordinator=createChannel("A");
-        coordinator.connect("testgroup");
+        coordinator=createChannel(true);
+        changeProps(coordinator);
+        coordinator.connect("ConnectTest.testgroup-3");
+        print(coordinator, "coordinator");
         view=coordinator.getView();
         System.out.println("-- view for coordinator: " + view);
+        assert view.size() == 1;
 
-        channel=createChannel("A");
-        channel.connect("testgroup1");
+        channel=createChannel(coordinator);
+        changeProps(channel);
+        channel.connect("ConnectTest.testgroup-4");
+        print(channel, "channel");
         view=channel.getView();
         System.out.println("-- view for channel: " + view);
+        assert view.size() == 1;
 
         channel.disconnect();
 
-        channel.connect("testgroup");
+        channel.connect("ConnectTest.testgroup-3");
+        print(channel, "channel");
         view=channel.getView();
         System.out.println("-- view for channel: " + view);
 
-        assertEquals(2, view.size());
-        assertTrue(view.containsMember(channel.getLocalAddress()));
-        assertTrue(view.containsMember(coordinator.getLocalAddress()));
-        coordinator.close();
-        channel.close();
-        System.out.println("Remaining threads are:");
-        Util.printThreads();
+        assert view.size() == 2;
+        assert view.containsMember(channel.getAddress());
+        assert view.containsMember(coordinator.getAddress());
+    }
+
+
+    static void print(JChannel ch, String msg) {
+        System.out.println(msg + ": name=" + ch.getName() + ", addr=" + ch.getAddress() +
+                ", UUID=" + ch.getAddressAsUUID() + "\nUUID cache:\n" + UUID.printCache() +
+                "\nLogical_addr_cache:\n" + ch.getProtocolStack().getTransport().printLogicalAddressCache());
     }
 
 
@@ -114,61 +102,48 @@ public class ConnectTest extends ChannelTestBase {
      * DISCONNECT. Because of this problem, the channel couldn't be used to
      * multicast messages.
      **/
+    @Test
     public void testDisconnectConnectSendTwo() throws Exception {
-        final Promise msgPromise=new Promise();
-        Channel coordinator=createChannel("A");
-        coordinator.connect("testgroup");
-        PullPushAdapter ppa=
-                new PullPushAdapter(coordinator,
-                                    new PromisedMessageListener(msgPromise));
-        ppa.start();
+        final Promise<Message> msgPromise=new Promise<Message>();
+        coordinator=createChannel(true);
+        changeProps(coordinator);
+        coordinator.setReceiver(new PromisedMessageListener(msgPromise));
+        coordinator.connect("ConnectTest.testgroup-5");
 
-        channel=createChannel("A");
-        channel.connect("testgroup1");
+        channel=createChannel(coordinator);
+        changeProps(channel);
+        channel.connect("ConnectTest.testgroup-6");
         channel.disconnect();
-        channel.connect("testgroup");
+        channel.connect("ConnectTest.testgroup-5");
         channel.send(new Message(null, null, "payload"));
-        Message msg=(Message)msgPromise.getResult(20000);
-        assertTrue(msg != null);
-        assertEquals("payload", msg.getObject());
-        ppa.stop();
-        coordinator.close();
-        channel.close();
-        System.out.println("Remaining threads are:");
-        Util.printThreads();
+        Message msg=msgPromise.getResult(20000);
+        assert msg != null;
+        assert msg.getObject().equals("payload");
+    }
+
+
+    private static void changeProps(Channel ch) {
+        ProtocolStack stack=ch.getProtocolStack();
+        TP transport=stack.getTransport();
+        transport.setLogDiscardMessages(false);
     }
 
 
 
 
+    private static class PromisedMessageListener extends ReceiverAdapter {
+        private final Promise<Message> promise;
 
-
-
-    private static class PromisedMessageListener implements MessageListener {
-
-        private Promise promise;
-
-        public PromisedMessageListener(Promise promise) {
+        public PromisedMessageListener(Promise<Message> promise) {
             this.promise=promise;
-        }
-
-        public byte[] getState() {
-            return null;
         }
 
         public void receive(Message msg) {
             promise.setResult(msg);
         }
-
-        public void setState(byte[] state) {
-        }
     }
 
 
-    public static void main(String[] args) {
-        String[] testCaseName={ConnectTest.class.getName()};
-        junit.textui.TestRunner.main(testCaseName);
-    }
 
 
 }

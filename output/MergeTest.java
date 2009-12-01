@@ -1,160 +1,223 @@
-
 package org.jgroups.tests;
 
-
-import junit.framework.TestCase;
-import org.jgroups.JChannel;
-import org.jgroups.ReceiverAdapter;
-import org.jgroups.View;
+import org.jgroups.*;
+import org.jgroups.protocols.pbcast.GMS;
+import org.jgroups.protocols.pbcast.NAKACK;
 import org.jgroups.util.Util;
-import org.jgroups.stack.GossipRouter;
+import org.testng.annotations.Test;
 
+import java.util.*;
 
 /**
- * Tests merging
- * @author Bela Ban
- * @version $Id: MergeTest.java,v 1.9 2006/10/04 12:15:37 belaban Exp $
+ * Tests merging on all stacks
+ * 
+ * @author vlada
+ * @version $Id: MergeTest.java,v 1.40 2009/09/26 05:37:17 belaban Exp $
  */
-public class MergeTest extends TestCase {
-    JChannel     channel;
-    final int    TIMES=10;
-    final int    router_port=12000;
-    final String bind_addr="127.0.0.1";
-    GossipRouter router;
-    JChannel     ch1, ch2;
-    private ViewChecker  checker;
-
-    String props="TUNNEL(router_port=" + router_port + ";router_host=" +bind_addr+ ";loopback=true):" +
-            "PING(timeout=1000;num_initial_members=2;gossip_host=" +bind_addr+";gossip_port=" + router_port + "):" +
-            "MERGE2(min_interval=3000;max_interval=5000):" +
-            "FD(timeout=1000;max_tries=2;shun=false):" +
-            "pbcast.NAKACK(gc_lag=50;retransmit_timeout=600,1200,2400,4800):" +
-            "UNICAST(timeout=600,1200,2400):" +
-            "pbcast.STABLE(desired_avg_gossip=20000):" +
-            "pbcast.GMS(join_timeout=5000;join_retry_timeout=2000;" +
-            "print_local_addr=false;shun=false)";
-
-
-
-    public MergeTest(String name) {
-        super(name);
+@Test(groups=Global.FLUSH,sequential=true)
+public class MergeTest extends ChannelTestBase {
+   
+    @Test
+    public void testMerging2Members() throws Exception {
+        mergeHelper("MergeTest.testMerging2Members", "A", "B");
     }
-
-    protected void setUp() throws Exception {
-        super.setUp();
-        startRouter();
-        checker=new ViewChecker();
-        ch1=new JChannel(props);
-        ch1.setReceiver(checker);
-        ch1.connect("demo");
-        ch2=new JChannel(props);
-        ch2.setReceiver(checker);
-        ch2.connect("demo");
-        Util.sleep(1000);
-    }
-
-    public void tearDown() throws Exception {
-        super.tearDown();
-        ch2.close();
-        ch1.close();
-        stopRouter();
-    }
-
-    public void testPartitionAndSubsequentMerge() throws Exception {
-        partitionAndMerge();
+    
+    @Test
+    public void testMerging4Members() throws Exception {
+        mergeHelper("MergeTest.testMerging4Members", "A", "B", "C", "D");
     }
 
 
-    public void testTwoMerges() throws Exception {
-        partitionAndMerge();
-        partitionAndMerge();
-    }
+    protected void mergeHelper(String cluster_name, String ... members) throws Exception {
+        JChannel[] channels=null;
+        try {
+            channels=createChannels(cluster_name, members);
+            print(channels);
 
-
-
-    private void partitionAndMerge() throws Exception {
-        View v=ch2.getView();
-        System.out.println("view is " + v);
-        assertEquals("channel is supposed to have 2 members", 2, ch2.getView().size());
-
-        System.out.println("++ simulating network partition by stopping the GossipRouter");
-        stopRouter();
-
-        System.out.println("sleeping for 10 secs");
-        // Util.sleep(10000);
-        checker.waitForNViews(2, 10000);
-
-        v=ch1.getView();
-        System.out.println("-- ch1.view: " + v);
-
-        v=ch2.getView();
-        System.out.println("-- ch2.view: " + v);
-        assertEquals("view should be 1 (channels should have excluded each other", 1, v.size());
-
-        System.out.println("++ simulating merge by starting the GossipRouter again");
-        startRouter();
-
-        System.out.println("sleeping for 30 secs");
-        // Util.sleep(30000);
-        checker.waitForNViews(2, 30000);
-
-        v=ch1.getView();
-        System.out.println("-- ch1.view: " + v);
-
-        v=ch2.getView();
-        System.out.println("-- ch2.view: " + v);
-
-        assertEquals("channel is supposed to have 2 members again after merge", 2, ch2.getView().size());
-    }
-
-
-
-
-
-
-    private void startRouter() throws Exception {
-        router=new GossipRouter(router_port, bind_addr);
-        router.start();
-    }
-
-    private void stopRouter() {
-        router.stop();
-    }
-
-    private static class ViewChecker extends ReceiverAdapter {
-        final Object mutex=new Object();
-        int          count=0;
-
-        public void viewAccepted(View new_view) {
-            synchronized(mutex) {
-                count++;
-                System.out.println("-- view: " + new_view);
-                mutex.notifyAll();
+            System.out.println("\ncreating partitions: ");
+            createPartitions(channels, members);
+            print(channels);
+            for(String member: members) {
+                JChannel ch=findChannel(member, channels);
+                assert ch.getView().size() == 1 : "view of " + ch.getAddress() + ": " + ch.getView();
             }
+
+            System.out.println("\n==== injecting merge event ====");
+            for(String member: members) {
+                injectMergeEvent(channels, member, members);
+            }
+            for(int i=0; i < 20; i++) {
+                System.out.print(".");
+                if(allChannelsHaveViewOf(channels, members.length))
+                    break;
+                Util.sleep(500);
+            }
+            System.out.println("\n");
+            print(channels);
+            assertAllChannelsHaveViewOf(channels, members.length);
+        }
+        finally {
+            if(channels != null)
+                close(channels);
+        }
+    }
+
+    private JChannel[] createChannels(String cluster_name, String[] members) throws Exception {
+        JChannel[] retval=new JChannel[members.length];
+        JChannel ch=null;
+        for(int i=0; i < retval.length; i++) {
+            JChannel tmp;
+            if(ch == null) {
+                ch=createChannel(true, members.length);
+                tmp=ch;
+            }
+            else {
+                tmp=createChannel(ch);
+            }
+            tmp.setName(members[i]);
+            NAKACK nakack=(NAKACK)tmp.getProtocolStack().findProtocol(NAKACK.class);
+            if(nakack != null)
+                nakack.setLogDiscardMessages(false);
+            tmp.connect(cluster_name);
+            retval[i]=tmp;
         }
 
+        return retval;
+    }
 
-        public void waitForNViews(int n, long timeout) {
-            long sleep_time=timeout, curr, start;
-            synchronized(mutex) {
-                count=0;
-                start=System.currentTimeMillis();
-                while(count < n) {
-                    try {mutex.wait(sleep_time);} catch(InterruptedException e) {}
-                    curr=System.currentTimeMillis();
-                    sleep_time-=(curr - start);
-                    if(sleep_time <= 0)
-                        break;
-                }
-            }
+    private static void close(JChannel[] channels) {
+        if(channels == null) return;
+        for(int i=channels.length -1; i <= 0; i--) {
+            JChannel ch=channels[i];
+            Util.close(ch);
         }
     }
 
 
-    public static void main(String[] args) {
-        String[] testCaseName={MergeTest.class.getName()};
-        junit.textui.TestRunner.main(testCaseName);
+    private static void createPartitions(JChannel[] channels, String ... partitions) throws Exception {
+        checkUniqueness(partitions);
+        List<View> views=new ArrayList<View>(partitions.length);
+        for(String partition: partitions) {
+            View view=createView(partition, channels);
+            views.add(view);
+        }
+        applyViews(views, channels);
     }
 
 
+    private static void checkUniqueness(String[] ... partitions) throws Exception {
+         Set<String> set=new HashSet<String>();
+         for(String[] partition: partitions) {
+             for(String tmp: partition) {
+                 if(!set.add(tmp))
+                     throw new Exception("partitions are overlapping: element " + tmp + " is in multiple partitions");
+             }
+         }
+     }
+
+    private static void injectMergeEvent(JChannel[] channels, String leader, String ... coordinators) {
+        Address leader_addr=leader != null? findAddress(leader, channels) : determineLeader(channels);
+        injectMergeEvent(channels, leader_addr, coordinators);
+    }
+
+    private static void injectMergeEvent(JChannel[] channels, Address leader_addr, String ... coordinators) {
+        Map<Address,View> views=new HashMap<Address,View>();
+        for(String tmp: coordinators) {
+            Address coord=findAddress(tmp, channels);
+            views.put(coord, findView(tmp, channels));
+        }
+
+        JChannel coord=findChannel(leader_addr, channels);
+        GMS gms=(GMS)coord.getProtocolStack().findProtocol(GMS.class);
+        gms.setLevel("trace");
+        gms.up(new Event(Event.MERGE, views));
+    }
+
+
+    private static View createView(String partition, JChannel[] channels) throws Exception {
+        Vector<Address> members=new Vector<Address>();
+        Address addr=findAddress(partition, channels);
+        if(addr == null)
+            throw new Exception(partition + " not associated with a channel");
+        members.add(addr);
+        return new View(members.firstElement(), 10, members);
+    }
+
+
+    private static JChannel findChannel(String tmp, JChannel[] channels) {
+        for(JChannel ch: channels) {
+            if(ch.getName().equals(tmp))
+                return ch;
+        }
+        return null;
+    }
+
+    private static JChannel findChannel(Address addr, JChannel[] channels) {
+        for(JChannel ch: channels) {
+            if(ch.getAddress().equals(addr))
+                return ch;
+        }
+        return null;
+    }
+
+    private static View findView(String tmp, JChannel[] channels) {
+        for(JChannel ch: channels) {
+            if(ch.getName().equals(tmp))
+                return ch.getView();
+        }
+        return null;
+    }
+
+    private static boolean allChannelsHaveViewOf(JChannel[] channels, int count) {
+        for(JChannel ch: channels) {
+            if(ch.getView().size() != count)
+                return false;
+        }
+        return true;
+    }
+
+    private static void assertAllChannelsHaveViewOf(JChannel[] channels, int count) {
+        for(JChannel ch: channels)
+            assert ch.getView().size() == count : ch.getName() + " has view " + ch.getView();
+    }
+
+
+    private static Address determineLeader(JChannel[] channels, String ... coords) {
+        Membership membership=new Membership();
+        for(String coord: coords)
+            membership.add(findAddress(coord, channels));
+        membership.sort();
+        return membership.elementAt(0);
+    }
+
+     private static Address findAddress(String tmp, JChannel[] channels) {
+         for(JChannel ch: channels) {
+             if(ch.getName().equals(tmp))
+                 return ch.getAddress();
+         }
+         return null;
+     }
+
+     private static void applyViews(List<View> views, JChannel[] channels) {
+         for(View view: views) {
+             Collection<Address> members=view.getMembers();
+             for(JChannel ch: channels) {
+                 Address addr=ch.getAddress();
+                 if(members.contains(addr)) {
+                     GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
+                     gms.installView(view);
+                 }
+             }
+         }
+     }
+    
+
+    private static void print(JChannel[] channels) {
+        for(JChannel ch: channels) {
+            System.out.println(ch.getName() + ": " + ch.getView());
+        }
+    }
+    
+
+   
 }

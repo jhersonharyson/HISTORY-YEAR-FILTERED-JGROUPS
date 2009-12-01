@@ -1,9 +1,10 @@
 
 package org.jgroups.blocks;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.jgroups.logging.Log;
+import org.jgroups.logging.LogFactory;
 import org.jgroups.*;
+import org.jgroups.protocols.TP;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.StateTransferInfo;
 import org.jgroups.util.*;
@@ -11,10 +12,11 @@ import org.jgroups.util.*;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
-import java.util.Vector;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.TreeSet;
-import java.util.ArrayList;
+import java.util.Vector;
+import java.util.concurrent.Future;
 
 
 /**
@@ -35,7 +37,7 @@ import java.util.ArrayList;
  * the application instead of protocol level.
  *
  * @author Bela Ban
- * @version $Id: MessageDispatcher.java,v 1.60.2.4 2007/11/20 11:22:43 belaban Exp $
+ * @version $Id: MessageDispatcher.java,v 1.90 2009/10/29 11:45:12 belaban Exp $
  */
 public class MessageDispatcher implements RequestHandler {
     protected Channel channel=null;
@@ -47,27 +49,21 @@ public class MessageDispatcher implements RequestHandler {
     protected TransportAdapter transport_adapter=null;
     protected final Collection members=new TreeSet();
     protected Address local_addr=null;
-    protected boolean deadlock_detection=false;
     protected PullPushAdapter adapter=null;
     protected PullPushHandler handler=null;
     protected Serializable id=null;
     protected final Log log=LogFactory.getLog(getClass());
 
 
-    /**
-     * Process items on the queue concurrently (RequestCorrelator). The default is to wait until the processing of an
-     * item has completed before fetching the next item from the queue. Note that setting this to true may destroy the
-     * properties of a protocol stack, e.g total or causal order may not be guaranteed. Set this to true only if you
-     * know what you're doing !
-     */
-    protected boolean concurrent_processing=false;
 
+    public MessageDispatcher() {
+    }
 
     public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2) {
         this.channel=channel;
         prot_adapter=new ProtocolAdapter();
         if(channel != null) {
-            local_addr=channel.getLocalAddress();
+            local_addr=channel.getAddress();
         }
         setMessageListener(l);
         setMembershipListener(l2);
@@ -80,10 +76,9 @@ public class MessageDispatcher implements RequestHandler {
 
     public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2, boolean deadlock_detection) {
         this.channel=channel;
-        this.deadlock_detection=deadlock_detection;
         prot_adapter=new ProtocolAdapter();
         if(channel != null) {
-            local_addr=channel.getLocalAddress();
+            local_addr=channel.getAddress();
         }
         setMessageListener(l);
         setMembershipListener(l2);
@@ -96,11 +91,9 @@ public class MessageDispatcher implements RequestHandler {
     public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2,
                              boolean deadlock_detection, boolean concurrent_processing) {
         this.channel=channel;
-        this.deadlock_detection=deadlock_detection;
-        this.concurrent_processing=concurrent_processing;
         prot_adapter=new ProtocolAdapter();
         if(channel != null) {
-            local_addr=channel.getLocalAddress();
+            local_addr=channel.getAddress();
         }
         setMessageListener(l);
         setMembershipListener(l2);
@@ -159,7 +152,7 @@ public class MessageDispatcher implements RequestHandler {
 
         Transport tp;
         if((tp=adapter.getTransport()) instanceof Channel) {
-            local_addr=((Channel) tp).getLocalAddress();
+            local_addr=((Channel) tp).getAddress();
         }
         start();
     }
@@ -197,7 +190,7 @@ public class MessageDispatcher implements RequestHandler {
 
         Transport tp;
         if((tp=adapter.getTransport()) instanceof Channel) {
-            local_addr=((Channel) tp).getLocalAddress(); // fixed bug #800774
+            local_addr=((Channel) tp).getAddress(); // fixed bug #800774
         }
 
         start();
@@ -207,7 +200,6 @@ public class MessageDispatcher implements RequestHandler {
     public MessageDispatcher(PullPushAdapter adapter, Serializable id,
                              MessageListener l, MembershipListener l2,
                              RequestHandler req_handler, boolean concurrent_processing) {
-        this.concurrent_processing=concurrent_processing;
         this.adapter=adapter;
         this.id=id;
         setMembers(((Channel) adapter.getTransport()).getView().getMembers());
@@ -226,7 +218,7 @@ public class MessageDispatcher implements RequestHandler {
 
         Transport tp;
         if((tp=adapter.getTransport()) instanceof Channel) {
-            local_addr=((Channel) tp).getLocalAddress(); // fixed bug #800774
+            local_addr=((Channel) tp).getAddress(); // fixed bug #800774
         }
 
         start();
@@ -253,36 +245,44 @@ public class MessageDispatcher implements RequestHandler {
         }
     }
 
+    @Deprecated
+    public boolean getDeadlockDetection() {return false;}
+
+    @Deprecated
     public void setDeadlockDetection(boolean flag) {
-        deadlock_detection=flag;
-        if(corr != null)
-            corr.setDeadlockDetection(flag);
     }
 
+
+    @Deprecated
+    public boolean getConcurrentProcessing() {return false;}
+
+    @Deprecated
     public void setConcurrentProcessing(boolean flag) {
-        this.concurrent_processing=flag;
-        if(corr != null)
-            corr.setConcurrentProcessing(flag);
     }
 
 
     public final void start() {
         if(corr == null) {
             if(transport_adapter != null) {
-                corr=new RequestCorrelator("MessageDispatcher", transport_adapter,
-                                           this, deadlock_detection, local_addr, concurrent_processing);
+                corr=new RequestCorrelator("MsgDisp", transport_adapter,
+                                           this, local_addr);
             }
             else {
-                corr=new RequestCorrelator("MessageDispatcher", prot_adapter,
-                                           this, deadlock_detection, local_addr, concurrent_processing);
+                corr=new RequestCorrelator("MsgDisp", prot_adapter,
+                                           this, local_addr);
             }
         }
         correlatorStarted();
         corr.start();
+
         if(channel != null) {
             Vector tmp_mbrs=channel.getView() != null ? channel.getView().getMembers() : null;
             setMembers(tmp_mbrs);
+            if(channel instanceof JChannel) {
+                TP transport=channel.getProtocolStack().getTransport();
+                corr.registerProbeHandler(transport);
         }
+    }
     }
 
     protected void correlatorStarted() {
@@ -293,6 +293,11 @@ public class MessageDispatcher implements RequestHandler {
     public void stop() {
         if(corr != null) {
             corr.stop();
+        }
+
+        if(channel instanceof JChannel) {
+            TP transport=channel.getProtocolStack().getTransport();
+            corr.unregisterProbeHandler(transport);
         }
 
         // fixes leaks of MembershipListeners (http://jira.jboss.com/jira/browse/JGRP-160)
@@ -328,6 +333,16 @@ public class MessageDispatcher implements RequestHandler {
      */
     public Channel getChannel() {
         return channel;
+    }
+
+    public void setChannel(Channel ch) {
+        if(ch == null)
+            return;
+        this.channel=ch;
+        local_addr=channel.getAddress();
+        if(prot_adapter == null)
+            prot_adapter=new ProtocolAdapter();
+        channel.setUpHandler(prot_adapter);
     }
 
 
@@ -381,7 +396,13 @@ public class MessageDispatcher implements RequestHandler {
      * @return RspList A list of responses. Each response is an <code>Object</code> and associated to its sender.
      */
     public RspList castMessage(final Vector dests, Message msg, int mode, long timeout, boolean use_anycasting) {
-        GroupRequest _req=null;
+        return castMessage(dests, msg, mode, timeout, use_anycasting, null);
+    }
+
+
+    public RspList castMessage(final Vector dests, Message msg, int mode, long timeout, boolean use_anycasting,
+                               RspFilter filter) {
+        GroupRequest _req;
         Vector real_dests;
         Channel tmp;
 
@@ -409,7 +430,7 @@ public class MessageDispatcher implements RequestHandler {
 
         if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(Boolean.FALSE)) {
             if(local_addr == null) {
-                local_addr=tmp.getLocalAddress();
+                local_addr=tmp.getAddress();
             }
             if(local_addr != null) {
                 real_dests.removeElement(local_addr);
@@ -428,6 +449,7 @@ public class MessageDispatcher implements RequestHandler {
 
         _req=new GroupRequest(msg, corr, real_dests, mode, timeout, 0);
         _req.setCaller(this.local_addr);
+        _req.setResponseFilter(filter);
         try {
             _req.execute(use_anycasting);
         }
@@ -436,6 +458,66 @@ public class MessageDispatcher implements RequestHandler {
         }
 
         return _req.getResults();
+    }
+
+
+    public Future<RspList> castMessageWithFuture(final Vector dests, Message msg, int mode, long timeout, boolean use_anycasting,
+                                                 RspFilter filter) {
+        GroupRequest _req;
+        Vector real_dests;
+        Channel tmp;
+
+        // we need to clone because we don't want to modify the original
+        // (we remove ourselves if LOCAL is false, see below) !
+        // real_dests=dests != null ? (Vector) dests.clone() : (members != null ? new Vector(members) : null);
+        if(dests != null) {
+            real_dests=(Vector)dests.clone();
+            real_dests.retainAll(this.members);
+        }
+        else {
+            synchronized(members) {
+                real_dests=new Vector(members);
+            }
+        }
+
+        // if local delivery is off, then we should not wait for the message from the local member.
+        // therefore remove it from the membership
+        tmp=channel;
+        if(tmp == null) {
+            if(adapter != null && adapter.getTransport() instanceof Channel) {
+                tmp=(Channel) adapter.getTransport();
+            }
+        }
+
+        if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(Boolean.FALSE)) {
+            if(local_addr == null) {
+                local_addr=tmp.getAddress();
+            }
+            if(local_addr != null) {
+                real_dests.removeElement(local_addr);
+            }
+        }
+
+        // don't even send the message if the destination list is empty
+        if(log.isTraceEnabled())
+            log.trace("real_dests=" + real_dests);
+
+        if(real_dests.isEmpty()) {
+            if(log.isTraceEnabled())
+                log.trace("destination list is empty, won't send message");
+            return new NullFuture(); // return empty response list
+        }
+
+        _req=new GroupRequest(msg, corr, real_dests, mode, timeout, 0);
+        _req.setCaller(this.local_addr);
+        _req.setResponseFilter(filter);
+        try {
+            _req.execute(use_anycasting, false);
+            return _req;
+        }
+        catch(Exception ex) {
+            throw new RuntimeException("failed executing request " + _req, ex);
+        }
     }
 
 
@@ -492,7 +574,7 @@ public class MessageDispatcher implements RequestHandler {
 
         if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(Boolean.FALSE)) {
             if(local_addr == null) {
-                local_addr=tmp.getLocalAddress();
+                local_addr=tmp.getAddress();
             }
             if(local_addr != null) {
                 real_dests.removeElement(local_addr);
@@ -500,7 +582,7 @@ public class MessageDispatcher implements RequestHandler {
         }
 
         // don't even send the message if the destination list is empty
-        if(real_dests.size() == 0) {
+        if(real_dests.isEmpty()) {
             if(log.isDebugEnabled())
                 log.debug("destination list is empty, won't send message");
             return;
@@ -526,10 +608,10 @@ public class MessageDispatcher implements RequestHandler {
      */
     public Object sendMessage(Message msg, int mode, long timeout) throws TimeoutException, SuspectedException {
         Vector mbrs=new Vector();
-        RspList rsp_list=null;
+        RspList rsp_list;
         Object dest=msg.getDest();
         Rsp rsp;
-        GroupRequest _req=null;
+        GroupRequest _req;
 
         if(dest == null) {
             if(log.isErrorEnabled())
@@ -554,7 +636,7 @@ public class MessageDispatcher implements RequestHandler {
 
         rsp_list=_req.getResults();
 
-        if(rsp_list.size() == 0) {
+        if(rsp_list.isEmpty()) {
             if(log.isWarnEnabled())
                 log.warn(" response list is empty");
             return null;
@@ -568,42 +650,37 @@ public class MessageDispatcher implements RequestHandler {
             throw new SuspectedException(dest);
         }
         if(!rsp.wasReceived()) {
-            throw new TimeoutException();
+            throw new TimeoutException("timeout sending message to " + dest);
         }
         return rsp.getValue();
     }
 
+    public <T> Future<T> sendMessageWithFuture(Message msg, int mode, long timeout) throws TimeoutException, SuspectedException {
+        Vector mbrs=new Vector();
+        Object dest=msg.getDest();
+        GroupRequest _req;
 
-//    public void channelConnected(Channel channel) {
-//        if(channel != null) {
-//            Address new_local_addr=channel.getLocalAddress();
-//            if(new_local_addr != null) {
-//                this.local_addr=new_local_addr;
-//
-//                    if(log.isInfoEnabled()) log.info("MessageDispatcher.channelConnected()", "new local address is " + this.local_addr);
-//            }
-//        }
-//    }
-//
-//    public void channelDisconnected(Channel channel) {
-//    }
-//
-//    public void channelClosed(Channel channel) {
-//    }
-//
-//    public void channelShunned() {
-//    }
-//
-//    public void channelReconnected(Address addr) {
-//        if(channel != null) {
-//            Address new_local_addr=channel.getLocalAddress();
-//            if(new_local_addr != null) {
-//                this.local_addr=new_local_addr;
-//
-//                    if(log.isInfoEnabled()) log.info("MessageDispatcher.channelReconnected()", "new local address is " + this.local_addr);
-//            }
-//        }
-//    }
+        if(dest == null) {
+            if(log.isErrorEnabled())
+                log.error("the message's destination is null, cannot send message");
+            return null;
+        }
+
+        mbrs.addElement(dest);   // dummy membership (of destination address)
+
+        _req=new GroupRequest(msg, corr, mbrs, mode, timeout, 0);
+        _req.setCaller(local_addr);
+        try {
+            _req.execute(false, false);
+            if(mode == GroupRequest.GET_NONE)
+                return new NullFuture();
+            return new SingleFuture<T>(_req);
+        }
+        catch(Exception t) {
+            throw new RuntimeException("failed executing request " + _req, t);
+        }
+    }
+
 
 
     /* ------------------------ RequestHandler Interface ---------------------- */
@@ -631,30 +708,9 @@ public class MessageDispatcher implements RequestHandler {
             return "MessageDispatcher";
         }
 
-        public void startUpHandler() {
-            // do nothing, DON'T REMOVE !!!!
-        }
-
-        public void startDownHandler() {
-            // do nothing, DON'T REMOVE !!!!
-        }
 
 
-        public void stopInternal() {
-            // do nothing, DON'T REMOVE !!!!
-        }
-
-        protected void receiveUpEvent(Event evt) {
-        }
-
-        protected void receiveDownEvent(Event evt) {
-        }
-
-        /**
-         * Called by request correlator when message was not generated by it. We handle it and call the message
-         * listener's corresponding methods
-         */
-        public void passUp(Event evt) {
+        private Object handleUpEvent(Event evt) {
             switch(evt.getType()) {
                 case Event.MSG:
                     if(msg_listener != null) {
@@ -679,8 +735,7 @@ public class MessageDispatcher implements RequestHandler {
                             this.log.error("failed getting state from message listener (" + msg_listener + ')', t);
                         }
                     }
-                    channel.returnState(tmp_state, state_id);
-                    break;
+                    return new StateTransferInfo(null, state_id, 0L, tmp_state);
 
                 case Event.GET_STATE_OK:
                     if(msg_listener != null) {
@@ -703,23 +758,30 @@ public class MessageDispatcher implements RequestHandler {
                     break;
 
                 case Event.STATE_TRANSFER_OUTPUTSTREAM:
-                    if(msg_listener != null) {
-                        StateTransferInfo sti=(StateTransferInfo)evt.getArg();
-                        OutputStream os=sti.outputStream;
+                    StateTransferInfo sti=(StateTransferInfo)evt.getArg();
+                    OutputStream os=sti.outputStream;
+                    if(msg_listener instanceof ExtendedMessageListener) {                        
                         if(os != null && msg_listener instanceof ExtendedMessageListener) {
                             if(sti.state_id == null)
                                 ((ExtendedMessageListener)msg_listener).getState(os);
                             else
                                 ((ExtendedMessageListener)msg_listener).getState(sti.state_id, os);
                         }
-                        return;
+                        return new StateTransferInfo(null, os, sti.state_id);
                     }
-    				break;
+                    else if(msg_listener instanceof MessageListener){
+                        if(log.isWarnEnabled()){
+                            log.warn("Channel has STREAMING_STATE_TRANSFER, however,"
+                                    + " application does not implement ExtendedMessageListener. State is not transfered");
+                            Util.close(os);
+                        }
+                    }
+                    break;
 
                 case Event.STATE_TRANSFER_INPUTSTREAM:
-                    if(msg_listener != null) {
-                    	StateTransferInfo sti=(StateTransferInfo)evt.getArg();
-                        InputStream is=sti.inputStream;
+                    sti=(StateTransferInfo)evt.getArg();
+                    InputStream is=sti.inputStream;
+                    if(msg_listener instanceof ExtendedMessageListener) {                    	
                         if(is!=null && msg_listener instanceof ExtendedMessageListener) {
                             if(sti.state_id == null)
                                 ((ExtendedMessageListener)msg_listener).setState(is);
@@ -727,7 +789,14 @@ public class MessageDispatcher implements RequestHandler {
                                 ((ExtendedMessageListener)msg_listener).setState(sti.state_id, is);
                         }
                     }
-        			break;
+                    else if(msg_listener instanceof MessageListener){
+                        if(log.isWarnEnabled()){
+                            log.warn("Channel has STREAMING_STATE_TRANSFER, however,"
+                                    + " application does not implement ExtendedMessageListener. State is not transfered");
+                            Util.close(is);
+                        }
+                    }
+                    break;
 
                 case Event.VIEW_CHANGE:
                     View v=(View) evt.getArg();
@@ -752,50 +821,59 @@ public class MessageDispatcher implements RequestHandler {
 
                 case Event.BLOCK:
                     if(membership_listener != null) {
-                        membership_listener.block();                        
+                        membership_listener.block();
                     }
                     channel.blockOk();
                     break;
                 case Event.UNBLOCK:
-                   if(membership_listener instanceof ExtendedMembershipListener) {
-                      ((ExtendedMembershipListener)membership_listener).unblock();
-                   }
-                   break;    
+                    if(membership_listener instanceof ExtendedMembershipListener) {
+                        ((ExtendedMembershipListener)membership_listener).unblock();
+                    }
+                    break;
             }
+
+            return null;
         }
 
 
-        public void passDown(Event evt) {
-            down(evt);
-        }
+
 
 
 
         /**
          * Called by channel (we registered before) when event is received. This is the UpHandler interface.
          */
-        public void up(Event evt) {
+        public Object up(Event evt) {
             if(corr != null) {
-                corr.receive(evt); // calls passUp()
+                if(!corr.receive(evt)) {
+                    return handleUpEvent(evt);
+                }
             }
             else {
                 if(log.isErrorEnabled()) { //Something is seriously wrong, correlator should not be null since latch is not locked!
                     log.error("correlator is null, event will be ignored (evt=" + evt + ")");
                 }
             }
+            return null;
         }
 
 
 
-        public void down(Event evt) {
+        public Object down(Event evt) {
             if(channel != null) {
-                channel.down(evt);
+                // Reverted, revisit in 2.9 (https://jira.jboss.org/jira/browse/JGRP-1082)
+                // if(!channel.isOpen() || !channel.isConnected())
+                //    throw new RuntimeException("channel is closed or not connected");
+                return channel.downcall(evt);
             }
             else
                 if(this.log.isWarnEnabled()) {
                     this.log.warn("channel is null, discarding event " + evt);
                 }
+            return null;
         }
+
+
         /* ----------------------- End of Protocol Interface ------------------------ */
 
     }
@@ -831,7 +909,7 @@ public class MessageDispatcher implements RequestHandler {
         }
 
         public Object receive(long timeout) throws Exception {
-            return null;
+            return null; // not supported and not needed
         }
     }
 
@@ -841,12 +919,12 @@ public class MessageDispatcher implements RequestHandler {
 
         /* ------------------------- MessageListener interface ---------------------- */
         public void receive(Message msg) {
-            boolean pass_up=true;
+            boolean consumed=false;
             if(corr != null) {
-                pass_up=corr.receiveMessage(msg);
+                consumed=corr.receiveMessage(msg);
             }
 
-            if(pass_up) {   // pass on to MessageListener
+            if(!consumed) {   // pass on to MessageListener
                 if(msg_listener != null) {
                     msg_listener.receive(msg);
                 }

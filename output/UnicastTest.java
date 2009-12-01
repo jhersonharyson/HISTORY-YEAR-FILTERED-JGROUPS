@@ -1,10 +1,13 @@
-// $Id: UnicastTest.java,v 1.8 2005/08/18 09:45:25 belaban Exp $
+// $Id: UnicastTest.java,v 1.14 2009/10/15 08:44:22 belaban Exp $
 
 package org.jgroups.tests;
 
 import org.jgroups.*;
+import org.jgroups.jmx.JmxConfigurator;
+import org.jgroups.protocols.UNICAST;
 import org.jgroups.util.Util;
 
+import javax.management.MBeanServer;
 import java.io.*;
 import java.util.Vector;
 
@@ -17,13 +20,15 @@ import java.util.Vector;
 public class UnicastTest implements Runnable {
     UnicastTest test;
     JChannel channel;
-    final String groupname="UnicastTest-Group";
+    static final String groupname="UnicastTest-Group";
     Thread t=null;
     long sleep_time=0;
     boolean exit_on_end=false, busy_sleep=false;
 
 
     public static class Data implements Externalizable {
+        private static final long serialVersionUID=1003736026732652933L;
+
         public Data() {
         }
 
@@ -36,6 +41,7 @@ public class UnicastTest implements Runnable {
 
     public static class StartData extends Data {
         long num_values=0;
+        private static final long serialVersionUID=-516765916297174993L;
 
         public StartData() {
             super();
@@ -56,21 +62,37 @@ public class UnicastTest implements Runnable {
 
     public static class Value extends Data {
         long value=0;
+        byte[] buf=null;
+        private static final long serialVersionUID=-7003810772187537719L;
 
         public Value() {
             super();
         }
 
-        Value(long value) {
+        Value(long value, int len) {
             this.value=value;
+            if(len > 0)
+                this.buf=new byte[len];
         }
 
         public void writeExternal(ObjectOutput out) throws IOException {
             out.writeLong(value);
+            if(buf != null) {
+                out.writeInt(buf.length);
+                out.write(buf, 0, buf.length);
+            }
+            else {
+                out.writeInt(0);
+            }
         }
 
         public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
             value=in.readLong();
+            int len=in.readInt();
+            if(len > 0) {
+                buf=new byte[len];
+                in.read(buf, 0, len);
+            }
         }
     }
 
@@ -81,6 +103,16 @@ public class UnicastTest implements Runnable {
         this.busy_sleep=busy_sleep;
         channel=new JChannel(props);
         channel.connect(groupname);
+
+        try {
+            MBeanServer server=Util.getMBeanServer();
+            JmxConfigurator.registerChannel(channel, server, "jgroups", channel.getClusterName(), true);
+        }
+        catch(Throwable ex) {
+            System.err.println("registering the channel in JMX failed: " + ex);
+        }
+
+
         t=new Thread(this, "UnicastTest - receiver thread");
         t.start();
     }
@@ -93,7 +125,7 @@ public class UnicastTest implements Runnable {
         boolean started=false;
         long start=0, stop=0;
         long current_value=0, tmp=0, num_values=0;
-        long total_msgs=0, total_time=0, msgs_per_sec;
+        long total_time=0, msgs_per_sec;
 
         while(true) {
             try {
@@ -153,8 +185,8 @@ public class UnicastTest implements Runnable {
                 System.err.println(timeout);
                 break;
             }
-            catch(Throwable t) {
-                System.err.println(t);
+            catch(Throwable th) {
+                System.err.println(th);
                 started=false;
                 current_value=0;
                 tmp=0;
@@ -169,7 +201,8 @@ public class UnicastTest implements Runnable {
         int c;
 
         while(true) {
-            System.out.print("[1] Send msgs [2] Print view [q] Quit ");
+            System.out.print("[1] Send msgs [2] Print view [3] Print connections " +
+                    "[4] Trash connection [5] Trash all connections [q] Quit ");
             System.out.flush();
             c=System.in.read();
             switch(c) {
@@ -182,10 +215,13 @@ public class UnicastTest implements Runnable {
                 printView();
                 break;
             case '3':
+                printConnections();
                 break;
             case '4':
+                removeConnection();
                 break;
             case '5':
+                removeAllConnections();
                 break;
             case '6':
                 break;
@@ -198,12 +234,30 @@ public class UnicastTest implements Runnable {
         }
     }
 
+    private void printConnections() {
+        UNICAST unicast=(UNICAST)channel.getProtocolStack().findProtocol(UNICAST.class);
+        System.out.println("connections:\n" + unicast.printConnections());
+    }
+
+    private void removeConnection() {
+        Address member=getReceiver();
+        if(member != null) {
+            UNICAST unicast=(UNICAST)channel.getProtocolStack().findProtocol(UNICAST.class);
+            unicast.removeConnection(member);
+        }
+    }
+
+    private void removeAllConnections() {
+        UNICAST unicast=(UNICAST)channel.getProtocolStack().findProtocol(UNICAST.class);
+        unicast.removeAllConnections();
+    }
+
 
     void sendMessages() throws Exception {
-        long num_msgs=getNumberOfMessages();
+        long num_msgs=Util.readLongFromStdin("Number of messages: ");
+        int msg_size=Util.readIntFromStdin("Message size: ");
         Address receiver=getReceiver();
         Message msg;
-        Value val=new Value(1);
 
         if(receiver == null) {
             System.err.println("UnicastTest.sendMessages(): receiver is null, cannot send messages");
@@ -215,7 +269,7 @@ public class UnicastTest implements Runnable {
         channel.send(msg);
 
         for(int i=1; i <= num_msgs; i++) {
-            val=new Value(i);
+            Value val=new Value(i, msg_size);
             msg=new Message(receiver, null, val);
             if(i % 1000 == 0)
                 System.out.println("-- sent " + i);
@@ -236,23 +290,6 @@ public class UnicastTest implements Runnable {
     }
 
 
-    long getNumberOfMessages() {
-        BufferedReader reader=null;
-        String tmp=null;
-
-        try {
-            System.out.print("Number of messages to send: ");
-            System.out.flush();
-            System.in.skip(System.in.available());
-            reader=new BufferedReader(new InputStreamReader(System.in));
-            tmp=reader.readLine().trim();
-            return Long.parseLong(tmp);
-        }
-        catch(Exception e) {
-            System.err.println("UnicastTest.getNumberOfMessages(): " + e);
-            return 0;
-        }
-    }
 
     Address getReceiver() {
         Vector mbrs=null;
@@ -264,7 +301,7 @@ public class UnicastTest implements Runnable {
             mbrs=channel.getView().getMembers();
             System.out.println("pick receiver from the following members:");
             for(int i=0; i < mbrs.size(); i++) {
-                if(mbrs.elementAt(i).equals(channel.getLocalAddress()))
+                if(mbrs.elementAt(i).equals(channel.getAddress()))
                     System.out.println("[" + i + "]: " + mbrs.elementAt(i) + " (self)");
                 else
                     System.out.println("[" + i + "]: " + mbrs.elementAt(i));
@@ -287,39 +324,16 @@ public class UnicastTest implements Runnable {
         long sleep_time=0;
         boolean exit_on_end=false;
         boolean busy_sleep=false;
+        String props=null;
 
-        String udp_props="UDP(mcast_addr=228.8.8.8;mcast_port=45566;ip_ttl=32;" +
-                "ucast_recv_buf_size=32000;ucast_send_buf_size=64000;" +
-                "mcast_send_buf_size=32000;mcast_recv_buf_size=64000;loopback=true):";
-
-        String regular_props="PING(timeout=1000;num_initial_members=2):" +
-                "MERGE2(min_interval=5000;max_interval=10000):" +
-                "FD_SOCK:" +
-                "VERIFY_SUSPECT(timeout=1500):" +
-                "pbcast.NAKACK(gc_lag=50;retransmit_timeout=300,600,1200,2400,4800;max_xmit_size=8192):" +
-                "UNICAST(timeout=2000,4000,6000;window_size=100;min_threshold=10;use_gms=false):" +
-                "pbcast.STABLE(desired_avg_gossip=20000):" +
-                "FRAG(frag_size=8192;down_thread=false;up_thread=false):" +
-                "pbcast.GMS(join_timeout=5000;join_retry_timeout=2000;shun=false;print_local_addr=true)";
-
-        String props=udp_props + regular_props;
-        String loopback_props="LOOPBACK:" + regular_props;
 
         for(int i=0; i < args.length; i++) {
-            if("-help".equals(args[i])) {
-                help();
-                return;
-            }
             if("-props".equals(args[i])) {
                 props=args[++i];
                 continue;
             }
             if("-sleep".equals(args[i])) {
                 sleep_time=Long.parseLong(args[++i]);
-                continue;
-            }
-            if("-loopback".equals(args[i])) {
-                props=loopback_props;
                 continue;
             }
             if("-exit_on_end".equals(args[i])) {
@@ -330,6 +344,8 @@ public class UnicastTest implements Runnable {
                 busy_sleep=true;
                 continue;
             }
+            help();
+            return;
         }
 
 
@@ -345,6 +361,6 @@ public class UnicastTest implements Runnable {
 
     static void help() {
         System.out.println("UnicastTest [-help] [-props <props>] [-sleep <time in ms between msg sends] " +
-                           "[-loopback] [-exit_on_end] [-busy-sleep]");
+                           "[-exit_on_end] [-busy-sleep]");
     }
 }
