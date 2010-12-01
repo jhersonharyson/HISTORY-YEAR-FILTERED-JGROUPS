@@ -4,6 +4,7 @@ package org.jgroups.protocols;
 import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.Message;
+import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.annotations.Property;
 import org.jgroups.auth.AuthToken;
 import org.jgroups.auth.X509Token;
@@ -27,6 +28,8 @@ public class AUTH extends Protocol {
      * used on the coordinator to authentication joining member requests against
      */
     private AuthToken auth_plugin=null;
+
+    private static final short gms_id=ClassConfigurator.getProtocolId(GMS.class);
 
     
     public AUTH() {
@@ -57,33 +60,10 @@ public class AUTH extends Protocol {
             X509Token tmp=(X509Token)auth_plugin;
             tmp.setCertificate();
         }
-
+        auth_plugin.init();
     }
 
-    /**
-     * Used to create a failed JOIN_RSP message to pass back down the stack
-     * @param joiner The Address of the requesting member
-     * @param message The failure message to send back to the joiner
-     * @return An Event containing a GmsHeader with a JoinRsp object
-     */
-    private Event createFailureEvent(Address joiner, String message){
-        Message msg = new Message(joiner, null, null);
 
-        if(log.isDebugEnabled()){
-            log.debug("Creating JoinRsp with failure message - " + message);
-        }
-        JoinRsp joinRes = new JoinRsp(message);
-        //need to specify the error message on the JoinRsp object once it's been changed
-
-        GMS.GmsHeader gmsHeader = new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP, joinRes);
-        msg.putHeader(GMS.class.getSimpleName(), gmsHeader);
-
-        if(log.isDebugEnabled()){
-            log.debug("GMSHeader created for failure JOIN_RSP");
-        }
-
-        return new Event(Event.MSG, msg);
-    }
 
     /**
      * An event was received from the layer below. Usually the current layer will want to examine
@@ -95,63 +75,81 @@ public class AUTH extends Protocol {
      * the stack using <code>up_prot.up()</code>.
      */
     public Object up(Event evt) {
-        GMS.GmsHeader hdr = isJoinMessage(evt);
-        if((hdr != null) && (hdr.getType() == GMS.GmsHeader.JOIN_REQ || hdr.getType() == GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER)){
-            if(log.isDebugEnabled()){
-                log.debug("AUTH got up event");
-            }
-            //we found a join message - now try and get the AUTH Header
-            Message msg = (Message)evt.getArg();
-
-            if((msg.getHeader(getName()) != null) && (msg.getHeader(getName()) instanceof AuthHeader)){
-                AuthHeader authHeader = (AuthHeader)msg.getHeader(getName());
-
-                if(authHeader != null){
-                    //Now we have the AUTH Header we need to validate it
-                    if(this.auth_plugin.authenticate(authHeader.getToken(), msg)){
-                        //valid token
-                        if(log.isDebugEnabled()){
-                            log.debug("AUTH passing up event");
-                        }
-                        up_prot.up(evt);
-                    }else{
-                        //invalid token
-                        if(log.isWarnEnabled()){
-                            log.warn("AUTH failed to validate AuthHeader token");
-                        }
-                        sendRejectionMessage(msg.getSrc(), createFailureEvent(msg.getSrc(), "Authentication failed"));
-                    }
-                }else{
-                    //Invalid AUTH Header - need to send failure message
-                    if(log.isWarnEnabled()){
-                        log.warn("AUTH failed to get valid AuthHeader from Message");
-                    }
-                    sendRejectionMessage(msg.getSrc(), createFailureEvent(msg.getSrc(), "Failed to find valid AuthHeader in Message"));
-                }
-            }else{
-                if(log.isDebugEnabled()){
-                    log.debug("No AUTH Header Found");
-                }
-                //should be a failure
-                sendRejectionMessage(msg.getSrc(), createFailureEvent(msg.getSrc(), "Failed to find an AuthHeader in Message"));
-            }
-        }else{
-            //if debug
-            if(log.isDebugEnabled()){
-                log.debug("Message not a JOIN_REQ - ignoring it");
-            }
+        GMS.GmsHeader hdr=getGMSHeader(evt);
+        if(hdr == null)
             return up_prot.up(evt);
+
+        if(hdr.getType() == GMS.GmsHeader.JOIN_REQ || hdr.getType() == GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER
+          || hdr.getType() == GMS.GmsHeader.MERGE_REQ) { // we found a join or merge message - now try and get the AUTH Header
+            Message msg=(Message)evt.getArg();
+            if((msg.getHeader(this.id) != null) && (msg.getHeader(this.id) instanceof AuthHeader)) {
+                AuthHeader authHeader=(AuthHeader)msg.getHeader(this.id);
+
+                if(authHeader != null) {
+                    //Now we have the AUTH Header we need to validate it
+                    if(this.auth_plugin.authenticate(authHeader.getToken(), msg)) {
+                        return up_prot.up(evt);
+                    }
+                    else {
+                        if(log.isWarnEnabled())
+                            log.warn("failed to validate AuthHeader token");
+                        sendRejectionMessage(hdr.getType(), msg.getSrc(), "Authentication failed");
+                        return null;
+                    }
+                }
+                else {
+                    //Invalid AUTH Header - need to send failure message
+                    if(log.isWarnEnabled())
+                        log.warn("AUTH failed to get valid AuthHeader from Message");
+                    sendRejectionMessage(hdr.getType(), msg.getSrc(), "Failed to find valid AuthHeader in Message");
+                    return null;
+                }
+            }
+            else {
+                sendRejectionMessage(hdr.getType(), msg.getSrc(), "Failed to find an AuthHeader in Message");
+                return null;
+            }
         }
-        return null;
+        return up_prot.up(evt);
     }
 
 
-    private void sendRejectionMessage(Address dest, Event join_rsp) {
-        if(dest == null) {
-            log.error("destination is null, cannot send JOIN rejection message to null destination");
-            return;
+
+    protected void sendRejectionMessage(byte type, Address dest, String error_msg) {
+        switch(type) {
+            case GMS.GmsHeader.JOIN_REQ:
+            case GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER:
+                sendJoinRejectionMessage(dest, error_msg);
+                break;
+            case GMS.GmsHeader.MERGE_REQ:
+                sendMergeRejectionMessage(dest, error_msg);
+                break;
+            default:
+                log.error("type " + type + " unknown");
+                break;
         }
-        down_prot.down(join_rsp);
+    }
+
+    protected void sendJoinRejectionMessage(Address dest, String error_msg) {
+        if(dest == null)
+            return;
+
+        Message msg = new Message(dest, null, null);
+        JoinRsp joinRes=new JoinRsp(error_msg); // specify the error message on the JoinRsp
+
+        GMS.GmsHeader gmsHeader=new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP, joinRes);
+        msg.putHeader(gms_id, gmsHeader);
+        down_prot.down(new Event(Event.MSG, msg));
+    }
+
+    protected void sendMergeRejectionMessage(Address dest, String error_msg) {
+        Message msg=new Message(dest, null, null);
+        msg.setFlag(Message.OOB);
+        GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP);
+        hdr.setMergeRejected(true);
+        msg.putHeader(gms_id, hdr);
+        if(log.isDebugEnabled()) log.debug("merge response=" + hdr);
+        down_prot.down(new Event(Event.MSG, msg));
     }
 
     /**
@@ -163,42 +161,30 @@ public class AUTH extends Protocol {
      * a new response event back up the stack using <code>up_prot.up()</code>.
      */
     public Object down(Event evt) {
-        GMS.GmsHeader hdr = isJoinMessage(evt);
-        if((hdr != null) && (hdr.getType() == GMS.GmsHeader.JOIN_REQ || hdr.getType() == GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER)){
-            if(log.isDebugEnabled()){
-                log.debug("AUTH got down event");
-            }
+        GMS.GmsHeader hdr = getGMSHeader(evt);
+        if((hdr != null) && (hdr.getType() == GMS.GmsHeader.JOIN_REQ
+          || hdr.getType() == GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER
+          || hdr.getType() == GMS.GmsHeader.MERGE_REQ)) {
             //we found a join request message - now add an AUTH Header
             Message msg = (Message)evt.getArg();
             AuthHeader authHeader = new AuthHeader();
             authHeader.setToken(this.auth_plugin);
-            msg.putHeader(getName(), authHeader);
-
-            if(log.isDebugEnabled()){
-                log.debug("AUTH passing down event");
-            }
+            msg.putHeader(this.id, authHeader);
         }
-
-        if((hdr != null) && (hdr.getType() == GMS.GmsHeader.JOIN_RSP)){
-            if(log.isDebugEnabled()){
-                log.debug(hdr.toString());
-            }
-        }
-
         return down_prot.down(evt);
     }
 
     /**
-     * Used to check if the message type is a Gms message
+     * Get the header from a GMS message
      * @param evt The event object passed in to AUTH
      * @return A GmsHeader object or null if the event contains a message of a different type
      */
-    private static GMS.GmsHeader isJoinMessage(Event evt){
+    private static GMS.GmsHeader getGMSHeader(Event evt){
         Message msg;
         switch(evt.getType()){
           case Event.MSG:
                 msg = (Message)evt.getArg();
-                Object obj = msg.getHeader("GMS");
+                Object obj = msg.getHeader(gms_id);
                 if(obj == null || !(obj instanceof GMS.GmsHeader)){
                     return null;
                 }

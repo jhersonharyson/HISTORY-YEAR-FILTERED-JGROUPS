@@ -19,7 +19,7 @@ import java.util.*;
  * <code>ViewChange</code> which is called by the coordinator that was contacted by this client, to
  * tell the client what its initial membership is.
  * @author Bela Ban
- * @version $Revision: 1.77 $
+ * @version $Revision: 1.78 $
  */
 public class ClientGmsImpl extends GmsImpl {   
     private final Promise<JoinRsp> join_promise=new Promise<JoinRsp>();
@@ -170,7 +170,7 @@ public class ClientGmsImpl extends GmsImpl {
                         throw new IllegalStateException("digest returned from " + coord + " with JOIN_RSP does not contain myself (" +
                                 gms.local_addr + "): join response: " + rsp);
                     }
-                    tmp_digest.incrementHighestDeliveredSeqno(coord); // see DESIGN for details
+                    tmp_digest.incrementHighestDeliveredSeqno(coord); // see doc/design/varia2.txt for details
                     tmp_digest.seal();
                     gms.setDigest(tmp_digest);
 
@@ -188,7 +188,7 @@ public class ClientGmsImpl extends GmsImpl {
                     Message view_ack=new Message(coord, null, null);
                     view_ack.setFlag(Message.OOB);
                     GMS.GmsHeader tmphdr=new GMS.GmsHeader(GMS.GmsHeader.VIEW_ACK);
-                    view_ack.putHeader(gms.getName(), tmphdr);
+                    view_ack.putHeader(gms.getId(), tmphdr);
                     gms.getDownProtocol().down(new Event(Event.MSG, view_ack));
                     return;
                 }
@@ -265,7 +265,7 @@ public class ClientGmsImpl extends GmsImpl {
             hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER, mbr,useFlushIfPresent);
         else
             hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_REQ, mbr,useFlushIfPresent);
-        msg.putHeader(gms.getName(), hdr);
+        msg.putHeader(gms.getId(), hdr);
         gms.getDownProtocol().down(new Event(Event.MSG, msg));
     }
 

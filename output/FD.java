@@ -5,7 +5,9 @@ package org.jgroups.protocols;
 import org.jgroups.*;
 import org.jgroups.annotations.*;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.*;
+import org.jgroups.util.BoundedList;
+import org.jgroups.util.TimeScheduler;
+import org.jgroups.util.Util;
 
 import java.io.*;
 import java.util.*;
@@ -34,7 +36,6 @@ import java.util.concurrent.locks.ReentrantLock;
  * is reduced.
  *
  * @author Bela Ban
- * @version $Id: FD.java,v 1.79 2009/12/11 13:01:10 belaban Exp $
  */
 @MBean(description="Failure detection based on simple heartbeat protocol")
 @DeprecatedProperty(names={"shun"})
@@ -162,12 +163,17 @@ public class FD extends Protocol {
         return retval;
     }
 
+
+    protected Monitor createMonitor() {
+        return new Monitor();
+    }
+
     /** Requires lock to held by caller */
     @GuardedBy("lock")
     private void startMonitor() {
         if(monitor_future == null || monitor_future.isDone()) {
             last_ack=System.currentTimeMillis();  // start from scratch
-            monitor_future=timer.scheduleWithFixedDelay(new Monitor(), timeout, timeout, TimeUnit.MILLISECONDS);
+            monitor_future=timer.scheduleWithFixedDelay(createMonitor(), timeout, timeout, TimeUnit.MILLISECONDS);
             num_tries=0;
         }
     }
@@ -209,7 +215,7 @@ public class FD extends Protocol {
         switch(evt.getType()) {
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                FdHeader hdr=(FdHeader)msg.getHeader(name);
+                FdHeader hdr=(FdHeader)msg.getHeader(this.id);
                 if(hdr == null) {
                     updateTimestamp(msg.getSrc());
                     break;  // message did not originate from FD layer, just pass up
@@ -300,7 +306,7 @@ public class FD extends Protocol {
         hb_ack.setFlag(Message.OOB);
         FdHeader tmp_hdr=new FdHeader(FdHeader.HEARTBEAT_ACK);
         tmp_hdr.from=local_addr;
-        hb_ack.putHeader(name, tmp_hdr);
+        hb_ack.putHeader(this.id, tmp_hdr);
         down_prot.down(new Event(Event.MSG, hb_ack));
     }
 
@@ -337,7 +343,7 @@ public class FD extends Protocol {
 
 
 
-    public static class FdHeader extends Header implements Streamable {
+    public static class FdHeader extends Header {
         public static final byte HEARTBEAT=0;
         public static final byte HEARTBEAT_ACK=1;
         public static final byte SUSPECT=2;
@@ -346,11 +352,10 @@ public class FD extends Protocol {
         byte    type=HEARTBEAT;
         Collection<Address> mbrs=null;
         Address from=null;  // member who detected that suspected_mbr has failed
-        private static final long serialVersionUID=-6387039473828820899L;
 
 
         public FdHeader() {
-        } // used for externalization
+        }
 
         public FdHeader(byte type) {
             this.type=type;
@@ -376,34 +381,6 @@ public class FD extends Protocol {
             }
         }
 
-        public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeByte(type);
-            if(mbrs == null)
-                out.writeBoolean(false);
-            else {
-                out.writeBoolean(true);
-                out.writeInt(mbrs.size());
-                for(Address addr: mbrs) {
-                    out.writeObject(addr);
-                }
-            }
-            out.writeObject(from);
-        }
-
-        public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-            type=in.readByte();
-            boolean mbrs_not_null=in.readBoolean();
-            if(mbrs_not_null) {
-                int len=in.readInt();
-                mbrs=new Vector<Address>(11);
-                for(int i=0; i < len; i++) {
-                    Address addr=(Address)in.readObject();
-                    mbrs.add(addr);
-                }
-            }
-            from=(Address)in.readObject();
-        }
-
 
         public int size() {
             int retval=Global.BYTE_SIZE; // type
@@ -418,7 +395,6 @@ public class FD extends Protocol {
             Util.writeAddresses(mbrs, out);
             Util.writeAddress(from, out);
         }
-
 
 
         public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
@@ -456,7 +432,7 @@ public class FD extends Protocol {
             // 1. send heartbeat request
             hb_req=new Message(dest, null, null);
             hb_req.setFlag(Message.OOB);
-            hb_req.putHeader(name, new FdHeader(FdHeader.HEARTBEAT));  // send heartbeat request
+            hb_req.putHeader(id, new FdHeader(FdHeader.HEARTBEAT));  // send heartbeat request
             if(log.isDebugEnabled())
                 log.debug("sending are-you-alive msg to " + dest + " (own address=" + local_addr + ')');
             down_prot.down(new Event(Event.MSG, hb_req));
@@ -617,7 +593,7 @@ public class FD extends Protocol {
             }
             suspect_msg=new Message();       // mcast SUSPECT to all members
             suspect_msg.setFlag(Message.OOB);
-            suspect_msg.putHeader(name, hdr);
+            suspect_msg.putHeader(id, hdr);
             if(log.isDebugEnabled())
                 log.debug("broadcasting SUSPECT message [suspected_mbrs=" + suspected_members + "] to group");
             down_prot.down(new Event(Event.MSG, suspect_msg));

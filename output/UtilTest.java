@@ -1,4 +1,3 @@
-// $Id: UtilTest.java,v 1.21 2009/12/11 13:17:24 belaban Exp $
 
 package org.jgroups.tests;
 
@@ -294,6 +293,13 @@ public class UtilTest {
         list2=(List<String>)Util.objectFromByteBuffer(buf);
         System.out.println("list=" + list + ", list2=" + list2);
         Assert.assertEquals(list, list2);
+
+        byte[] buffer=new byte[]{'B', 'e', 'l', 'a', ' ', 'B', 'a', 'n'};
+        buf=Util.objectToByteBuffer(buffer);
+
+        byte[] buffer2=(byte[])Util.objectFromByteBuffer(buf);
+        assert buffer2 != null && buffer.length == buffer2.length;
+        assert Arrays.equals(buffer, buffer2);
 
         Object obj=null;
         buf=Util.objectToByteBuffer(obj);
@@ -613,6 +619,26 @@ public class UtilTest {
             assert el.intValue() >= 0 && el.intValue() < 10;
         }
     }
+
+
+    public static void testPickNext() {
+        List<Integer> list=new ArrayList<Integer>(10);
+        for(int i=0; i < 10; i++)
+            list.add(i);
+        Integer num=Util.pickNext(list, 5);
+        System.out.println("number next to 5: " + num);
+        assert num != null;
+        assert num.equals(6);
+
+        num=Util.pickNext(list, 9);
+        System.out.println("number next to 9: " + num);
+        assert num != null;
+        assert num.equals(0);
+
+        num=Util.pickNext(list, 11);
+        assert num == null;
+    }
+
 
     public static void testAll() {
         List<String> l=new ArrayList<String>();

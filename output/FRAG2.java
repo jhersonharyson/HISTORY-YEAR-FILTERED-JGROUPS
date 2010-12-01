@@ -9,12 +9,14 @@ import org.jgroups.stack.Protocol;
 import org.jgroups.util.Range;
 import org.jgroups.util.Util;
 
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Vector;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.concurrent.atomic.AtomicLong;
 
 
 /**
@@ -37,7 +39,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * message, so we add a constant (200 bytes).
  * 
  * @author Bela Ban
- * @version $Id: FRAG2.java,v 1.52 2009/12/11 13:02:28 belaban Exp $
  */
 @MBean(description="Fragments messages larger than fragmentation size into smaller packets")
 @DeprecatedProperty(names={"overhead"})
@@ -55,7 +56,7 @@ public class FRAG2 extends Protocol {
     /*the fragmentation list contains a fragmentation table per sender
      *this way it becomes easier to clean up if a sender (member) leaves or crashes
      */
-    private final ConcurrentMap<Address,ConcurrentMap<Long,FragEntry>> fragment_list=new ConcurrentHashMap<Address,ConcurrentMap<Long,FragEntry>>(11);
+    private final ConcurrentMap<Address,ConcurrentMap<Long,FragEntry>> fragment_list=Util.createConcurrentMap(11);
 
     /** Used to assign fragmentation-specific sequence IDs (monotonically increasing) */
     private int curr_id=1;
@@ -164,7 +165,7 @@ public class FRAG2 extends Protocol {
 
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                FragHeader hdr=(FragHeader)msg.getHeader(name);
+                FragHeader hdr=(FragHeader)msg.getHeader(this.id);
                 if(hdr != null) { // needs to be defragmented
                     unfragment(msg, hdr); // Unfragment and possibly pass up
                     return null;
@@ -243,13 +244,14 @@ public class FRAG2 extends Protocol {
                 log.trace(sb.toString());
             }
 
-            long id=getNextId(); // used as a seqno
+            long frag_id=getNextId(); // used as a seqno
             for(int i=0; i < fragments.size(); i++) {
                 Range r=fragments.get(i);
-                Message frag_msg=msg.copy(false); // don't copy the buffer, only src, dest and headers. But do copy the headers
+                // don't copy the buffer, only src, dest and headers. Only copy the headers one time !
+                Message frag_msg=msg.copy(false, i == 0);
                 frag_msg.setBuffer(buffer, (int)r.low, (int)r.high);
-                FragHeader hdr=new FragHeader(id, i, num_frags);
-                frag_msg.putHeader(name, hdr);
+                FragHeader hdr=new FragHeader(frag_id, i, num_frags);
+                frag_msg.putHeader(this.id, hdr);
                 down_prot.down(new Event(Event.MSG, frag_msg));
             }
         }
@@ -272,7 +274,7 @@ public class FRAG2 extends Protocol {
 
         ConcurrentMap<Long,FragEntry> frag_table=fragment_list.get(sender);
         if(frag_table == null) {
-            frag_table=new ConcurrentHashMap<Long,FragEntry>();
+            frag_table=Util.createConcurrentMap(16, .075f, 16);
             ConcurrentMap<Long,FragEntry> tmp=fragment_list.putIfAbsent(sender, frag_table);
             if(tmp != null) // value was already present
                 frag_table=tmp;
@@ -405,12 +407,11 @@ public class FRAG2 extends Protocol {
             int     combined_length=0, length, offset;
             int     index=0;
 
-            for(Message fragment: fragments) {
+            for(Message fragment: fragments)
                 combined_length+=fragment.getLength();
-            }
 
             combined_buffer=new byte[combined_length];
-            retval=fragments[0].copy(false);
+            retval=fragments[0].copy(false); // doesn't copy the payload, but copies the headers
 
             for(int i=0; i < fragments.length; i++) {
                 Message fragment=fragments[i];

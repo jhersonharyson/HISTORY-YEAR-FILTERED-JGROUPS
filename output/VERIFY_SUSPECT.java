@@ -6,7 +6,6 @@ import org.jgroups.annotations.Property;
 import org.jgroups.conf.PropertyConverters;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.Streamable;
 import org.jgroups.util.Util;
 
 import java.io.*;
@@ -20,7 +19,6 @@ import java.util.*;
  * passes SUSPECT event up the stack, otherwise discards it. Has to be placed somewhere above the FD layer and
  * below the GMS layer (receiver of the SUSPECT event). Note that SUSPECT events may be reordered by this protocol.
  * @author Bela Ban
- * @version $Id: VERIFY_SUSPECT.java,v 1.42 2009/10/20 15:10:06 belaban Exp $
  */
 public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
@@ -35,7 +33,8 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     @Property(description="Use InetAddress.isReachable() to verify suspected member instead of regular messages")
     private boolean use_icmp=false; 
     
-    @Property(description="Interface for ICMP pings. Used if use_icmp is true",
+    @Property(description="Interface for ICMP pings. Used if use_icmp is true " +
+            "The following special values are also recognized: GLOBAL, SITE_LOCAL, LINK_LOCAL and NON_LOOPBACK",
               systemProperty={Global.BIND_ADDR, Global.BIND_ADDR_OLD},
               defaultValueIPv4=Global.NON_LOOPBACK_ADDRESS, defaultValueIPv6=Global.NON_LOOPBACK_ADDRESS)
     private InetAddress bind_addr; // interface for ICMP pings
@@ -94,7 +93,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                VerifyHeader hdr=(VerifyHeader)msg.getHeader(name);
+                VerifyHeader hdr=(VerifyHeader)msg.getHeader(this.id);
                 if(hdr == null)
                     break;
                 switch(hdr.type) {
@@ -107,7 +106,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
                             for(int i=0; i < num_msgs; i++) {
                                 rsp=new Message(hdr.from, null, null);
                                 rsp.setFlag(Message.OOB);
-                                rsp.putHeader(name, new VerifyHeader(VerifyHeader.I_AM_NOT_DEAD, local_addr));
+                                rsp.putHeader(this.id, new VerifyHeader(VerifyHeader.I_AM_NOT_DEAD, local_addr));
                                 down_prot.down(new Event(Event.MSG, rsp));
                             }
                         }
@@ -199,7 +198,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
         for(int i=0; i < num_msgs; i++) {
             msg=new Message(mbr, null, null);
             msg.setFlag(Message.OOB);
-            msg.putHeader(name, new VerifyHeader(VerifyHeader.ARE_YOU_DEAD, local_addr));
+            msg.putHeader(this.id, new VerifyHeader(VerifyHeader.ARE_YOU_DEAD, local_addr));
             down_prot.down(new Event(Event.MSG, msg));
         }               
     }
@@ -282,7 +281,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
 
 
-    public static class VerifyHeader extends Header implements Streamable {
+    public static class VerifyHeader extends Header {
         static final short ARE_YOU_DEAD=1;  // 'from' is sender of verify msg
         static final short I_AM_NOT_DEAD=2;  // 'from' is suspected member
 
@@ -314,16 +313,6 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
             }
         }
 
-        public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeShort(type);
-            out.writeObject(from);
-        }
-
-
-        public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-            type=in.readShort();
-            from=(Address)in.readObject();
-        }
 
         public void writeTo(DataOutputStream out) throws IOException {
             out.writeShort(type);
@@ -335,6 +324,9 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
             from=Util.readAddress(in);
         }
 
+        public int size() {
+            return Global.SHORT_SIZE + Util.size(from);
+        }
     }
 
 

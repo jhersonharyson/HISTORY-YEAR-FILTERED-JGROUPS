@@ -13,7 +13,6 @@ import java.util.LinkedHashSet;
 
 /**
  * @author Bela Ban
- * @version $Id: ParticipantGmsImpl.java,v 1.37 2009/09/28 07:16:55 belaban Exp $
  */
 public class ParticipantGmsImpl extends ServerGmsImpl {
     private final Vector<Address>   suspected_mbrs=new Vector<Address>(11);
@@ -179,7 +178,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
         msg.setFlag(Message.OOB);
         GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.LEAVE_REQ, mbr);
 
-        msg.putHeader(gms.getName(), hdr);
+        msg.putHeader(gms.getId(), hdr);
         gms.getDownProtocol().down(new Event(Event.MSG, msg));
     }
 

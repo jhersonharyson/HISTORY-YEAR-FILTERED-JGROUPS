@@ -1,21 +1,23 @@
 
 package org.jgroups.protocols;
 
+import java.net.InetSocketAddress;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+
 import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.Message;
 import org.jgroups.PhysicalAddress;
 import org.jgroups.annotations.DeprecatedProperty;
+import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.PropertyConverters;
+import org.jgroups.stack.RouterStubManager;
 import org.jgroups.stack.RouterStub;
 import org.jgroups.util.Promise;
 import org.jgroups.util.Tuple;
-
-import java.net.InetSocketAddress;
-import java.util.*;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import org.jgroups.util.UUID;
 
 
 /**
@@ -31,10 +33,9 @@ import java.util.concurrent.TimeUnit;
  * FIND_INITIAL_MBRS_OK event up the stack.
  * 
  * @author Bela Ban
- * @version $Id: TCPGOSSIP.java,v 1.49 2009/12/22 09:02:01 belaban Exp $
  */
 @DeprecatedProperty(names={"gossip_refresh_rate"})
-public class TCPGOSSIP extends Discovery implements RouterStub.ConnectionListener {
+public class TCPGOSSIP extends Discovery {
     
     /* -----------------------------------------    Properties     -------------------------------------------------- */
     
@@ -49,11 +50,11 @@ public class TCPGOSSIP extends Discovery implements RouterStub.ConnectionListene
     
     @Property(name="initial_hosts", description="Comma delimited list of hosts to be contacted for initial membership", 
     		converter=PropertyConverters.InitialHosts2.class)
-    public void setInitialHosts(List<InetSocketAddress> initial_hosts) {
-        if(initial_hosts == null || initial_hosts.isEmpty())
+    public void setInitialHosts(List<InetSocketAddress> hosts) {
+        if(hosts == null || hosts.isEmpty())
             throw new IllegalArgumentException("initial_hosts must contain the address of at least one GossipRouter");
 
-    	this.initial_hosts = initial_hosts ;
+        initial_hosts.addAll(hosts) ;
     }
 
     public List<InetSocketAddress> getInitialHosts() {
@@ -63,15 +64,14 @@ public class TCPGOSSIP extends Discovery implements RouterStub.ConnectionListene
     /* --------------------------------------------- Fields ------------------------------------------------------ */
 
     
-    List<InetSocketAddress> initial_hosts=null; // (list of IpAddresses) hosts to be contacted for the initial membership
-    final List<RouterStub>  stubs=new ArrayList<RouterStub>();
-    Future<?> reconnect_future=null;
-    Future<?> connection_checker=null;
-    protected volatile boolean running=true;
+    // (list of IpAddresses) hosts to be contacted for the initial membership
+    private final List<InetSocketAddress> initial_hosts = new CopyOnWriteArrayList<InetSocketAddress>();
+    
+    private volatile RouterStubManager stubManager;
 
     public void init() throws Exception {
         super.init();
-        
+        stubManager = RouterStubManager.emptyGossipClientStubManager(this);
         if(timeout <= sock_conn_timeout)
             throw new IllegalArgumentException("timeout (" + timeout + ") must be greater than sock_conn_timeout ("
                     + sock_conn_timeout + ")");
@@ -85,180 +85,138 @@ public class TCPGOSSIP extends Discovery implements RouterStub.ConnectionListene
 
     public void start() throws Exception {
         super.start();
-        running=true;
     }
 
     public void stop() {
-		super.stop();
-        running=false;
-		for (RouterStub stub : stubs) {
-			try {
-				stub.disconnect(group_addr, local_addr);
-			} 
-			catch (Exception e) {
-			}
-		}
-        stopReconnector();
-	}
+        super.stop();       
+        stubManager.disconnectStubs();
+    }
 
     public void destroy() {
-        for(RouterStub stub : stubs) {
-            stub.destroy();
-        }
+        stubManager.destroyStubs();
         super.destroy();
     }
 
     public void handleConnect() {
-        if(group_addr == null || local_addr == null) {
-            if(log.isErrorEnabled())
+        if (group_addr == null || local_addr == null) {
+            if (log.isErrorEnabled())
                 log.error("group_addr or local_addr is null, cannot register with GossipRouter(s)");
-        }
-        else {
-            if(log.isTraceEnabled())
+        } else {
+            if (log.isTraceEnabled())
                 log.trace("registering " + local_addr + " under " + group_addr + " with GossipRouter");
-            for(RouterStub stub: stubs) // if there are any stubs, destroy them
-                stub.destroy();
-            stubs.clear();
             
+            stubManager.destroyStubs();
+            stubManager = new RouterStubManager(this, group_addr, local_addr, reconnect_interval);
             for (InetSocketAddress host : initial_hosts) {
-                RouterStub stub=new RouterStub(host.getHostName(), host.getPort(), null);
-                stub.setConnectionListener(this);
-				stubs.add(stub);
-			}
-            connect(group_addr, local_addr);
-            startConnectionChecker();
+                stubManager.createAndRegisterStub(host.getHostName(), host.getPort(), null);                                
+            }
+            connectAllStubs(group_addr, local_addr);            
         }
     }
 
 
     public void handleDisconnect() {
-    	for (RouterStub stub : stubs) {
-			try {
-				stub.disconnect(group_addr, local_addr);
-                stub.destroy();
-			} 
-			catch (Exception e) {
-			}
-		}
-        stopConnectionChecker();
+        stubManager.disconnectStubs();
     }
 
-    public void connectionStatusChange(RouterStub.ConnectionStatus state) {
-        if(log.isDebugEnabled())
-            log.debug("connection changed to " + state);
-        if(state == RouterStub.ConnectionStatus.CONNECTED)
-            stopReconnector();
-        else
-            startReconnector();
-    }
-
-    public void sendGetMembersRequest(String cluster_name, Promise promise, boolean return_views_only) throws Exception{
-        if(group_addr == null) {
-            if(log.isErrorEnabled()) log.error("cluster_name is null, cannot get membership");            
+    @SuppressWarnings("unchecked")
+    public void sendGetMembersRequest(String cluster_name, Promise promise, boolean return_views_only) throws Exception {
+        if (group_addr == null) {
+            if (log.isErrorEnabled())
+                log.error("cluster_name is null, cannot get membership");
             return;
         }
-        
-        if(log.isTraceEnabled()) log.trace("fetching members from GossipRouter(s)");
 
-        final List<PingData> responses=new LinkedList<PingData>();
-        for(RouterStub stub : stubs) {
+        if (log.isTraceEnabled())
+            log.trace("fetching members from GossipRouter(s)");
+
+        final List<PingData> responses = new LinkedList<PingData>();
+        for (RouterStub stub : stubManager.getStubs()) {
             try {
-                List<PingData> rsps=stub.getMembers(group_addr);
+                List<PingData> rsps = stub.getMembers(group_addr);
                 responses.addAll(rsps);
             }
-            catch(Throwable e) {
-			}
-		}
+            catch(Throwable t) {
+                log.warn("failed fetching members from " + stub.getGossipRouterAddress() + ": " +  t);
+            }
+        }
 
-        final Set<Address> initial_mbrs=new HashSet<Address>();
-        for(PingData rsp: responses) {
-            Address logical_addr=rsp.getAddress();
+        final Set<Address> initial_mbrs = new HashSet<Address>();
+        for (PingData rsp : responses) {
+            Address logical_addr = rsp.getAddress();
             initial_mbrs.add(logical_addr);
 
             // 1. Set physical addresses
-            Collection<PhysicalAddress> physical_addrs=rsp.getPhysicalAddrs();
-            if(physical_addrs != null) {
-                for(PhysicalAddress physical_addr: physical_addrs)
-                    down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<Address,PhysicalAddress>(logical_addr, physical_addr)));
+            Collection<PhysicalAddress> physical_addrs = rsp.getPhysicalAddrs();
+            if (physical_addrs != null) {
+                for (PhysicalAddress physical_addr : physical_addrs)
+                    down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<Address, PhysicalAddress>(
+                                    logical_addr, physical_addr)));
             }
 
             // 2. Set logical name
-            String logical_name=rsp.getLogicalName();
-            if(logical_name != null && logical_addr instanceof org.jgroups.util.UUID)
-                org.jgroups.util.UUID.add((org.jgroups.util.UUID)logical_addr, logical_name);
+            String logical_name = rsp.getLogicalName();
+            if (logical_name != null && logical_addr instanceof org.jgroups.util.UUID)
+                org.jgroups.util.UUID.add((org.jgroups.util.UUID) logical_addr, logical_name);
         }
-        
-        if(initial_mbrs.isEmpty()) {
-            if(log.isErrorEnabled()) log.error("[FIND_INITIAL_MBRS]: found no members");
+
+        if (initial_mbrs.isEmpty()) {
+            if (log.isTraceEnabled())
+                log.trace("[FIND_INITIAL_MBRS]: found no members");
             return;
         }
-        if(log.isTraceEnabled()) log.trace("consolidated mbrs from GossipRouter(s) are " + initial_mbrs);
-        
-        for(Address mbr_addr: initial_mbrs) {
-            Message msg=new Message(mbr_addr);
+        if (log.isTraceEnabled())
+            log.trace("consolidated mbrs from GossipRouter(s) are " + initial_mbrs);
+
+        PhysicalAddress physical_addr=(PhysicalAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
+        PingData data=new PingData(local_addr, null, false, UUID.get(local_addr), Arrays.asList(physical_addr));
+
+        for (Address mbr_addr : initial_mbrs) {
+            Message msg = new Message(mbr_addr);
             msg.setFlag(Message.OOB);
-            PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ, cluster_name);
-            hdr.return_view_only=return_views_only;
-            msg.putHeader(name, hdr);
-            if(log.isTraceEnabled()) log.trace("[FIND_INITIAL_MBRS] sending PING request to " + mbr_addr);
+            PingHeader hdr = new PingHeader(PingHeader.GET_MBRS_REQ, data, cluster_name);
+            hdr.return_view_only = return_views_only;
+            msg.putHeader(this.id, hdr);
+            if (log.isTraceEnabled())
+                log.trace("[FIND_INITIAL_MBRS] sending GET_MBRS_REQ request to " + mbr_addr);            
             down_prot.down(new Event(Event.MSG, msg));
         }
     }
 
-    synchronized void startReconnector() {
-        if(running && (reconnect_future == null || reconnect_future.isDone())) {
-            if(log.isDebugEnabled())
-                log.debug("starting reconnector");
-            reconnect_future=timer.scheduleWithFixedDelay(new Runnable() {
-                public void run() {
-                    connect(group_addr, local_addr);
-                }
-            }, 0, reconnect_interval, TimeUnit.MILLISECONDS);
-        }
+    @ManagedOperation
+    public void addInitialHost(String hostname, int port) {
+        //if there is such a stub already, remove and destroy it
+        removeInitialHost(hostname, port);
+        
+        //now re-add it
+        InetSocketAddress isa = new InetSocketAddress(hostname, port);
+        initial_hosts.add(isa);
+        RouterStub s = new RouterStub(isa.getHostName(), isa.getPort(),null,stubManager);        
+        connect(s, group_addr, local_addr);
+        stubManager.registerStub(s);
     }
 
-    synchronized void stopReconnector() {
-        if(reconnect_future != null) {
-            reconnect_future.cancel(false);
-            reconnect_future=null;
-            if(log.isDebugEnabled())
-                log.debug("stopping reconnector");
+    @ManagedOperation
+    public boolean removeInitialHost(String hostname, int port) {
+        InetSocketAddress isa = new InetSocketAddress(hostname, port);        
+        RouterStub unregisterStub = stubManager.unregisterStub(isa);
+        if(unregisterStub != null) {
+            stubManager.stopReconnecting(unregisterStub);
+            unregisterStub.destroy();
         }
-    }
-
-    synchronized void startConnectionChecker() {
-        if(running && (connection_checker == null || connection_checker.isDone())) {
-            if(log.isDebugEnabled())
-                log.debug("starting connection checker");
-            connection_checker=timer.scheduleWithFixedDelay(new Runnable() {
-                public void run() {
-                    for(RouterStub stub: stubs) {
-                        stub.checkConnection();
-                    }
-                }
-            }, 0, reconnect_interval, TimeUnit.MILLISECONDS);
-        }
-    }
-
-    synchronized void stopConnectionChecker() {
-        if(connection_checker != null) {
-            connection_checker.cancel(false);
-            connection_checker=null;
-            if(log.isDebugEnabled())
-                log.debug("stopping connection checker");
-        }
+        return initial_hosts.remove(isa);        
     }
 
 
-    protected void connect(String group, Address logical_addr) {
+    protected void connectAllStubs(String group, Address logical_addr) {
         String logical_name=org.jgroups.util.UUID.get(logical_addr);
         PhysicalAddress physical_addr=(PhysicalAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
         List<PhysicalAddress> physical_addrs=physical_addr != null? new ArrayList<PhysicalAddress>() : null;
         if(physical_addr != null)
             physical_addrs.add(physical_addr);
 
-        int num_faulty_conns=0;
-        for (RouterStub stub : stubs) {
+      
+        for (RouterStub stub : stubManager.getStubs()) {
             try {
                 if(log.isTraceEnabled())
                     log.trace("trying to connect to " + stub.getGossipRouterAddress());
@@ -266,12 +224,28 @@ public class TCPGOSSIP extends Discovery implements RouterStub.ConnectionListene
             }
             catch(Exception e) {
                 if(log.isErrorEnabled())
-                log.error("failed connecting to " + stub.getGossipRouterAddress() + ": " +  e);
-                num_faulty_conns++;
+                    log.error("failed connecting to " + stub.getGossipRouterAddress() + ": " + e); 
+                stubManager.startReconnecting(stub);
             }
+        }     
+    }
+    
+    protected void connect(RouterStub stub, String group, Address logical_addr) {
+        String logical_name = org.jgroups.util.UUID.get(logical_addr);
+        PhysicalAddress physical_addr = (PhysicalAddress) down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
+        List<PhysicalAddress> physical_addrs = physical_addr != null ? new ArrayList<PhysicalAddress>(): null;
+        if (physical_addr != null)
+            physical_addrs.add(physical_addr);
+
+        try {
+            if (log.isTraceEnabled())
+                log.trace("trying to connect to " + stub.getGossipRouterAddress());
+            stub.connect(group, logical_addr, logical_name, physical_addrs);
+        } catch (Exception e) {
+            if (log.isErrorEnabled())
+                log.error("failed connecting to " + stub.getGossipRouterAddress() + ": " + e);
+            stubManager.startReconnecting(stub);
         }
-        if(num_faulty_conns == 0)
-            stopReconnector();
     }
 }
 

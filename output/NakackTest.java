@@ -1,4 +1,3 @@
-//$Id: NakackTest.java,v 1.9 2009/05/05 10:53:34 belaban Exp $
 
 package org.jgroups.tests;
 

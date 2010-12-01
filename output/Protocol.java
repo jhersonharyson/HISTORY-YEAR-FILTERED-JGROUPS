@@ -4,6 +4,7 @@ package org.jgroups.stack;
 
 
 import org.jgroups.Event;
+import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.annotations.DeprecatedProperty;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.Property;
@@ -11,6 +12,7 @@ import org.jgroups.jmx.ResourceDMBean;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.TP;
+import org.jgroups.util.SocketFactory;
 import org.jgroups.util.ThreadFactory;
 import org.jgroups.util.Util;
 
@@ -36,22 +38,27 @@ import java.util.*;
  * constructor !</b>
  *
  * @author Bela Ban
- * @version $Id: Protocol.java,v 1.74 2009/12/11 13:19:31 belaban Exp $
  */
 @DeprecatedProperty(names={"down_thread","down_thread_prio","up_thread","up_thread_prio"})
 public abstract class Protocol {
     protected Protocol         up_prot=null, down_prot=null;
     protected ProtocolStack    stack=null;
     
-    @Property(description="Determines whether to collect statistics (and expose them via JMX). Default is true")
-    @ManagedAttribute(description="Determines whether to collect statistics (and expose them via JMX). Default is true",writable=true)
+    @Property(description="Determines whether to collect statistics (and expose them via JMX). Default is true",writable=true)
     protected boolean          stats=true;
+
+    @Property(description="Enables ergonomics: dynamically find the best values for properties at runtime")
+    protected boolean          ergonomics=true;
 
     /** The name of the protocol. Is by default set to the protocol's classname. This property should rarely need to
      * be set, e.g. only in cases where we want to create more than 1 protocol of the same class in the same stack */
     @Property(name="name",description="Give the protocol a different name if needed so we can have multiple " +
             "instances of it in the same stack",writable=false)
     protected String           name=getClass().getSimpleName();
+
+    @Property(description="Give the protocol a different ID if needed so we can have multiple " +
+            "instances of it in the same stack",writable=true)
+    protected short            id=ClassConfigurator.getProtocolId(getClass());
 
     protected final Log        log=LogFactory.getLog(this.getClass());
 
@@ -68,9 +75,16 @@ public abstract class Protocol {
         log.setLevel(level);
     }
 
-
     public String getLevel() {
         return log.getLevel();
+    }
+
+    public boolean isErgonomics() {
+        return ergonomics;
+    }
+
+    public void setErgonomics(boolean ergonomics) {
+        this.ergonomics=ergonomics;
     }
 
     /**
@@ -103,6 +117,32 @@ public abstract class Protocol {
     public boolean setPropertiesInternal(Properties props) {
         throw new UnsupportedOperationException("use a setter instead");
     }
+
+    public Protocol setValues(Map<String,Object> values) {
+        if(values == null)
+            return this;
+        for(Map.Entry<String,Object> entry: values.entrySet()) {
+            String attrname=entry.getKey();
+            Object value=entry.getValue();
+            Field field=Util.getField(getClass(), attrname);
+            if(field != null) {
+                Configurator.setField(field, this, value);
+            }
+        }
+        return this;
+    }
+
+
+    public Protocol setValue(String name, Object value) {
+        if(name == null || value == null)
+            return this;
+        Field field=Util.getField(getClass(), name);
+        if(field != null) {
+            Configurator.setField(field, this, value);
+        }
+        return this;
+    }
+
 
     /**
      * @return
@@ -145,6 +185,23 @@ public abstract class Protocol {
         return down_prot != null? down_prot.getThreadFactory(): null;
     }
 
+    /**
+     * Returns the SocketFactory associated with this protocol, if overridden in a subclass, or passes the call down
+     * @return SocketFactory
+     */
+    public SocketFactory getSocketFactory() {
+        return down_prot != null? down_prot.getSocketFactory() : null;
+    }
+
+    /**
+     * Sets a SocketFactory. Socket factories are typically provided by the transport ({@link org.jgroups.protocols.TP})
+     * or {@link org.jgroups.protocols.TP.ProtocolAdapter}
+     * @param factory
+     */
+    public void setSocketFactory(SocketFactory factory) {
+        if(down_prot != null)
+            down_prot.setSocketFactory(factory);
+    }
 
     /** @deprecated up_thread was removed
      * @return false by default
@@ -304,6 +361,14 @@ public abstract class Protocol {
     /** All protocol names have to be unique ! */
     public String getName() {
         return name;
+    }
+
+    public short getId() {
+        return id;
+    }
+
+    public void setId(short id) {
+        this.id=id;
     }
 
     public Protocol getUpProtocol() {

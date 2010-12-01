@@ -3,9 +3,13 @@ package org.jgroups.tests;
 
 import org.jgroups.Global;
 import org.jgroups.Message;
+import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.PingHeader;
 import org.jgroups.protocols.TpHeader;
+import org.jgroups.protocols.UDP;
+import org.jgroups.protocols.PING;
 import org.jgroups.protocols.pbcast.NakAckHeader;
+import org.jgroups.protocols.pbcast.NAKACK;
 import org.jgroups.util.Range;
 import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
@@ -14,10 +18,13 @@ import org.testng.annotations.Test;
 
 /**
  * @author Bela Ban
- * @version $Id: MessageTest.java,v 1.12 2009/04/09 09:11:24 belaban Exp $
  */
 @Test(groups=Global.FUNCTIONAL)
 public class MessageTest {
+
+    static final short UDP_ID=101;
+    static final short PING_ID=102;
+    static final short NAKACK_ID=103;
 
 
     public static void testFlags() {
@@ -37,9 +44,9 @@ public class MessageTest {
         Message m1=new Message();
         m1.setFlag(Message.OOB);
         assert m1.isFlagSet(Message.OOB);
-        Assert.assertEquals(Message.OOB, (m1.getFlags() & Message.OOB));
-        assert !(m1.isFlagSet(Message.LOW_PRIO));
-        Assert.assertNotSame((m1.getFlags() & Message.LOW_PRIO), Message.LOW_PRIO);
+        assert Message.OOB == (m1.getFlags() & Message.OOB);
+        assert !(m1.isFlagSet(Message.DONT_BUNDLE));
+        Assert.assertNotSame((m1.getFlags() & Message.DONT_BUNDLE), Message.DONT_BUNDLE);
     }
 
     public static void testFlags3() {
@@ -68,30 +75,30 @@ public class MessageTest {
     public static void testClearFlags2() {
         Message msg=new Message();
         msg.setFlag(Message.OOB);
-        msg.setFlag(Message.HIGH_PRIO);
-        assert msg.isFlagSet(Message.LOW_PRIO) == false;
+        msg.setFlag(Message.NO_FC);
+        assert msg.isFlagSet(Message.DONT_BUNDLE) == false;
         assert msg.isFlagSet(Message.OOB);
-        assert msg.isFlagSet(Message.HIGH_PRIO);
+        assert msg.isFlagSet(Message.NO_FC);
 
         msg.clearFlag(Message.OOB);
         assert msg.isFlagSet(Message.OOB) == false;
-        msg.setFlag(Message.LOW_PRIO);
-        assert msg.isFlagSet(Message.LOW_PRIO);
-        assert msg.isFlagSet(Message.HIGH_PRIO);
-        msg.clearFlag(Message.HIGH_PRIO);
-        assert msg.isFlagSet(Message.HIGH_PRIO) == false;
-        msg.clearFlag(Message.HIGH_PRIO);
-        assert msg.isFlagSet(Message.HIGH_PRIO) == false;
-        msg.clearFlag(Message.LOW_PRIO);
+        msg.setFlag(Message.DONT_BUNDLE);
+        assert msg.isFlagSet(Message.DONT_BUNDLE);
+        assert msg.isFlagSet(Message.NO_FC);
+        msg.clearFlag(Message.NO_FC);
+        assert msg.isFlagSet(Message.NO_FC) == false;
+        msg.clearFlag(Message.NO_FC);
+        assert msg.isFlagSet(Message.NO_FC) == false;
+        msg.clearFlag(Message.DONT_BUNDLE);
         msg.clearFlag(Message.OOB);
         assert msg.getFlags() == 0;
         assert msg.isFlagSet(Message.OOB) == false;
-        assert msg.isFlagSet(Message.LOW_PRIO) == false;
-        assert msg.isFlagSet(Message.HIGH_PRIO) == false;
-        msg.setFlag(Message.LOW_PRIO);
-        assert msg.isFlagSet(Message.LOW_PRIO);
-        msg.setFlag(Message.LOW_PRIO);
-        assert msg.isFlagSet(Message.LOW_PRIO);
+        assert msg.isFlagSet(Message.DONT_BUNDLE) == false;
+        assert msg.isFlagSet(Message.NO_FC) == false;
+        msg.setFlag(Message.DONT_BUNDLE);
+        assert msg.isFlagSet(Message.DONT_BUNDLE);
+        msg.setFlag(Message.DONT_BUNDLE);
+        assert msg.isFlagSet(Message.DONT_BUNDLE);
     }
 
 
@@ -322,7 +329,7 @@ public class MessageTest {
     public static void testSizeMessageWithDestAndSrcAndFlags() throws Exception {
         Message msg=new Message(UUID.randomUUID(), UUID.randomUUID(), null);
         msg.setFlag(Message.OOB);
-        msg.setFlag(Message.LOW_PRIO);
+        msg.setFlag(Message.DONT_BUNDLE);
         _testSize(msg);
     }
 
@@ -361,11 +368,11 @@ public class MessageTest {
 
     private static void addHeaders(Message msg) {       
         TpHeader tp_hdr=new TpHeader("DemoChannel2");
-        msg.putHeader("TP", tp_hdr);
+        msg.putHeader(UDP_ID, tp_hdr);
         PingHeader ping_hdr=new PingHeader(PingHeader.GET_MBRS_REQ, "demo-cluster");
-        msg.putHeader("PING", ping_hdr);
-        NakAckHeader nak_hdr=new NakAckHeader(NakAckHeader.XMIT_REQ, 100, 104);
-        msg.putHeader("NAKACK", nak_hdr);
+        msg.putHeader(PING_ID, ping_hdr);
+        NakAckHeader nak_hdr=NakAckHeader.createXmitRequestHeader(100, 104, null);
+        msg.putHeader(NAKACK_ID, nak_hdr);
     }
 
 

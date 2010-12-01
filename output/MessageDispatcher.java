@@ -1,9 +1,10 @@
 
 package org.jgroups.blocks;
 
+import org.jgroups.*;
+import org.jgroups.blocks.mux.Muxer;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
-import org.jgroups.*;
 import org.jgroups.protocols.TP;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.StateTransferInfo;
@@ -12,11 +13,7 @@ import org.jgroups.util.*;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.TreeSet;
-import java.util.Vector;
-import java.util.concurrent.Future;
+import java.util.*;
 
 
 /**
@@ -37,7 +34,6 @@ import java.util.concurrent.Future;
  * the application instead of protocol level.
  *
  * @author Bela Ban
- * @version $Id: MessageDispatcher.java,v 1.90 2009/10/29 11:45:12 belaban Exp $
  */
 public class MessageDispatcher implements RequestHandler {
     protected Channel channel=null;
@@ -47,13 +43,13 @@ public class MessageDispatcher implements RequestHandler {
     protected RequestHandler req_handler=null;
     protected ProtocolAdapter prot_adapter=null;
     protected TransportAdapter transport_adapter=null;
-    protected final Collection members=new TreeSet();
+    protected final Collection<Address> members=new TreeSet<Address>();
     protected Address local_addr=null;
     protected PullPushAdapter adapter=null;
     protected PullPushHandler handler=null;
     protected Serializable id=null;
     protected final Log log=LogFactory.getLog(getClass());
-
+    protected boolean hardware_multicast_supported=false;
 
 
     public MessageDispatcher() {
@@ -68,12 +64,12 @@ public class MessageDispatcher implements RequestHandler {
         setMessageListener(l);
         setMembershipListener(l2);
         if(channel != null) {
-            channel.setUpHandler(prot_adapter);
+            installUpHandler(prot_adapter, true);
         }
         start();
     }
 
-
+    @Deprecated
     public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2, boolean deadlock_detection) {
         this.channel=channel;
         prot_adapter=new ProtocolAdapter();
@@ -83,11 +79,12 @@ public class MessageDispatcher implements RequestHandler {
         setMessageListener(l);
         setMembershipListener(l2);
         if(channel != null) {
-            channel.setUpHandler(prot_adapter);
+            installUpHandler(prot_adapter, true);
         }
         start();
     }
 
+    @Deprecated
     public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2,
                              boolean deadlock_detection, boolean concurrent_processing) {
         this.channel=channel;
@@ -98,7 +95,7 @@ public class MessageDispatcher implements RequestHandler {
         setMessageListener(l);
         setMembershipListener(l2);
         if(channel != null) {
-            channel.setUpHandler(prot_adapter);
+            installUpHandler(prot_adapter, true);
         }
         start();
     }
@@ -110,12 +107,14 @@ public class MessageDispatcher implements RequestHandler {
     }
 
 
+    @Deprecated
     public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2, RequestHandler req_handler,
                              boolean deadlock_detection) {
         this(channel, l, l2, deadlock_detection, false);
         setRequestHandler(req_handler);
     }
 
+    @Deprecated
     public MessageDispatcher(Channel channel, MessageListener l, MembershipListener l2, RequestHandler req_handler,
                              boolean deadlock_detection, boolean concurrent_processing) {
         this(channel, l, l2, deadlock_detection, concurrent_processing);
@@ -133,8 +132,8 @@ public class MessageDispatcher implements RequestHandler {
      * @param id A serializable object (e.g. an Integer) used to discriminate (multiplex/demultiplex) between
      *           requests/responses for different building blocks on top of PullPushAdapter.
      */
-    public MessageDispatcher(PullPushAdapter adapter, Serializable id,
-                             MessageListener l, MembershipListener l2) {
+    @Deprecated
+    public MessageDispatcher(PullPushAdapter adapter, Serializable id, MessageListener l, MembershipListener l2) {
         this.adapter=adapter;
         this.id=id;
         setMembers(((Channel) adapter.getTransport()).getView().getMembers());
@@ -169,6 +168,7 @@ public class MessageDispatcher implements RequestHandler {
      *           requests/responses for different building blocks on top of PullPushAdapter.
      * @param req_handler The object implementing RequestHandler. It will be called when a request is received
      */
+    @Deprecated
     public MessageDispatcher(PullPushAdapter adapter, Serializable id,
                              MessageListener l, MembershipListener l2,
                              RequestHandler req_handler) {
@@ -196,7 +196,7 @@ public class MessageDispatcher implements RequestHandler {
         start();
     }
 
-
+    @Deprecated
     public MessageDispatcher(PullPushAdapter adapter, Serializable id,
                              MessageListener l, MembershipListener l2,
                              RequestHandler req_handler, boolean concurrent_processing) {
@@ -223,6 +223,12 @@ public class MessageDispatcher implements RequestHandler {
 
         start();
     }
+
+
+    public UpHandler getProtocolAdapter() {
+        return prot_adapter;
+    }
+
 
     /** Returns a copy of members */
     protected Collection getMembers() {
@@ -261,15 +267,13 @@ public class MessageDispatcher implements RequestHandler {
     }
 
 
-    public final void start() {
+    public void start() {
         if(corr == null) {
             if(transport_adapter != null) {
-                corr=new RequestCorrelator("MsgDisp", transport_adapter,
-                                           this, local_addr);
+                corr=createRequestCorrelator(transport_adapter, this, local_addr);
             }
             else {
-                corr=new RequestCorrelator("MsgDisp", prot_adapter,
-                                           this, local_addr);
+                corr=createRequestCorrelator(prot_adapter, this, local_addr);
             }
         }
         correlatorStarted();
@@ -281,8 +285,14 @@ public class MessageDispatcher implements RequestHandler {
             if(channel instanceof JChannel) {
                 TP transport=channel.getProtocolStack().getTransport();
                 corr.registerProbeHandler(transport);
+            }
+            TP transport=channel.getProtocolStack().getTransport();
+            hardware_multicast_supported=transport.supportsMulticasting();
         }
     }
+
+    protected RequestCorrelator createRequestCorrelator(Object transport, RequestHandler handler, Address local_addr) {
+        return new RequestCorrelator(transport, handler, local_addr);
     }
 
     protected void correlatorStarted() {
@@ -342,230 +352,140 @@ public class MessageDispatcher implements RequestHandler {
         local_addr=channel.getAddress();
         if(prot_adapter == null)
             prot_adapter=new ProtocolAdapter();
-        channel.setUpHandler(prot_adapter);
+        // Don't force installing the UpHandler so subclasses can use this
+        // method and still integrate with a MuxUpHandler
+        installUpHandler(prot_adapter, false);
+    }
+    
+    /**
+     * Sets the given UpHandler as the UpHandler for the channel, or, if the
+     * channel already has a Muxer installed as it's UpHandler, sets the given
+     * handler as the Muxer's {@link Muxer#setDefaultHandler(Object) default handler}.
+     * If the relevant handler is already installed, the <code>canReplace</code>
+     * controls whether this method replaces it (after logging a WARN) or simply
+     * leaves <code>handler</code> uninstalled.
+     * <p>
+     * Passing <code>false</code> as the <code>canReplace</code> value allows
+     * callers to use this method to install defaults without concern about
+     * inadvertently overriding
+     * 
+     * @param handler the UpHandler to install
+     * @param canReplace <code>true</code> if an existing Channel upHandler or 
+     *              Muxer default upHandler can be replaced; <code>false</code>
+     *              if this method shouldn't install
+     */
+    protected void installUpHandler(UpHandler handler, boolean canReplace)
+    {
+       UpHandler existing = channel.getUpHandler();
+       if (existing == null) {
+           channel.setUpHandler(handler);
+       }
+       else if (existing instanceof Muxer<?>) {
+           @SuppressWarnings("unchecked")
+           Muxer<UpHandler> mux = (Muxer<UpHandler>) existing;
+           if (mux.getDefaultHandler() == null) {
+               mux.setDefaultHandler(handler);
+           }
+           else if (canReplace) {
+               log.warn("Channel Muxer already has a default up handler installed (" +
+                     mux.getDefaultHandler() + ") but now it is being overridden"); 
+               mux.setDefaultHandler(handler);
+           }
+       }
+       else if (canReplace) {
+           log.warn("Channel already has an up handler installed (" + existing + ") but now it is being overridden");
+           channel.setUpHandler(handler);
+       }
     }
 
-
+    @Deprecated
     public void send(Message msg) throws ChannelNotConnectedException, ChannelClosedException {
         if(channel != null) {
             channel.send(msg);
+            return;
         }
-        else
-            if(adapter != null) {
-                try {
-                    if(id != null) {
-                        adapter.send(id, msg);
-                    }
-                    else {
-                        adapter.send(msg);
-                    }
-                }
-                catch(Throwable ex) {
-                    if(log.isErrorEnabled()) {
-                        log.error("exception=" + Util.print(ex));
-                    }
-                }
+        if(adapter != null) {
+            try {
+                if(id != null)
+                    adapter.send(id, msg);
+                else
+                    adapter.send(msg);
             }
-            else {
-                if(log.isErrorEnabled()) {
-                    log.error("channel == null");
-                }
+            catch(Throwable ex) {
+                log.error("exception=" + Util.print(ex));
             }
+        }
+        else {
+            log.error("channel == null");
+        }
     }
 
-
+    @Deprecated
     public RspList castMessage(final Vector dests, Message msg, int mode, long timeout) {
-        return castMessage(dests, msg, mode, timeout, false);
+        return castMessage(dests, msg, new RequestOptions(mode, timeout, false, null));
     }
 
 
-    /**
-     * Cast a message to all members, and wait for <code>mode</code> responses. The responses are returned in a response
-     * list, where each response is associated with its sender.<p> Uses <code>GroupRequest</code>.
-     *
-     * @param dests   The members to which the message is to be sent. If it is null, then the message is sent to all
-     *                members
-     * @param msg     The message to be sent to n members
-     * @param mode    Defined in <code>GroupRequest</code>. The number of responses to wait for: <ol> <li>GET_FIRST:
-     *                return the first response received. <li>GET_ALL: wait for all responses (minus the ones from
-     *                suspected members) <li>GET_MAJORITY: wait for a majority of all responses (relative to the grp
-     *                size) <li>GET_ABS_MAJORITY: wait for majority (absolute, computed once) <li>GET_N: wait for n
-     *                responses (may block if n > group size) <li>GET_NONE: wait for no responses, return immediately
-     *                (non-blocking) </ol>
-     * @param timeout If 0: wait forever. Otherwise, wait for <code>mode</code> responses <em>or</em> timeout time.
-     * @return RspList A list of responses. Each response is an <code>Object</code> and associated to its sender.
-     */
+    @Deprecated
     public RspList castMessage(final Vector dests, Message msg, int mode, long timeout, boolean use_anycasting) {
-        return castMessage(dests, msg, mode, timeout, use_anycasting, null);
+        return castMessage(dests, msg, new RequestOptions(mode, timeout, use_anycasting, null));
     }
 
-
+    // used by Infinispan
+    @Deprecated
+    /**
+     * @deprecated Use {@link #castMessage(java.util.Collection, org.jgroups.Message, RequestOptions)} instead
+     */
     public RspList castMessage(final Vector dests, Message msg, int mode, long timeout, boolean use_anycasting,
                                RspFilter filter) {
-        GroupRequest _req;
-        Vector real_dests;
-        Channel tmp;
-
-        // we need to clone because we don't want to modify the original
-        // (we remove ourselves if LOCAL is false, see below) !
-        // real_dests=dests != null ? (Vector) dests.clone() : (members != null ? new Vector(members) : null);
-        if(dests != null) {
-            real_dests=(Vector)dests.clone();
-            real_dests.retainAll(this.members);
-        }
-        else {
-            synchronized(members) {
-                real_dests=new Vector(members);
-            }
-        }
-
-        // if local delivery is off, then we should not wait for the message from the local member.
-        // therefore remove it from the membership
-        tmp=channel;
-        if(tmp == null) {
-            if(adapter != null && adapter.getTransport() instanceof Channel) {
-                tmp=(Channel) adapter.getTransport();
-            }
-        }
-
-        if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(Boolean.FALSE)) {
-            if(local_addr == null) {
-                local_addr=tmp.getAddress();
-            }
-            if(local_addr != null) {
-                real_dests.removeElement(local_addr);
-            }
-        }
-
-        // don't even send the message if the destination list is empty
-        if(log.isTraceEnabled())
-            log.trace("real_dests=" + real_dests);
-
-        if(real_dests.isEmpty()) {
-            if(log.isTraceEnabled())
-                log.trace("destination list is empty, won't send message");
-            return new RspList(); // return empty response list
-        }
-
-        _req=new GroupRequest(msg, corr, real_dests, mode, timeout, 0);
-        _req.setCaller(this.local_addr);
-        _req.setResponseFilter(filter);
-        try {
-            _req.execute(use_anycasting);
-        }
-        catch(Exception ex) {
-            throw new RuntimeException("failed executing request " + _req, ex);
-        }
-
-        return _req.getResults();
+        RequestOptions opts=new RequestOptions(mode, timeout, use_anycasting, filter);
+        return castMessage(dests, msg, opts);
     }
-
-
-    public Future<RspList> castMessageWithFuture(final Vector dests, Message msg, int mode, long timeout, boolean use_anycasting,
-                                                 RspFilter filter) {
-        GroupRequest _req;
-        Vector real_dests;
-        Channel tmp;
-
-        // we need to clone because we don't want to modify the original
-        // (we remove ourselves if LOCAL is false, see below) !
-        // real_dests=dests != null ? (Vector) dests.clone() : (members != null ? new Vector(members) : null);
-        if(dests != null) {
-            real_dests=(Vector)dests.clone();
-            real_dests.retainAll(this.members);
-        }
-        else {
-            synchronized(members) {
-                real_dests=new Vector(members);
-            }
-        }
-
-        // if local delivery is off, then we should not wait for the message from the local member.
-        // therefore remove it from the membership
-        tmp=channel;
-        if(tmp == null) {
-            if(adapter != null && adapter.getTransport() instanceof Channel) {
-                tmp=(Channel) adapter.getTransport();
-            }
-        }
-
-        if(tmp != null && tmp.getOpt(Channel.LOCAL).equals(Boolean.FALSE)) {
-            if(local_addr == null) {
-                local_addr=tmp.getAddress();
-            }
-            if(local_addr != null) {
-                real_dests.removeElement(local_addr);
-            }
-        }
-
-        // don't even send the message if the destination list is empty
-        if(log.isTraceEnabled())
-            log.trace("real_dests=" + real_dests);
-
-        if(real_dests.isEmpty()) {
-            if(log.isTraceEnabled())
-                log.trace("destination list is empty, won't send message");
-            return new NullFuture(); // return empty response list
-        }
-
-        _req=new GroupRequest(msg, corr, real_dests, mode, timeout, 0);
-        _req.setCaller(this.local_addr);
-        _req.setResponseFilter(filter);
-        try {
-            _req.execute(use_anycasting, false);
-            return _req;
-        }
-        catch(Exception ex) {
-            throw new RuntimeException("failed executing request " + _req, ex);
-        }
-    }
-
-
 
     /**
-     * Multicast a message request to all members in <code>dests</code> and receive responses via the RspCollector
-     * interface. When done receiving the required number of responses, the caller has to call done(req_id) on the
-     * underlyinh RequestCorrelator, so that the resources allocated to that request can be freed.
-     *
-     * @param dests  The list of members from which to receive responses. Null means all members
-     * @param req_id The ID of the request. Used by the underlying RequestCorrelator to correlate responses with
-     *               requests
-     * @param msg    The request to be sent
-     * @param coll   The sender needs to provide this interface to collect responses. Call will return immediately if
-     *               this is null
+     * Sends a message to the members listed in dests. If dests is null, the message is sent to all current group
+     * members.
+     * @param dests A list of group members. The message is sent to all members of the current group if null
+     * @param msg The message to be sent
+     * @param options A set of options that govern the call. See {@link org.jgroups.blocks.RequestOptions} for details
+     * @return
+     * @since 2.9
      */
-    public void castMessage(final Vector dests, long req_id, Message msg, RspCollector coll) {
-        Vector real_dests;
-        Channel tmp;
+    public RspList castMessage(final Collection<Address> dests, Message msg, RequestOptions options) {
+        GroupRequest req=cast(dests, msg, options, true);
+        return req != null? req.getResults() : RspList.EMPTY_RSP_LIST;
+    }
 
-        if(msg == null) {
-            if(log.isErrorEnabled())
-                log.error("request is null");
-            return;
-        }
+    @Deprecated
+    public NotifyingFuture<RspList> castMessageWithFuture(final Vector dests, Message msg, int mode, long timeout, boolean use_anycasting,
+                                                          RspFilter filter) {
+        return castMessageWithFuture(dests, msg, new RequestOptions(mode, timeout, use_anycasting, filter));
+    }
 
-        if(coll == null) {
-            if(log.isErrorEnabled())
-                log.error("response collector is null (must be non-null)");
-            return;
-        }
+    public NotifyingFuture<RspList> castMessageWithFuture(final Collection<Address> dests, Message msg, RequestOptions options) {
+        GroupRequest req=cast(dests, msg, options, false);
+        return req != null? req : new NullFuture(RspList.EMPTY_RSP_LIST);
+    }
+
+    protected GroupRequest cast(final Collection<Address> dests, Message msg, RequestOptions options, boolean block_for_results) {
+        List<Address> real_dests;
 
         // we need to clone because we don't want to modify the original
         // (we remove ourselves if LOCAL is false, see below) !
-        //real_dests=dests != null ? (Vector) dests.clone() : (Vector) members.clone();
+        // real_dests=dests != null ? (Vector) dests.clone() : (members != null ? new Vector(members) : null);
         if(dests != null) {
-            real_dests=(Vector)dests.clone();
+            real_dests=new ArrayList<Address>(dests);
             real_dests.retainAll(this.members);
         }
         else {
             synchronized(members) {
-                real_dests=new Vector(members);
+                real_dests=new ArrayList(members);
             }
         }
 
         // if local delivery is off, then we should not wait for the message from the local member.
         // therefore remove it from the membership
-        tmp=channel;
+        Channel tmp=channel;
         if(tmp == null) {
             if(adapter != null && adapter.getTransport() instanceof Channel) {
                 tmp=(Channel) adapter.getTransport();
@@ -577,24 +497,41 @@ public class MessageDispatcher implements RequestHandler {
                 local_addr=tmp.getAddress();
             }
             if(local_addr != null) {
-                real_dests.removeElement(local_addr);
+                real_dests.remove(local_addr);
             }
         }
 
-        // don't even send the message if the destination list is empty
-        if(real_dests.isEmpty()) {
-            if(log.isDebugEnabled())
-                log.debug("destination list is empty, won't send message");
-            return;
+        if(options != null && options.hasExclusionList()) {
+            Collection<Address> exclusion_list=options.getExclusionList();
+            real_dests.removeAll(exclusion_list);
         }
 
-        try {
-            corr.sendRequest(req_id, real_dests, msg, coll);
+        // don't even send the message if the destination list is empty
+        if(log.isTraceEnabled())
+            log.trace("real_dests=" + real_dests);
+
+        if(real_dests.isEmpty()) {
+            if(log.isTraceEnabled())
+                log.trace("destination list is empty, won't send message");
+            return null;
         }
-        catch(Exception e) {
-            throw new RuntimeException("failure sending request " + req_id + " to " + real_dests, e);
+
+        GroupRequest req=new GroupRequest(msg, corr, real_dests, options);
+        if(options != null) {
+            req.setResponseFilter(options.getRspFilter());
+            req.setAnycasting(options.getAnycasting());
+        }
+        req.setBlockForResults(block_for_results);
+
+        try {
+            req.execute();
+            return req;
+        }
+        catch(Exception ex) {
+            throw new RuntimeException("failed executing request " + req, ex);
         }
     }
+
 
 
     public void done(long req_id) {
@@ -605,79 +542,64 @@ public class MessageDispatcher implements RequestHandler {
     /**
      * Sends a message to a single member (destination = msg.dest) and returns the response. The message's destination
      * must be non-zero !
+     * @deprecated Use {@link #sendMessage(org.jgroups.Message, RequestOptions)} instead
      */
+    @Deprecated
     public Object sendMessage(Message msg, int mode, long timeout) throws TimeoutException, SuspectedException {
-        Vector mbrs=new Vector();
-        RspList rsp_list;
-        Object dest=msg.getDest();
-        Rsp rsp;
-        GroupRequest _req;
+        return sendMessage(msg, new RequestOptions(mode, timeout, false, null));
+    }
 
+
+    public Object sendMessage(Message msg, RequestOptions opts) throws TimeoutException, SuspectedException {
+        Address dest=msg.getDest();
         if(dest == null) {
             if(log.isErrorEnabled())
                 log.error("the message's destination is null, cannot send message");
             return null;
         }
 
-        mbrs.addElement(dest);   // dummy membership (of destination address)
-
-        _req=new GroupRequest(msg, corr, mbrs, mode, timeout, 0);
-        _req.setCaller(local_addr);
+        UnicastRequest req=new UnicastRequest(msg, corr, dest, opts);
         try {
-            _req.execute();
+            req.execute();
         }
         catch(Exception t) {
-            throw new RuntimeException("failed executing request " + _req, t);
+            throw new RuntimeException("failed executing request " + req, t);
         }
 
-        if(mode == GroupRequest.GET_NONE) {
+        if(opts.getMode() == Request.GET_NONE)
             return null;
-        }
 
-        rsp_list=_req.getResults();
-
-        if(rsp_list.isEmpty()) {
-            if(log.isWarnEnabled())
-                log.warn(" response list is empty");
-            return null;
-        }
-        if(rsp_list.size() > 1) {
-            if(log.isWarnEnabled())
-                log.warn("response list contains more that 1 response; returning first response !");
-        }
-        rsp=(Rsp)rsp_list.elementAt(0);
-        if(rsp.wasSuspected()) {
+        Rsp rsp=req.getResult();
+        if(rsp.wasSuspected())
             throw new SuspectedException(dest);
-        }
-        if(!rsp.wasReceived()) {
+        if(!rsp.wasReceived())
             throw new TimeoutException("timeout sending message to " + dest);
-        }
         return rsp.getValue();
     }
 
-    public <T> Future<T> sendMessageWithFuture(Message msg, int mode, long timeout) throws TimeoutException, SuspectedException {
-        Vector mbrs=new Vector();
-        Object dest=msg.getDest();
-        GroupRequest _req;
+    @Deprecated
+    public <T> NotifyingFuture<T> sendMessageWithFuture(Message msg, int mode, long timeout) throws TimeoutException, SuspectedException {
+        return sendMessageWithFuture(msg, new RequestOptions(mode, timeout, false, null));
+    }
 
+    public <T> NotifyingFuture<T> sendMessageWithFuture(Message msg, RequestOptions options) throws TimeoutException, SuspectedException {
+        Address dest=msg.getDest();
         if(dest == null) {
             if(log.isErrorEnabled())
                 log.error("the message's destination is null, cannot send message");
             return null;
         }
 
-        mbrs.addElement(dest);   // dummy membership (of destination address)
-
-        _req=new GroupRequest(msg, corr, mbrs, mode, timeout, 0);
-        _req.setCaller(local_addr);
+        UnicastRequest req=new UnicastRequest(msg, corr, dest, options);
+        req.setBlockForResults(false);
         try {
-            _req.execute(false, false);
-            if(mode == GroupRequest.GET_NONE)
-                return new NullFuture();
-            return new SingleFuture<T>(_req);
+            req.execute();
+            if(options.getMode() == Request.GET_NONE)
+                return new NullFuture(null);
+            return req;
         }
         catch(Exception t) {
-            throw new RuntimeException("failed executing request " + _req, t);
+            throw new RuntimeException("failed executing request " + req, t);
         }
     }
 
@@ -861,9 +783,6 @@ public class MessageDispatcher implements RequestHandler {
 
         public Object down(Event evt) {
             if(channel != null) {
-                // Reverted, revisit in 2.9 (https://jira.jboss.org/jira/browse/JGRP-1082)
-                // if(!channel.isOpen() || !channel.isConnected())
-                //    throw new RuntimeException("channel is closed or not connected");
                 return channel.downcall(evt);
             }
             else
@@ -878,7 +797,7 @@ public class MessageDispatcher implements RequestHandler {
 
     }
 
-
+    @Deprecated
     class TransportAdapter implements Transport {
 
         public void send(Message msg) throws Exception {
@@ -913,7 +832,7 @@ public class MessageDispatcher implements RequestHandler {
         }
     }
 
-
+    @Deprecated
     class PullPushHandler implements ExtendedMessageListener, MembershipListener {
 
 

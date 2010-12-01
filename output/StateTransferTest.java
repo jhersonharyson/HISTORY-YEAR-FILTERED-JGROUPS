@@ -1,9 +1,6 @@
 package org.jgroups.tests;
 
-import org.jgroups.Channel;
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
+import org.jgroups.*;
 import org.jgroups.util.Util;
 import org.testng.annotations.Test;
 
@@ -18,28 +15,29 @@ import java.util.concurrent.TimeUnit;
 /**
  * Tests correct state transfer while other members continue sending messages to the group
  * @author Bela Ban
- * @version $Id: StateTransferTest.java,v 1.35 2009/10/01 21:09:55 vlada Exp $
  */
-@Test(groups=Global.STACK_DEPENDENT,sequential=false)
+@Test(groups=Global.STACK_DEPENDENT,sequential=true)
 public class StateTransferTest extends ChannelTestBase {
     static final int MSG_SEND_COUNT=5000;
     static final String[] names= { "A", "B", "C", "D"};
     static final int APP_COUNT=names.length;
 
-    @Test
+    
     public void testStateTransferFromSelfWithRegularChannel() throws Exception {
         Channel ch=createChannel(true);
         ch.connect("StateTransferTest");
         try {
-            boolean rc=ch.getState(null, 2000);
-            assert !rc : "getState() on singleton should return false";
+            Address self=ch.getAddress();
+            assert self != null;
+            boolean rc=ch.getState(self, 20000);
+            assert !rc : "getState() on self should return false";
         }
         finally {
             ch.close();
         }
     }
 
-    @Test
+
     public void testStateTransferWhileSending() throws Exception {
 
         StateTransferApplication[] apps=new StateTransferApplication[APP_COUNT];
@@ -189,7 +187,6 @@ public class StateTransferTest extends ChannelTestBase {
                 catch(Exception e) {
                     e.printStackTrace();
                 }
-
             }
         }
 

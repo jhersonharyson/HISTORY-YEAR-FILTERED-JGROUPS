@@ -3,12 +3,13 @@ package org.jgroups.tests;
 
 import org.jgroups.*;
 import org.jgroups.protocols.DUPL;
+import org.jgroups.protocols.UNICAST2;
 import org.jgroups.protocols.pbcast.NAKACK;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Tuple;
 import org.jgroups.util.Util;
-import org.testng.annotations.AfterClass;
+import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -24,7 +25,6 @@ import java.util.concurrent.ConcurrentMap;
  * unicast, (2) multicast, (3) regular and (4) OOB messages. The receiver(s) then check for the presence of duplicate
  * messages. 
  * @author Bela Ban
- * @version $Id: DuplicateTest.java,v 1.16 2009/11/23 10:17:15 belaban Exp $
  */
 @Test(groups=Global.STACK_DEPENDENT,sequential=true)
 public class DuplicateTest extends ChannelTestBase {
@@ -49,8 +49,9 @@ public class DuplicateTest extends ChannelTestBase {
         c3.setReceiver(r3);
     }
 
-    @AfterClass
+    @AfterMethod
     void tearDown() throws Exception {
+        removeDUPL(c3, c2, c1);
         Util.close(c3, c2, c1);
     }
 
@@ -58,7 +59,7 @@ public class DuplicateTest extends ChannelTestBase {
 
     public void testRegularUnicastsToSelf() throws Exception {
         send(c1, c1.getAddress(), false, 10);
-        sendStableMessages(c1,c2, c3);
+        sendStableMessages(c1, c2, c3);
         check(r1, 1, false, new Tuple<Address,Integer>(a1, 10));
     }
 
@@ -76,6 +77,7 @@ public class DuplicateTest extends ChannelTestBase {
         check(r3, 1, false, new Tuple<Address,Integer>(a1, 10));
     }
 
+    @Test(invocationCount=10)
     public void testOOBUnicastsToOthers() throws Exception {
         send(c1, c2.getAddress(), true, 10);
         send(c1, c3.getAddress(), true, 10);
@@ -164,6 +166,25 @@ public class DuplicateTest extends ChannelTestBase {
         }
     }
 
+    protected static void removeDUPL(JChannel ... channels) {
+        for(JChannel ch: channels) {
+            DUPL dupl=(DUPL)ch.getProtocolStack().findProtocol(DUPL.class);
+            if(dupl != null) {
+                dupl.setCopyMulticastMsgs(false);
+                dupl.setCopyUnicastMsgs(false);
+            }
+        }
+    }
+
+
+    private static void sendUnicastStableMessages(JChannel ... channels) {
+        for(JChannel ch: channels) {
+            UNICAST2 unicast=(UNICAST2)ch.getProtocolStack().findProtocol(UNICAST2.class);
+            if(unicast != null)
+                unicast.sendStableMessages();
+        }
+    }
+
 
     private void createChannels(boolean copy_multicasts, boolean copy_unicasts, int num_outgoing_copies, int num_incoming_copies) throws Exception {
         c1=createChannel(true, 3);
@@ -186,10 +207,9 @@ public class DuplicateTest extends ChannelTestBase {
         Map<Address, Collection<Long>> msgs=receiver.getMsgs();
 
         for(int i=0; i < 10; i++) {
-            if(msgs.size() == expected_size)
+            if(msgs.size() >= expected_size)
                 break;
             Util.sleep(1000);
-            System.out.println("expected size=" + expected_size + ", actual size=" + msgs.size());
         }
         assert msgs.size() == expected_size : "expected size=" + expected_size + ", msgs: " + msgs.keySet();
 
@@ -201,11 +221,10 @@ public class DuplicateTest extends ChannelTestBase {
 
             int expected_values=tuple.getVal2();
             for(int i=0; i < 20; i++) {
-                if(list.size() == expected_values)
+                if(list.size() >= expected_values)
                     break;
                 Util.sleep(1000);
                 sendStableMessages(c1,c2,c3);
-                System.out.println("expected values=" + expected_values +", actual size=" + list.size());
             }
 
             System.out.println("[" + receiver.getName() + "]: " + addr + ": " + list);

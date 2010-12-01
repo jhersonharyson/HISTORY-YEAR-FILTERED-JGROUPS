@@ -39,7 +39,6 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  * 
  * @author Bela Ban
- * @version $Id: Discovery.java,v 1.70 2009/12/11 12:58:38 belaban Exp $
  */
 @MBean
 public abstract class Discovery extends Protocol {   
@@ -67,6 +66,10 @@ public abstract class Discovery extends Protocol {
             "discovery request, or not. Default is false, except for TCPPING")
     boolean return_entire_cache=false;
 
+    @Property(description="Only members with a rank <= max_rank will send a discovery response. 1 means only the " +
+            "coordinator will reply. 0 disables this; everyone replies. JIRA: https://jira.jboss.org/browse/JGRP-1181")
+    int max_rank=0;
+
     
     /* ---------------------------------------------   JMX      ------------------------------------------------------ */
 
@@ -77,6 +80,9 @@ public abstract class Discovery extends Protocol {
     /** The largest cluster size foudn so far (gets reset on stop()) */
     @ManagedAttribute
     private volatile int max_found_members=0;
+
+    @ManagedAttribute
+    protected int rank=0;
 
     
     /* --------------------------------------------- Fields ------------------------------------------------------ */
@@ -97,6 +103,8 @@ public abstract class Discovery extends Protocol {
         timer=getTransport().getTimer();
         if(timer == null)
             throw new Exception("timer cannot be retrieved from protocol stack");
+        if(max_rank > 0)
+            return_entire_cache=true;
     }
 
 
@@ -107,6 +115,10 @@ public abstract class Discovery extends Protocol {
     }
 
     public void handleConnect() {
+    }
+
+    public void discoveryRequestReceived(Address sender, String logical_name, Collection<PhysicalAddress> physical_addrs) {
+        
     }
 
     public long getTimeout() {
@@ -142,8 +154,10 @@ public abstract class Discovery extends Protocol {
 
 
     public Vector<Integer> providedUpServices() {
-        Vector<Integer> ret=new Vector<Integer>(1);
-        ret.addElement(new Integer(Event.FIND_INITIAL_MBRS));
+        Vector<Integer> ret=new Vector<Integer>(3);
+        ret.addElement(Event.FIND_INITIAL_MBRS);
+        ret.addElement(Event.FIND_ALL_MBRS);
+        ret.addElement(Event.GET_PHYSICAL_ADDRESS);
         return ret;
     }
     
@@ -188,7 +202,7 @@ public abstract class Discovery extends Protocol {
     }
 
     public List<PingData> findAllMembers(Promise<JoinRsp> promise) {
-        int num_expected_mbrs=Math.max(max_found_members, Math.max(num_initial_members, view.size()));
+        int num_expected_mbrs=Math.max(max_found_members, Math.max(num_initial_members, view != null? view.size() : num_initial_members));
         max_found_members=Math.max(max_found_members, num_expected_mbrs);
         return findInitialMembers(promise, num_expected_mbrs, false, true);
     }
@@ -272,7 +286,7 @@ public abstract class Discovery extends Protocol {
 
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                PingHeader hdr=(PingHeader)msg.getHeader(getName());
+                PingHeader hdr=(PingHeader)msg.getHeader(this.id);
                 if(hdr == null)
                     return up_prot.up(evt);
 
@@ -282,6 +296,9 @@ public abstract class Discovery extends Protocol {
                 switch(hdr.type) {
 
                     case PingHeader.GET_MBRS_REQ:   // return Rsp(local_addr, coord)
+                        if(max_rank > 0 && rank > 0 && rank > max_rank) // https://jira.jboss.org/browse/JGRP-1181
+                            return null;
+
                         if(group_addr == null || hdr.cluster_name == null) {
                             if(log.isWarnEnabled())
                                 log.warn("group_addr (" + group_addr + ") or cluster_name of header (" + hdr.cluster_name
@@ -307,7 +324,8 @@ public abstract class Discovery extends Protocol {
                             if(logical_addr != null && physical_addr != null)
                                 down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<Address,PhysicalAddress>(logical_addr, physical_addr)));
                             if(logical_addr != null && data.getLogicalName() != null)
-                                UUID.add((UUID)logical_addr, data.getLogicalName());
+                                UUID.add(logical_addr, data.getLogicalName());
+                            discoveryRequestReceived(msg.getSrc(), data.getLogicalName(), physical_addrs);
                         }
 
                         if(return_entire_cache && !hdr.return_view_only) {
@@ -420,6 +438,22 @@ public abstract class Discovery extends Protocol {
                         members.addAll(tmp);
                     }
                 }
+                rank=Util.getRank(view, local_addr);
+                if(ergonomics) {
+                    int size=view.size();
+                    if(size <= Global.SMALL_CLUSTER_SIZE) {
+                        max_rank=0;
+                        return_entire_cache=false;
+                    }
+                    else if(size <= Global.NORMAL_CLUSTER_SIZE) {
+                        max_rank=size / 5;
+                        return_entire_cache=true;
+                    }
+                    else {
+                        max_rank=Math.min(size / 5, 10);
+                        return_entire_cache=true;
+                    }
+                }
                 return down_prot.down(evt);
 
             case Event.BECOME_SERVER: // called after client has joined and is fully working group member
@@ -466,7 +500,7 @@ public abstract class Discovery extends Protocol {
         Message rsp_msg=new Message(sender, null, null);
         rsp_msg.setFlag(Message.OOB);
         PingHeader rsp_hdr=new PingHeader(PingHeader.GET_MBRS_RSP, ping_rsp);
-        rsp_msg.putHeader(getName(), rsp_hdr);
+        rsp_msg.putHeader(this.id, rsp_hdr);
         if(log.isTraceEnabled())
             log.trace("received GET_MBRS_REQ from " + sender + ", sending response " + rsp_hdr);
         down_prot.down(new Event(Event.MSG, rsp_msg));
@@ -487,10 +521,10 @@ public abstract class Discovery extends Protocol {
                             sendGetMembersRequest(cluster_name, promise, return_views_only);
                         }
                         catch(InterruptedIOException ie) {
-                            if(log.isWarnEnabled()){
-                                log.warn("Discovery request for cluster " + cluster_name + " interrupted");
-                            }
-                            Thread.currentThread().interrupt();
+                            ;
+                        }
+                        catch(InterruptedException ex) {
+                            ;
                         }
                         catch(Throwable ex) {
                             if(log.isErrorEnabled())
@@ -512,7 +546,7 @@ public abstract class Discovery extends Protocol {
 
     protected static class Responses {
         final Promise<JoinRsp>  promise;
-        final Set<PingData>     ping_rsps=new HashSet<PingData>();
+        final List<PingData>    ping_rsps=new ArrayList<PingData>();
         final int               num_expected_rsps;
         final int               num_expected_srv_rsps;
         final boolean           break_on_coord_rsp;
@@ -535,8 +569,21 @@ public abstract class Discovery extends Protocol {
             try {
                 if(overwrite)
                     ping_rsps.remove(rsp);
-                if(ping_rsps.add(rsp)) { // only signal if the response was added
+
+                // https://jira.jboss.org/jira/browse/JGRP-1179
+                int index=ping_rsps.indexOf(rsp);
+                if(index == -1) {
+                    ping_rsps.add(rsp);
                     promise.getCond().signalAll();
+                }
+                else if(rsp.isCoord()) {
+                    PingData pr=ping_rsps.get(index);
+
+                    // Check if the already existing element is not server
+                    if(!pr.isCoord()) {
+                        ping_rsps.set(index, rsp);
+                        promise.getCond().signalAll();
+                    }
                 }
             }
             finally {

@@ -2,6 +2,7 @@ package org.jgroups.tests;
 
 import org.jgroups.*;
 import org.jgroups.protocols.DISCARD;
+import org.jgroups.protocols.pbcast.NAKACK;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Util;
 import org.testng.Assert;
@@ -9,17 +10,11 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
- * Tests the FLUSH protocol, requires flush-udp.xml in ./conf to be present and
- * configured to use FLUSH
- * 
+ * Various tests for the FLUSH protocol
  * @author Bela Ban
- * @version $Id: ReconciliationTest.java,v 1.24 2009/10/14 09:41:57 belaban Exp $
  */
 @Test(groups=Global.FLUSH,sequential=true)
 public class ReconciliationTest extends ChannelTestBase {
@@ -128,7 +123,18 @@ public class ReconciliationTest extends ChannelTestBase {
         reconciliationHelper(apps, t);
     }
 
-    private void reconciliationHelper(String[] names, FlushTrigger ft) throws Exception {
+
+    /**
+     * Tests reconciliation. Creates N channels, based on 'names'. Say we have A, B and C. Then we have the second but
+     * last node (B) discard all messages from the last node (C). Then the last node (C) multicasts 5 messages. We check
+     * that the 5 messages have been received correctly by all nodes but the second-but-last node (B). Then we remove
+     * DISCARD from B and trigger a manual flush. After the flush, B should also have received the 5 messages sent
+     * by C.
+     * @param names
+     * @param ft
+     * @throws Exception
+     */
+    protected void reconciliationHelper(String[] names, FlushTrigger ft) throws Exception {
 
         // create channels and setup receivers
         int channelCount=names.length;
@@ -136,10 +142,12 @@ public class ReconciliationTest extends ChannelTestBase {
         receivers=new ArrayList<MyReceiver>(names.length);
         for(int i=0;i < channelCount;i++) {
             JChannel channel;
-            if(i == 0)
-                channel=createChannel(true, names.length+2);
+            if(i == 0) {
+                channel=createChannel(true, names.length+2, names[i]);
+                modifyNAKACK(channel);
+            }
             else
-                channel=createChannel(channels.get(0));
+                channel=createChannel(channels.get(0), names[i]);
             MyReceiver r=new MyReceiver(channel, names[i]);
             receivers.add(r);
             channels.add(channel);
@@ -147,9 +155,15 @@ public class ReconciliationTest extends ChannelTestBase {
             channel.connect("ReconciliationTest");
             Util.sleep(250);
         }
+
+        View view=channels.get(channels.size() -1).getView();
+        System.out.println("view: " + view);
+        assert view.size() == channels.size();
+
         JChannel last=channels.get(channels.size() - 1);
         JChannel nextToLast=channels.get(channels.size() - 2);
 
+        System.out.println(nextToLast.getAddress() + " is now discarding messages from " + last.getAddress());
         insertDISCARD(nextToLast, last.getAddress());
 
         String lastsName=names[names.length - 1];
@@ -157,15 +171,11 @@ public class ReconciliationTest extends ChannelTestBase {
         printDigests(channels, "\nDigests before " + lastsName + " sends any messages:");
 
         // now last sends 5 messages:
-        log.info("\n" + lastsName
-                 + " sending 5 messages;"
-                 + nextToLastName
-                 + " will ignore them, but others will receive them");
-        for(int i=1;i <= 5;i++) {
+        System.out.println("\n" + lastsName + " sending 5 messages; " + nextToLastName + " will ignore them, but others will receive them");
+        for(int i=1;i <= 5;i++)
             last.send(null, null, new Integer(i));
-        }
-        Util.sleep(1000); // until al messages have been received, this is
-        // asynchronous so we need to wait a bit
+
+        Util.sleep(1000); // until al messages have been received, this is asynchronous so we need to wait a bit
 
         printDigests(channels, "\nDigests after " + lastsName + " sent messages:");
 
@@ -176,14 +186,14 @@ public class ReconciliationTest extends ChannelTestBase {
         Map<Address,List<Integer>> map=lastReceiver.getMsgs();
         Assert.assertEquals(map.size(), 1, "we should have only 1 sender, namely C at this time");
         List<Integer> list=map.get(last.getAddress());
-        log.info(lastsName + ": messages received from " + lastsName + ",list=" + list);
+        System.out.println("\n" + lastsName + ": messages received from " + lastsName + ": " + list);
         Assert.assertEquals(list.size(), 5, "correct msgs: " + list);
 
         // check nextToLast (should have received none of last messages)
         map=nextToLastReceiver.getMsgs();
         Assert.assertEquals(map.size(), 0, "we should have no sender at this time");
         list=map.get(last.getAddress());
-        log.info(nextToLastName + ": messages received from " + lastsName + " : " + list);
+        System.out.println(nextToLastName + ": messages received from " + lastsName + ": " + list);
         assert list == null;
 
         List<MyReceiver> otherReceivers=receivers.subList(0, receivers.size() - 2);
@@ -193,7 +203,7 @@ public class ReconciliationTest extends ChannelTestBase {
             map=receiver.getMsgs();
             Assert.assertEquals(map.size(), 1, "we should have only 1 sender");
             list=map.get(last.getAddress());
-            log.info(receiver.name + " messages received from " + lastsName + ":" + list);
+            System.out.println(receiver.name + ": messages received from " + lastsName + ": " + list);
             Assert.assertEquals(list.size(), 5, "correct msgs" + list);
         }
 
@@ -202,30 +212,38 @@ public class ReconciliationTest extends ChannelTestBase {
         Address address=last.getAddress();
         ft.triggerFlush();
 
-        int cnt=1000;
+        int cnt=20;
         View v;
         while((v=channels.get(0).getView()) != null && cnt > 0) {
             cnt--;
             if(v.size() == channels.size())
                 break;
-            Util.sleep(500);
+            Util.sleep(1000);
         }
-
-        printDigests(channels, "");
+        assert channels.get(0).getView().size() == channels.size();
+        printDigests(channels, "\nDigests after reconciliation (B should have received the 5 messages from B now):");
 
         // check that member with discard (should have received all missing
         // messages
         map=nextToLastReceiver.getMsgs();
         Assert.assertEquals(map.size(), 1, "we should have 1 sender at this time");
         list=map.get(address);
-        log.info(nextToLastName + ": messages received from " + lastsName + " : " + list);
+        System.out.println("\n" + nextToLastName + ": messages received from " + lastsName + " : " + list);
         Assert.assertEquals(5, list.size());
     }
 
-    private void printDigests(List<JChannel> channels, String message) {
-        log.info(message);
+    /** Sets discard_delivered_msgs to false */
+    protected void modifyNAKACK(JChannel ch) {
+        if(ch == null) return;
+        NAKACK nakack=(NAKACK)ch.getProtocolStack().findProtocol(NAKACK.class);
+        if(nakack != null)
+            nakack.setDiscardDeliveredMsgs(false);
+    }
+
+    private static void printDigests(List<JChannel> channels, String message) {
+        System.out.println(message);
         for(JChannel channel:channels) {
-            log.info(channel.downcall(Event.GET_DIGEST_EVT).toString());
+            System.out.println("[" + channel.getAddress() + "] " + channel.downcall(Event.GET_DIGEST_EVT).toString());
         }
     }
 
@@ -281,12 +299,9 @@ public class ReconciliationTest extends ChannelTestBase {
                                + ": "
                                + msg.getObject());
         }
-
-        public void viewAccepted(View new_view) {
-            log.debug("[" + name + " / " + channel.getLocalAddress() + "]: " + new_view);
-        }
     }
 
+    // @Test(invocationCount=10)
     public void testVirtualSynchrony() throws Exception {
         JChannel c1 = createChannel(true,2);
         Cache cache_1 = new Cache(c1, "cache-1");
@@ -301,27 +316,24 @@ public class ReconciliationTest extends ChannelTestBase {
         flush(c1, 5000); // flush all pending message out of the system so
         // everyone receives them
 
-        for(int i = 1;i <= 20;i++){
-            if(i % 2 == 0){
-                cache_1.put("key-" + i, Boolean.TRUE); // even numbers
-            }else{
-                cache_2.put("key-" + i, Boolean.TRUE); // odd numbers
-            }
+        for(int i = 1;i <= 20;i++) {
+            if(i % 2 == 0)
+                cache_1.put(i, true); // even numbers
+            else
+                cache_2.put(i, true); // odd numbers
         }
 
         flush(c1, 5000);
-        log.debug("cache_1 (" + cache_1.size()
-                           + " elements): "
-                           + cache_1
-                           + "\ncache_2 ("
-                           + cache_2.size()
-                           + " elements): "
-                           + cache_2);
-        Assert.assertEquals(cache_1.size(), cache_2.size());
-        Assert.assertEquals(20, cache_1.size());
-
-        Util.close(c1,c2);
-
+        System.out.println("cache_1 (" + cache_1.size()
+                             + " elements): "
+                             + cache_1
+                             + "\ncache_2 ("
+                             + cache_2.size()
+                             + " elements): "
+                             + cache_2);
+        Assert.assertEquals(cache_1.size(), cache_2.size(), "cache 1: " + cache_1 + "\ncache 2: " + cache_2);
+        Assert.assertEquals(20, cache_1.size(), "cache 1: " + cache_1 + "\ncache 2: " + cache_2);
+        Util.close(c2,c1);
     }
 
     private void flush(Channel channel, long timeout) {
@@ -399,6 +411,7 @@ public class ReconciliationTest extends ChannelTestBase {
             return getState();
         }
 
+        @SuppressWarnings("unchecked")
         public void setState(byte[] state) {
             Map<Object,Object> m;
             try {
@@ -443,6 +456,7 @@ public class ReconciliationTest extends ChannelTestBase {
             getState(ostream);
         }
 
+        @SuppressWarnings("unchecked")
         public void setState(InputStream istream) {
             ObjectInputStream ois=null;
             try {
@@ -483,7 +497,8 @@ public class ReconciliationTest extends ChannelTestBase {
 
         public String toString() {
             synchronized(data) {
-                return data.toString();
+                TreeMap<Object,Object> map=new TreeMap<Object,Object>(data);
+                return map.keySet().toString();
             }
         }
 

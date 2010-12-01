@@ -5,11 +5,11 @@ import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.TimeScheduler;
+import org.jgroups.util.Util;
 
-import java.util.Set;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -26,7 +26,6 @@ import java.util.concurrent.locks.ReentrantLock;
  * When an OPEN_BARRIER event is received, we simply open the barrier again and let all messages pass in the up
  * direction. This is done by releasing the WL.
  * @author Bela Ban
- * @version $Id: BARRIER.java,v 1.16 2009/12/11 12:57:28 belaban Exp $
  */
 public class BARRIER extends Protocol {
     
@@ -38,7 +37,7 @@ public class BARRIER extends Protocol {
     /** signals to waiting threads that the barrier is open again */
     Condition barrier_opened=lock.newCondition();
     Condition no_msgs_pending=lock.newCondition();
-    ConcurrentMap<Thread,Object> in_flight_threads=new ConcurrentHashMap<Thread,Object>();
+    ConcurrentMap<Thread, Object> in_flight_threads=Util.createConcurrentMap();
     Future<?> barrier_opener_future=null;
     TimeScheduler timer;
     private static final Object NULL=new Object();
@@ -120,16 +119,16 @@ public class BARRIER extends Protocol {
                     return up_prot.up(evt);
                 }
                 finally {
-                    lock.lock();
-                    try {
-                        if(in_flight_threads.remove(current_thread) == NULL &&
-                                barrier_closed.get() &&
-                                in_flight_threads.isEmpty()) {
+                    if(in_flight_threads.remove(current_thread) == NULL &&
+                            barrier_closed.get() &&
+                            in_flight_threads.isEmpty()) {
+                        lock.lock();
+                        try {
                             no_msgs_pending.signalAll();
                         }
-                    }
-                    finally {
-                        lock.unlock();
+                        finally {
+                            lock.unlock();
+                        }
                     }
                 }
             case Event.CLOSE_BARRIER:
@@ -164,13 +163,13 @@ public class BARRIER extends Protocol {
                     }
                 }
                 if(!in_flight_threads.isEmpty()) {
-                try {
+                    try {
                         no_msgs_pending.await(1000, TimeUnit.MILLISECONDS);
-                }
-                catch(InterruptedException e) {
+                    }
+                    catch(InterruptedException e) {
+                    }
                 }
             }
-        }
         }
         finally {
             for(Thread thread: threads)

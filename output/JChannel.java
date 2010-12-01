@@ -3,32 +3,35 @@ package org.jgroups;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
+import org.jgroups.blocks.MethodCall;
 import org.jgroups.conf.ConfiguratorFactory;
+import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.conf.ProtocolStackConfigurator;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.TP;
+import org.jgroups.stack.Configurator;
+import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.stack.StateTransferInfo;
-import org.jgroups.stack.Protocol;
-import org.jgroups.stack.Configurator;
 import org.jgroups.util.*;
-import org.jgroups.util.Queue;
-import org.jgroups.util.UUID;
-import org.jgroups.blocks.MethodCall;
 import org.w3c.dom.Element;
 
 import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
+import java.lang.reflect.Method;
+import java.net.DatagramSocket;
+import java.net.ServerSocket;
 import java.net.URL;
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Vector;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Exchanger;
-import java.lang.reflect.Method;
 
 
 /**
@@ -78,15 +81,12 @@ import java.lang.reflect.Method;
  * the construction of the stack will be aborted.
  *
  * @author Bela Ban
- * @version $Id: JChannel.java,v 1.235 2009/11/10 10:12:07 belaban Exp $
  */
 @MBean(description="JGroups channel")
 public class JChannel extends Channel {
 
     /** The default protocol stack used by the default constructor  */
     public static final String DEFAULT_PROTOCOL_STACK="udp.xml";
-
-    protected String properties=null;
 
     /*the address of this JChannel instance*/
     protected UUID local_addr=null;
@@ -133,7 +133,7 @@ public class JChannel extends Channel {
      */
     protected final Map<String,Object> additional_data=new HashMap<String,Object>();
     
-    protected final ConcurrentMap<String,Object> config=new ConcurrentHashMap<String,Object>();
+    protected final ConcurrentMap<String,Object> config=Util.createConcurrentMap(16);
 
     protected final Log log=LogFactory.getLog(JChannel.class);
 
@@ -148,12 +148,19 @@ public class JChannel extends Channel {
 
 
     /**
-     * Used by subclass to create a JChannel without a protocol stack, don't use as application programmer
-     * @deprecated Remove in 3.0 
+     * Creates a JChannel without a protocol stack; used for programmatic creation of channel and protocol stack
+     * @param create_protocol_stack If true, tthe default configuration will be used. If false, no protocol stack
+     * will be created
      */
-
-    protected JChannel(boolean no_op) {
-        ;
+    public JChannel(boolean create_protocol_stack) {
+        if(create_protocol_stack) {
+            try {
+                init(ConfiguratorFactory.getStackConfigurator(DEFAULT_PROTOCOL_STACK));
+            }
+            catch(ChannelException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     /**
@@ -287,15 +294,19 @@ public class JChannel extends Channel {
         receive_local_msgs=ch.receive_local_msgs;
     }
 
+
  
     /**
-     * Returns the protocol stack.
-     * Currently used by Debugger.
-     * Specific to JChannel, therefore
-     * not visible in Channel
+     * Returns the protocol stack
      */
     public ProtocolStack getProtocolStack() {
         return prot_stack;
+    }
+
+    public void setProtocolStack(ProtocolStack stack) {
+        this.prot_stack=stack;
+        if(prot_stack != null)
+            prot_stack.setChannel(this);
     }
 
     protected Log getLog() {
@@ -303,14 +314,11 @@ public class JChannel extends Channel {
     }
 
     /**
-     * Returns the protocol stack configuration in string format. An example of this property is<BR>
+     * Returns the protocol stack configuration in string format. An example of this property is<br/>
      * "UDP:PING:FD:STABLE:NAKACK:UNICAST:FRAG:FLUSH:GMS:VIEW_ENFORCER:STATE_TRANSFER:QUEUE"
      */
     public String getProperties() {
-        String retval=prot_stack != null? prot_stack.printProtocolSpec(true) : null;
-        if(retval != null)
-            properties=retval;
-        return properties;
+        return prot_stack != null? prot_stack.printProtocolSpec(true) : null;
     }
 
     public boolean statsEnabled() {
@@ -343,12 +351,13 @@ public class JChannel extends Channel {
     @ManagedAttribute
     public int getTimerThreads() {
         TimeScheduler timer=getTimer();
-        return timer != null? timer.getCorePoolSize() : -1;
+        return timer != null? timer.getMinThreads() : -1;
     }
 
+    @ManagedOperation
     public String dumpTimerQueue() {
         TimeScheduler timer=getTimer();
-        return timer != null? timer.dumpTaskQueue() : "<n/a";
+        return timer != null? timer.dumpTimerTasks() : "<n/a";
     }
 
     /**
@@ -493,7 +502,7 @@ public class JChannel extends Channel {
                                      boolean useFlushIfPresent) throws ChannelException {
 
         if(connected) {
-            if(log.isTraceEnabled()) log.trace("already connected to " + cluster_name);
+            if(log.isTraceEnabled()) log.trace("already connected to " + this.cluster_name);
             return;
         }
 
@@ -630,10 +639,11 @@ public class JChannel extends Channel {
             mq.reset();
 
             String props=getProperties();
+            List<ProtocolConfiguration> configs=Configurator.parseConfigurations(props);
 
             // new stack is created on open() - bela June 12 2003
-            prot_stack=new ProtocolStack(this, props);
-            prot_stack.setup();
+            prot_stack=new ProtocolStack(this);
+            prot_stack.setup(configs);
             closed=false;
         }
         catch(Exception e) {
@@ -684,9 +694,13 @@ public class JChannel extends Channel {
         return retval;
     }
 
+    public Map<String,Object> dumpStats(String protocol_name, List<String> attrs) {
+        return prot_stack.dumpStats(protocol_name, attrs);
+    }
+
     @ManagedOperation
     public Map<String,Object> dumpStats(String protocol_name) {
-        return prot_stack.dumpStats(protocol_name);
+        return prot_stack.dumpStats(protocol_name, null);
     }
 
     protected Map<String,Long> dumpChannelStats() {
@@ -737,6 +751,13 @@ public class JChannel extends Channel {
         send(new Message(dst, src, obj));
     }
 
+    public void send(Address dst, Address src, byte[] buf) throws ChannelNotConnectedException, ChannelClosedException {
+        send(new Message(dst, src, buf));
+    }
+
+    public void send(Address dst, Address src, byte[] buf, int offset, int length) throws ChannelNotConnectedException, ChannelClosedException {
+        send(new Message(dst, src, buf, offset, length));
+    }
 
     /**
      * Blocking receive method.
@@ -856,6 +877,10 @@ public class JChannel extends Channel {
         return name;
     }
 
+    public String getName(Address member) {
+        return member != null? UUID.get(member) : null;
+    }
+
     /**
      * Sets the logical name for the channel. The name will stay associated with this channel for the channel's
      * lifetime (until close() is called). This method should be called <em>before</em> calling connect().<br/>
@@ -928,42 +953,25 @@ public class JChannel extends Channel {
 
         switch(option) {
             case VIEW:
-                if(log.isWarnEnabled())
-                    log.warn("option VIEW has been deprecated (it is always true now); this option is ignored");
-                break;
             case SUSPECT:
-                if(log.isWarnEnabled())
-                    log.warn("option SUSPECT has been deprecated (it is always true now); this option is ignored");
+            case GET_STATE_EVENTS:
+            case AUTO_RECONNECT:
+            case AUTO_GETSTATE:
                 break;
             case BLOCK:
                 if(value instanceof Boolean)
                     receive_blocks=((Boolean)value).booleanValue();
                 else
-                if(log.isErrorEnabled()) log.error("option " + Channel.option2String(option) +
-                        " (" + value + "): value has to be Boolean");
-                break;
-
-            case GET_STATE_EVENTS:
-                if(log.isWarnEnabled())
-                    log.warn("option GET_STATE_EVENTS has been deprecated (it is always true now); this option is ignored");
+                    if(log.isErrorEnabled()) log.error("option " + Channel.option2String(option) +
+                            " (" + value + "): value has to be Boolean");
                 break;
 
             case LOCAL:
                 if(value instanceof Boolean)
                     receive_local_msgs=((Boolean)value).booleanValue();
                 else
-                if(log.isErrorEnabled()) log.error("option " + Channel.option2String(option) +
-                        " (" + value + "): value has to be Boolean");
-                break;
-
-            case AUTO_RECONNECT:
-                if(log.isWarnEnabled())
-                    log.warn("Option AUTO_RECONNECT has been deprecated and is ignored");
-                break;
-
-            case AUTO_GETSTATE:
-                if(log.isWarnEnabled())
-                    log.warn("Option AUTO_GETSTATE has been deprecated and is ignored");
+                    if(log.isErrorEnabled()) log.error("option " + Channel.option2String(option) +
+                            " (" + value + "): value has to be Boolean");
                 break;
 
             default:
@@ -1345,9 +1353,11 @@ public class JChannel extends Channel {
              */
 
                 // not good: we are only connected when we returned from connect() - bela June 22 2007
-                //            if(connected == false) {
-                //                connected=true;
-                //            }
+                // Changed: when a channel gets a view of which it is a member then it should be
+                // connected even if connect() hasn't returned yet ! (bela Noc 2010)
+                if(connected == false) {
+                    connected=true;
+                }
                 break;
 
             case Event.CONFIG:
@@ -1680,27 +1690,21 @@ public class JChannel extends Channel {
     protected final void init(ProtocolStackConfigurator configurator) throws ChannelException {
         if(log.isInfoEnabled())
             log.info("JGroups version: " + Version.description);
-        
-        // ConfiguratorFactory.substituteVariables(configurator); // replace vars with system props
-        String tmp=configurator.getProtocolStackString();
 
-        // replace vars with system props
+        List<ProtocolConfiguration> configs;
         try {
-            Collection<Configurator.ProtocolConfiguration> configs=Configurator.parseConfigurations(tmp);
-            for(Configurator.ProtocolConfiguration config: configs)
-                config.substituteVariables();
-            tmp=Configurator.printConfigurations(configs);
+            configs=configurator.getProtocolStack();
+            for(ProtocolConfiguration config: configs) 
+                config.substituteVariables();  // replace vars with system props
         }
         catch(Exception e) {
             throw new ChannelException("unable to parse the protocol configuration", e);
         }
 
-
         synchronized(Channel.class) {
-            prot_stack=new ProtocolStack(this, tmp);
+            prot_stack=new ProtocolStack(this);
             try {
-                prot_stack.setup(); // Setup protocol stack (creates protocol, calls init() on them)
-                properties=tmp;
+                prot_stack.setup(configs); // Setup protocol stack (creates protocol, calls init() on them)
             }
             catch(Throwable e) {
                 throw new ChannelException("unable to setup the protocol stack", e);
@@ -1715,10 +1719,9 @@ public class JChannel extends Channel {
             log.info("JGroups version: " + Version.description);
 
         synchronized(JChannel.class) {
-            prot_stack=new ProtocolStack(this, null);
+            prot_stack=new ProtocolStack(this);
             try {
                 prot_stack.setup(ch.getProtocolStack()); // Setup protocol stack (creates protocol, calls init() on them)
-                getProperties();
             }
             catch(Throwable e) {
                 throw new ChannelException("unable to setup the protocol stack: " + e.getMessage(), e);
@@ -1762,6 +1765,11 @@ public class JChannel extends Channel {
         catch(Throwable e) {
             throw new ChannelException("failed to start protocol stack", e);
         }
+
+        if(socket_factory != null) {
+            prot_stack.getTopProtocol().setSocketFactory(socket_factory);
+        }
+        
 
         /*create a temporary view, assume this channel is the only member and is the coordinator*/
         Vector<Address> t=new Vector<Address>(1);
@@ -2058,8 +2066,17 @@ public class JChannel extends Channel {
                     Map<String, Object> tmp_stats;
                     int index=key.indexOf("=");
                     if(index > -1) {
-                        String value=key.substring(index +1);
-                        tmp_stats=dumpStats(value);
+                        List<String> list=null;
+                        String protocol_name=key.substring(index +1);
+                        index=protocol_name.indexOf(".");
+                        if(index > -1) {
+                            String rest=protocol_name;
+                            protocol_name=protocol_name.substring(0, index);
+                            String attrs=rest.substring(index +1); // e.g. "num_sent,msgs,num_received_msgs"
+                            list=Util.parseStringList(attrs, ",");
+                        }
+
+                        tmp_stats=dumpStats(protocol_name, list);
                     }
                     else
                         tmp_stats=dumpStats();
@@ -2070,6 +2087,9 @@ public class JChannel extends Channel {
                 if(key.equals("info")) {
                     Map<String, Object> tmp_info=getInfo();
                     map.put("info", tmp_info != null? Util.mapToString(tmp_info) : "null");
+                }
+                if(key.equals("socks")) {
+                    map.put("socks", getOpenSockets());
                 }
                 if(key.startsWith("invoke") || key.startsWith("op")) {
                     int index=key.indexOf("=");
@@ -2084,7 +2104,7 @@ public class JChannel extends Channel {
                 }
             }
 
-            map.put("version", Version.description + ", cvs=\"" +  Version.cvs + "\"");
+            map.put("version", Version.description);
             if(my_view != null && !map.containsKey("view"))
                 map.put("view", my_view.toString());
             map.put("local_addr", getAddressAsString() + " [" + getAddressAsUUID() + "]");
@@ -2096,7 +2116,39 @@ public class JChannel extends Channel {
         }
 
         public String[] supportedKeys() {
-            return new String[]{"jmx", "info", "invoke", "op"};
+            return new String[]{"jmx", "info", "invoke", "op", "socks"};
+        }
+
+        String getOpenSockets() {
+            Map<Object, String> socks=getSocketFactory().getSockets();
+            TP transport=getProtocolStack().getTransport();
+            if(transport != null && transport.isSingleton()) {
+                Map<Object,String> tmp=transport.getSocketFactory().getSockets();
+                if(tmp != null)
+                    socks.putAll(tmp);
+            }
+
+            StringBuilder sb=new StringBuilder();
+            if(socks != null) {
+                for(Map.Entry<Object,String> entry: socks.entrySet()) {
+                    Object key=entry.getKey();
+                    if(key instanceof ServerSocket) {
+                        ServerSocket tmp=(ServerSocket)key;
+                        sb.append(tmp.getInetAddress()).append(":").append(tmp.getLocalPort())
+                                .append(" ").append(entry.getValue()).append(" [tcp]");
+                    }
+                    else if(key instanceof DatagramSocket) {
+                        DatagramSocket sock=(DatagramSocket)key;
+                        sb.append(sock.getLocalAddress()).append(":").append(sock.getLocalPort())
+                                .append(" ").append(entry.getValue()).append(" [udp]");
+                    }
+                    else {
+                        sb.append(key).append(" ").append(entry.getValue());
+                    }
+                    sb.append("\n");
+                }
+            }
+            return sb.toString();
         }
 
         /**

@@ -2,11 +2,11 @@ package org.jgroups.protocols.pbcast;
 
 
 import org.jgroups.*;
-import org.jgroups.logging.Log;
 import org.jgroups.annotations.*;
 import org.jgroups.conf.PropertyConverters;
-import org.jgroups.protocols.pbcast.GmsImpl.Request;
+import org.jgroups.logging.Log;
 import org.jgroups.protocols.TP;
+import org.jgroups.protocols.pbcast.GmsImpl.Request;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
 import org.jgroups.util.Queue;
@@ -24,7 +24,6 @@ import java.util.concurrent.TimeUnit;
  * sure new members don't receive any messages until they are members
  * 
  * @author Bela Ban
- * @version $Id: GMS.java,v 1.198 2009/12/15 12:30:46 belaban Exp $
  */
 @MBean(description="Group membership protocol")
 @DeprecatedProperty(names={"join_retry_timeout","digest_timeout","use_flush","flush_timeout", "merge_leader",
@@ -36,13 +35,13 @@ public class GMS extends Protocol implements TP.ProbeHandler {
 
     /* ------------------------------------------ Properties  ------------------------------------------ */
 
-    @Property(description="Join timeout. Default is 5000 msec")
+    @Property(description="Join timeout")
     long join_timeout=5000;
 
-    @Property(description="Leave timeout. Default is 5000 msec")
+    @Property(description="Leave timeout")
     long leave_timeout=5000;
     
-    @Property(description="Timeout to complete merge. Default is 10000 msec")
+    @Property(description="Timeout to complete merge")
     long merge_timeout=5000; // time to wait for all MERGE_RSPS
 
     @Property(description="Print local address of this member after connect. Default is true")
@@ -103,7 +102,7 @@ public class GMS extends Protocol implements TP.ProbeHandler {
     /* --------------------------------------------- Fields ------------------------------------------------ */
 
     @Property(converter=PropertyConverters.FlushInvoker.class,name="flush_invoker_class")
-    private Class<Callable<Boolean>> flushInvokerClass;
+    protected Class<Callable<Boolean>> flushInvokerClass;
     
     private GmsImpl impl=null;
     private final Object impl_mutex=new Object(); // synchronizes event entry into impl
@@ -448,7 +447,7 @@ public class GMS extends Protocol implements TP.ProbeHandler {
         Message view_change_msg=new Message(); // bcast to all members
         GmsHeader hdr=new GmsHeader(GmsHeader.VIEW, new_view);
         hdr.my_digest=digest;
-        view_change_msg.putHeader(name, hdr);
+        view_change_msg.putHeader(this.id, hdr);
 
         List<Address> ackMembers = new ArrayList<Address>(new_view.getMembers());
         if(newMembers != null && !newMembers.isEmpty()) {
@@ -507,7 +506,7 @@ public class GMS extends Protocol implements TP.ProbeHandler {
     public void sendJoinResponse(JoinRsp rsp, Address dest) {
         Message m=new Message(dest, null, null);        
         GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP, rsp);
-        m.putHeader(getName(), hdr);        
+        m.putHeader(this.id, hdr);
         getDownProtocol().down(new Event(Event.MSG, m));        
     }
 
@@ -690,52 +689,50 @@ public class GMS extends Protocol implements TP.ProbeHandler {
         return (Digest)down_prot.down(Event.GET_DIGEST_EVT);
     }
 
-    boolean startFlush(final View new_view) {
-        if(flushInvokerClass == null){
-	        Callable<Boolean> invoker = new Callable<Boolean>(){
-				public Boolean call() throws Exception {
-					int maxAttempts =4;
-					long randomFloor=1000L;
-					long randomCeiling=5000L;
-					
-					boolean successfulFlush=true;
-			        boolean validView=new_view != null && new_view.size() > 0;
-			        if(validView && flushProtocolInStack) {
-			        	
-			        	int attemptCount = 0;
-			            while(attemptCount < maxAttempts){
-			            	successfulFlush=(Boolean)up_prot.up(new Event(Event.SUSPEND, new ArrayList<Address>(new_view.getMembers())));
-			            	if(successfulFlush)
-			            		break;
-			            	Util.sleepRandom(randomFloor,randomCeiling);
-			            	attemptCount++;
-			            }
-			            
-			            if(successfulFlush) {
-			                if(log.isTraceEnabled())
-			                    log.trace(local_addr + ": successful GMS flush by coordinator");
-			            }
-			            else {
-                            if(log.isWarnEnabled())
-                                log.warn(local_addr + ": GMS flush by coordinator failed");
-			            }
-			        }
-			        return successfulFlush;
-				}
-	        };
-	        try {
-				return invoker.call();
-			} catch (Exception e) {
-				return false;
-			}
+    boolean startFlush(View view) {
+        return _startFlush(view, 4, 1000L, 5000L);
+    }
+
+    boolean startFlush(View view, int maxAttempts, long floor, long ceiling) {
+        return _startFlush(view, maxAttempts, floor, ceiling);
+    }
+
+    protected boolean _startFlush(final View new_view, int maxAttempts, long randomFloor, long randomCeiling) {
+        if(flushInvokerClass != null) {
+            try {
+                Callable<Boolean> invoker = flushInvokerClass.getDeclaredConstructor(View.class).newInstance(new_view);
+                return invoker.call();
+            } catch (Throwable e) {
+                return false;
+            }
         }
-        else{
-        	try {
-				Callable<Boolean> invoker = flushInvokerClass.getDeclaredConstructor(View.class).newInstance(new_view);
-				return invoker.call();
-			} catch (Exception e) {
-				return false;
-			}
+
+        try {
+            boolean successfulFlush=true;
+            boolean validView=new_view != null && new_view.size() > 0;
+            if(validView && flushProtocolInStack) {
+
+                int attemptCount = 0;
+                while(attemptCount < maxAttempts){
+                    successfulFlush=(Boolean)up_prot.up(new Event(Event.SUSPEND, new ArrayList<Address>(new_view.getMembers())));
+                    if(successfulFlush)
+                        break;
+                    Util.sleepRandom(randomFloor,randomCeiling);
+                    attemptCount++;
+                }
+
+                if(successfulFlush) {
+                    if(log.isTraceEnabled())
+                        log.trace(local_addr + ": successful GMS flush by coordinator");
+                }
+                else {
+                    if(log.isWarnEnabled())
+                        log.warn(local_addr + ": GMS flush by coordinator failed");
+                }
+            }
+            return successfulFlush;
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -761,7 +758,7 @@ public class GMS extends Protocol implements TP.ProbeHandler {
 
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                GmsHeader hdr=(GmsHeader)msg.getHeader(name);
+                GmsHeader hdr=(GmsHeader)msg.getHeader(this.id);
                 if(hdr == null)
                     break;
                 switch(hdr.type) {
@@ -855,7 +852,7 @@ public class GMS extends Protocol implements TP.ProbeHandler {
                                 rsp_hdr.my_digest=retval;
                                 Message get_digest_rsp=new Message(msg.getSrc(), null, null);
                                 get_digest_rsp.setFlag(Message.OOB);
-                                get_digest_rsp.putHeader(name, rsp_hdr);
+                                get_digest_rsp.putHeader(this.id, rsp_hdr);
                                 down_prot.down(new Event(Event.MSG, get_digest_rsp));
                             }
                         }
@@ -978,7 +975,7 @@ public class GMS extends Protocol implements TP.ProbeHandler {
         Message view_ack=new Message(dest, null, null);
         view_ack.setFlag(Message.OOB);
         GmsHeader tmphdr=new GmsHeader(GmsHeader.VIEW_ACK);
-        view_ack.putHeader(name, tmphdr);
+        view_ack.putHeader(this.id, tmphdr);
         down_prot.down(new Event(Event.MSG, view_ack));
     }
 
@@ -986,7 +983,7 @@ public class GMS extends Protocol implements TP.ProbeHandler {
 
 
 
-    public static class GmsHeader extends Header implements Streamable {
+    public static class GmsHeader extends Header {
         public static final byte JOIN_REQ=1;
         public static final byte JOIN_RSP=2;
         public static final byte LEAVE_REQ=3;
@@ -1013,7 +1010,6 @@ public class GMS extends Protocol implements TP.ProbeHandler {
         Digest my_digest=null;          // used when type=MERGE_RSP or INSTALL_MERGE_VIEW
         MergeId merge_id=null;        // used when type=MERGE_REQ or MERGE_RSP or INSTALL_MERGE_VIEW or CANCEL_MERGE
         boolean merge_rejected=false; // used when type=MERGE_RSP
-        private static final long serialVersionUID=2369798797842183276L;
 
 
         public GmsHeader() {
@@ -1067,6 +1063,14 @@ public class GMS extends Protocol implements TP.ProbeHandler {
 
         public void setMergeId(MergeId merge_id) {
             this.merge_id=merge_id;
+        }
+
+        public boolean isMergeRejected() {
+            return merge_rejected;
+        }
+
+        public void setMergeRejected(boolean merge_rejected) {
+            this.merge_rejected=merge_rejected;
         }
 
         public String toString() {
@@ -1130,32 +1134,6 @@ public class GMS extends Protocol implements TP.ProbeHandler {
                 case INSTALL_DIGEST: return "INSTALL_DIGEST";
                 default: return "<unknown>";
             }
-        }
-
-
-        public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeByte(type);
-            out.writeObject(view);
-            out.writeObject(mbr);
-            out.writeObject(mbrs);
-            out.writeObject(join_rsp);
-            out.writeObject(my_digest);
-            out.writeObject(merge_id);
-            out.writeBoolean(merge_rejected);
-            out.writeBoolean(useFlushIfPresent);
-        }
-
-        @SuppressWarnings("unchecked")
-        public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-            type=in.readByte();
-            view=(View)in.readObject();
-            mbr=(Address)in.readObject();
-            mbrs=(Collection<Address>)in.readObject();
-            join_rsp=(JoinRsp)in.readObject();
-            my_digest=(Digest)in.readObject();
-            merge_id=(MergeId)in.readObject();
-            merge_rejected=in.readBoolean();
-            useFlushIfPresent=in.readBoolean();
         }
 
 
@@ -1230,7 +1208,6 @@ public class GMS extends Protocol implements TP.ProbeHandler {
     /**
      * Class which processes JOIN, LEAVE and MERGE requests. Requests are queued and processed in FIFO order
      * @author Bela Ban
-     * @version $Id: GMS.java,v 1.198 2009/12/15 12:30:46 belaban Exp $
      */
     class ViewHandler implements Runnable {
         volatile Thread                     thread;

@@ -1,9 +1,9 @@
 package org.jgroups.blocks;
 
-import org.jgroups.logging.Log;
-import org.jgroups.logging.LogFactory;
 import org.jgroups.*;
 import org.jgroups.annotations.Unsupported;
+import org.jgroups.logging.Log;
+import org.jgroups.logging.LogFactory;
 import org.jgroups.persistence.PersistenceFactory;
 import org.jgroups.persistence.PersistenceManager;
 import org.jgroups.util.Promise;
@@ -41,7 +41,6 @@ import java.util.concurrent.CopyOnWriteArraySet;
  * into one class
  * 
  * @author Bela Ban
- * @version $Id: ReplicatedHashMap.java,v 1.21 2009/08/28 08:10:01 belaban Exp $
  */
 @Unsupported(comment="Use JBossCache instead")
 public class ReplicatedHashMap<K extends Serializable, V extends Serializable> extends
@@ -119,7 +118,7 @@ public class ReplicatedHashMap<K extends Serializable, V extends Serializable> e
      * Whether updates across the cluster should be asynchronous (default) or
      * synchronous)
      */
-    protected int update_mode=GroupRequest.GET_NONE;
+    protected int update_mode=Request.GET_NONE;
 
     /**
      * For blocking updates only: the max time to wait (0 == forever)
@@ -466,7 +465,7 @@ public class ReplicatedHashMap<K extends Serializable, V extends Serializable> e
     public void putAll(Map<? extends K,? extends V> m) {
         if(send_message) {
             try {
-                MethodCall call=new MethodCall(PUT_ALL, new Object[] { m });
+                MethodCall call=new MethodCall(PUT_ALL, m);
                 disp.callRemoteMethods(null, call, update_mode, timeout);
             }
             catch(Throwable t) {
@@ -486,7 +485,7 @@ public class ReplicatedHashMap<K extends Serializable, V extends Serializable> e
         //if true, propagate action to the group
         if(send_message) {
             try {
-                MethodCall call=new MethodCall(CLEAR, null);
+                MethodCall call=new MethodCall(CLEAR);
                 disp.callRemoteMethods(null, call, update_mode, timeout);
             }
             catch(Exception e) {
@@ -514,7 +513,7 @@ public class ReplicatedHashMap<K extends Serializable, V extends Serializable> e
 
         if(send_message) {
             try {
-                MethodCall call=new MethodCall(REMOVE, new Object[] { key });
+                MethodCall call=new MethodCall(REMOVE, key);
                 disp.callRemoteMethods(null, call, update_mode, timeout);
             }
             catch(Exception e) {
@@ -539,7 +538,7 @@ public class ReplicatedHashMap<K extends Serializable, V extends Serializable> e
 
         if(send_message) {
             try {
-                MethodCall call=new MethodCall(REMOVE_IF_EQUALS, new Object[] { key, value });
+                MethodCall call=new MethodCall(REMOVE_IF_EQUALS, key, value);
                 disp.callRemoteMethods(null, call, update_mode, timeout);
             }
             catch(Exception e) {
@@ -564,9 +563,7 @@ public class ReplicatedHashMap<K extends Serializable, V extends Serializable> e
 
         if(send_message) {
             try {
-                MethodCall call=new MethodCall(REPLACE_IF_EQUALS, new Object[] { key,
-                                                                                oldValue,
-                                                                                newValue });
+                MethodCall call=new MethodCall(REPLACE_IF_EQUALS, key, oldValue, newValue);
                 disp.callRemoteMethods(null, call, update_mode, timeout);
             }
             catch(Exception e) {
@@ -597,7 +594,7 @@ public class ReplicatedHashMap<K extends Serializable, V extends Serializable> e
 
         if(send_message) {
             try {
-                MethodCall call=new MethodCall(REPLACE_IF_EXISTS, new Object[] { key, value });
+                MethodCall call=new MethodCall(REPLACE_IF_EXISTS, key, value);
                 disp.callRemoteMethods(null, call, update_mode, timeout);
             }
             catch(Exception e) {

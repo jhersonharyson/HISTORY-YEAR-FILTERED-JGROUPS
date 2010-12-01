@@ -11,7 +11,6 @@ import java.util.Map;
 
 /**
  * @author Bela Ban
- * @version $Id: GridFilesystemTest.java,v 1.11 2009/12/30 14:43:25 belaban Exp $
  * todo: regexp for file ls, rm, down and up
  * todo: recursive up and down
  */
@@ -71,13 +70,13 @@ public class GridFilesystemTest {
         metadata.start();
 
         fs=new GridFilesystem(data, metadata, default_repl_count, default_chunk_size);
-        loop(data, metadata, fs);
+        loop(fs);
 
         data.stop();
         metadata.stop();
     }
 
-    private static void loop(ReplCache<String, byte[]> data, ReplCache<String, GridFile.Metadata> metadata, GridFilesystem fs) {
+    private static void loop(GridFilesystem fs) {
         while(true) {
             try {
                 System.out.print("> ");

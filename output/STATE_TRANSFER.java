@@ -7,9 +7,8 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.StateTransferInfo;
-import org.jgroups.util.Streamable;
-import org.jgroups.util.Util;
 import org.jgroups.util.Digest;
+import org.jgroups.util.Util;
 
 import java.io.*;
 import java.util.*;
@@ -24,7 +23,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * sets its digest to D and then returns the state to the application.
  * 
  * @author Bela Ban
- * @version $Id: STATE_TRANSFER.java,v 1.86 2009/09/06 13:51:12 belaban Exp $
  */
 @MBean(description="State transfer protocol based on byte array transfer")
 @DeprecatedProperty(names= { "use_flush", "flush_timeout" })
@@ -110,7 +108,7 @@ public class STATE_TRANSFER extends Protocol {
 
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                StateHeader hdr=(StateHeader)msg.getHeader(getName());
+                StateHeader hdr=(StateHeader)msg.getHeader(this.id);
                 if(hdr == null)
                     break;
 
@@ -182,7 +180,7 @@ public class STATE_TRANSFER extends Protocol {
                 }
                 else {
                     Message state_req=new Message(target, null, null);
-                    state_req.putHeader(getName(), new StateHeader(StateHeader.STATE_REQ,
+                    state_req.putHeader(this.id, new StateHeader(StateHeader.STATE_REQ,
                                                               local_addr,
                                                               System.currentTimeMillis(),
                                                               null,
@@ -280,7 +278,7 @@ public class STATE_TRANSFER extends Protocol {
                                                     0,
                                                     digest,
                                                     id);
-                    state_rsp.putHeader(getName(), hdr);
+                    state_rsp.putHeader(this.id, hdr);
                     responses.add(state_rsp);
                 }
                 state_requesters.remove(id);
@@ -435,7 +433,7 @@ public class STATE_TRANSFER extends Protocol {
      * be stored in the header itself, but in the message's buffer.
      *
      */
-    public static class StateHeader extends Header implements Streamable {
+    public static class StateHeader extends Header {
         public static final byte STATE_REQ=1;
         public static final byte STATE_RSP=2;
 
@@ -444,7 +442,6 @@ public class STATE_TRANSFER extends Protocol {
         Address sender; // sender of state STATE_REQ or STATE_RSP
         Digest my_digest=null; // digest of sender (if type is STATE_RSP)
         String state_id=null; // for partial state transfer
-        private static final long serialVersionUID=4457830093491204405L;
 
         public StateHeader() { // for externalization
         }
@@ -518,28 +515,6 @@ public class STATE_TRANSFER extends Protocol {
             }
         }
 
-        public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeObject(sender);
-            out.writeLong(id);
-            out.writeByte(type);
-            out.writeObject(my_digest);
-            if(state_id == null) {
-                out.writeBoolean(false);
-            }
-            else {
-                out.writeBoolean(true);
-                out.writeUTF(state_id);
-            }
-        }
-
-        public void readExternal(ObjectInput in) throws IOException,ClassNotFoundException {
-            sender=(Address)in.readObject();
-            id=in.readLong();
-            type=in.readByte();
-            my_digest=(Digest)in.readObject();
-            if(in.readBoolean())
-                state_id=in.readUTF();
-        }
 
         public void writeTo(DataOutputStream out) throws IOException {
             out.writeByte(type);
@@ -549,9 +524,7 @@ public class STATE_TRANSFER extends Protocol {
             Util.writeString(state_id, out);
         }
 
-        public void readFrom(DataInputStream in) throws IOException,
-                                                IllegalAccessException,
-                                                InstantiationException {
+        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
             type=in.readByte();
             id=in.readLong();
             sender=Util.readAddress(in);

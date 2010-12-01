@@ -1,12 +1,13 @@
-// $Id: TCP.java,v 1.59 2009/09/06 13:51:07 belaban Exp $
 
 package org.jgroups.protocols;
 
 import org.jgroups.Address;
 import org.jgroups.PhysicalAddress;
+import org.jgroups.Global;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.blocks.TCPConnectionMap;
+import org.jgroups.util.SocketFactory;
 
 import java.net.InetAddress;
 import java.util.Collection;
@@ -22,7 +23,7 @@ import java.util.Collection;
  * as well.
  * <p>
  * 
- * This functionality is in ConnectionTable, which is used by TCP. TCP sends
+ * This functionality is in TCPConnectionMap, which is used by TCP. TCP sends
  * messages using ct.send() and registers with the connection table to receive
  * all incoming messages.
  * 
@@ -42,7 +43,13 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
 
     @ManagedOperation
     public String printConnections() {
-        return ct.toString();
+        return ct.printConnections();
+    }
+
+    public void setSocketFactory(SocketFactory factory) {
+        super.setSocketFactory(factory);
+        if(ct != null)
+            ct.setSocketFactory(factory);
     }
 
     public void send(Address dest, byte[] data, int offset, int length) throws Exception {
@@ -54,7 +61,7 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
     }
 
     public void start() throws Exception {
-        ct=createConnectionTable(reaper_interval,
+        ct=createConnectionMap(reaper_interval,
                               conn_expire_time,
                               bind_addr,
                               external_addr,
@@ -68,6 +75,7 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
         ct.setSocketConnectionTimeout(sock_conn_timeout);
         ct.setTcpNodelay(tcp_nodelay);
         ct.setLinger(linger);
+        ct.setSocketFactory(getSocketFactory());
 
         // we first start threads in TP (http://jira.jboss.com/jira/browse/JGRP-626)
         super.start();
@@ -108,25 +116,26 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
      * @param bindAddress
      * @param startPort
      * @throws Exception
-     * @return ConnectionTable Sub classes overrides this method to initialize a
-     *         different version of ConnectionTable.
+     * @return TCPConnectionMap Subclasses override this method to initialize a different version of ConnectionMap
      */
-    protected TCPConnectionMap createConnectionTable(long reaperInterval,
-                                                                        long connExpireTime,
-                                                                        InetAddress bindAddress,
-                                                                        InetAddress externalAddress,
-                                                                        int startPort,
-                                                                        int endPort
-                                                                        ) throws Exception {
+    protected TCPConnectionMap createConnectionMap(long reaperInterval,
+                                                   long connExpireTime,
+                                                   InetAddress bindAddress,
+                                                   InetAddress externalAddress,
+                                                   int startPort,
+                                                   int endPort
+    ) throws Exception {
         TCPConnectionMap cTable;
         if(reaperInterval == 0 && connExpireTime == 0) {
-            cTable=new TCPConnectionMap(getThreadFactory(),
-                                                              this,
-                                                              bindAddress,
-                                                              externalAddress,
-                                                              startPort,
-                                                              endPort
-                                                              );
+            cTable=new TCPConnectionMap(Global.TCP_SRV_SOCK,
+                                        getThreadFactory(),
+                                        getSocketFactory(),
+                                        this,
+                                        bindAddress,
+                                        externalAddress,
+                                        startPort,
+                                        endPort
+            );
         }
         else {
             if(reaperInterval == 0) {
@@ -139,15 +148,17 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
                 if(log.isWarnEnabled())
                     log.warn("conn_expire_time was 0, set it to " + connExpireTime);
             }
-            cTable=new TCPConnectionMap(getThreadFactory(),
-                                                              this,
-                                                              bindAddress,
-                                                              externalAddress,
-                                                              startPort,
-                                                              endPort,
-                                                              reaperInterval,
-                                                              connExpireTime
-                                                              );
+            cTable=new TCPConnectionMap(Global.TCP_SRV_SOCK, 
+                                        getThreadFactory(),
+                                        getSocketFactory(),
+                                        this,
+                                        bindAddress,
+                                        externalAddress,
+                                        startPort,
+                                        endPort,
+                                        reaperInterval,
+                                        connExpireTime
+            );
         }
 
         return cTable;

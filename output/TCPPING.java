@@ -11,10 +11,7 @@ import org.jgroups.util.BoundedList;
 import org.jgroups.util.Promise;
 import org.jgroups.util.UUID;
 
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 
 
 /**
@@ -36,7 +33,6 @@ import java.util.Set;
  * membership.
  * 
  * @author Bela Ban
- * @version $Id: TCPPING.java,v 1.58 2009/12/11 13:10:09 belaban Exp $
  */
 public class TCPPING extends Discovery {
     
@@ -124,7 +120,7 @@ public class TCPPING extends Discovery {
                 continue;
             final Message msg=new Message(addr, null, null);
             msg.setFlag(Message.OOB);
-            msg.putHeader(getName(), hdr);
+            msg.putHeader(this.id, hdr);
             if(log.isTraceEnabled())
                 log.trace("[FIND_INITIAL_MBRS] sending PING request to " + msg.getDest());                      
             timer.execute(new Runnable() {
@@ -151,9 +147,20 @@ public class TCPPING extends Discovery {
                         dynamic_hosts.addIfAbsent(physical_addr);
                     }
                 }
+                return_entire_cache=true;
                 break;
         }
         return retval;
+    }
+
+    public void discoveryRequestReceived(Address sender, String logical_name, Collection<PhysicalAddress> physical_addrs) {
+        super.discoveryRequestReceived(sender, logical_name, physical_addrs);
+        if(physical_addrs != null) {
+            for(PhysicalAddress addr: physical_addrs) {
+                if(!initial_hosts.contains(addr))
+                    dynamic_hosts.addIfAbsent(addr);
+            }
+        }
     }
 }
 

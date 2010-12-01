@@ -1,6 +1,7 @@
 package org.jgroups.protocols;
 
 import org.jgroups.*;
+import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.NakReceiverWindow;
 import org.jgroups.protocols.pbcast.NAKACK;
@@ -22,33 +23,35 @@ import java.util.concurrent.*;
  * <li>For regular messages only: all messages are received in the order in which they were sent (order of seqnos)
  * </ul>
  * @author Bela Ban
- * @version $Id: NAKACK_Delivery_Test.java,v 1.2 2009/11/17 11:04:07 belaban Exp $
  */
 @Test(groups=Global.FUNCTIONAL)
 public class NAKACK_Delivery_Test {
     private NAKACK nak;
     private Address c1, c2;
-    static final String NAME="NAKACK";
+    static final short NAKACK_ID=ClassConfigurator.getProtocolId(NAKACK.class);
     MyReceiver receiver=new MyReceiver();
     Executor pool;
     final static int NUM_MSGS=50;
 
     @BeforeMethod
     protected void setUp() throws Exception {
-        c1=Util.createRandomAddress();
-        c2=Util.createRandomAddress();
-        UUID.add((UUID)c1, "C1"); UUID.add((UUID)c2, "C2");
+        c1=Util.createRandomAddress("C1");
+        c2=Util.createRandomAddress("C2");
         nak=new NAKACK();
 
-        nak.setDownProtocol(new TP() {
-            public String getName() {return "blo";}
+        TP transport=new TP() {
+            public boolean supportsMulticasting() {return false;}
             public void sendMulticast(byte[] data, int offset, int length) throws Exception {}
             public void sendUnicast(PhysicalAddress dest, byte[] data, int offset, int length) throws Exception {}
             public String getInfo() {return null;}
             public Object down(Event evt) {return null;}
             protected PhysicalAddress getPhysicalAddress() {return null;}
-            public TimeScheduler getTimer() {return new TimeScheduler(1);}
-        });
+            public TimeScheduler getTimer() {return new DefaultTimeScheduler(1);}
+        };
+
+        transport.setId((short)100);
+
+        nak.setDownProtocol(transport);
 
         receiver.init(c1, c2);
         nak.setUpProtocol(receiver);
@@ -151,7 +154,7 @@ public class NAKACK_Delivery_Test {
         if(oob)
             msg.setFlag(Message.OOB);
         if(seqno != -1)
-            msg.putHeader(NAME, new NakAckHeader(NakAckHeader.MSG, seqno));
+            msg.putHeader(NAKACK_ID, NakAckHeader.createMessageHeader(seqno));
         return msg;
     }
 

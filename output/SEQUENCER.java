@@ -8,7 +8,6 @@ import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.SeqnoTable;
-import org.jgroups.util.Streamable;
 import org.jgroups.util.Util;
 
 import java.io.*;
@@ -19,7 +18,6 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Implementation of total order protocol using a sequencer. Consult doc/design/SEQUENCER.txt for details
  * @author Bela Ban
- * @version $Id: SEQUENCER.java,v 1.33 2009/12/15 12:49:26 belaban Exp $
  */
 @Experimental
 @MBean(description="Implementation of total order protocol using a sequencer")
@@ -81,17 +79,19 @@ public class SEQUENCER extends Protocol {
         switch(evt.getType()) {
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
+                if(msg.isFlagSet(Message.NO_TOTAL_ORDER))
+                    break;
                 Address dest=msg.getDest();
                 if(dest == null || dest.isMulticastAddress()) { // only handle multicasts
                     long next_seqno=seqno.getAndIncrement();
                     if(is_coord) {
                         SequencerHeader hdr=new SequencerHeader(SequencerHeader.BCAST, local_addr, next_seqno);
-                        msg.putHeader(name, hdr);
+                        msg.putHeader(this.id, hdr);
                         broadcast(msg, false); // don't copy, just use the message passed as argument
                     }
                     else {
                         // SequencerHeader hdr=new SequencerHeader(SequencerHeader.FORWARD, local_addr, next_seqno);
-                        // msg.putHeader(name, hdr);
+                        // msg.putHeader(this.id, hdr);
                         forwardToCoord(msg, next_seqno);
                     }
                     return null; // don't pass down
@@ -119,7 +119,9 @@ public class SEQUENCER extends Protocol {
         switch(evt.getType()) {
             case Event.MSG:
                 msg=(Message)evt.getArg();
-                hdr=(SequencerHeader)msg.getHeader(name);
+                if(msg.isFlagSet(Message.NO_TOTAL_ORDER))
+                    break;
+                hdr=(SequencerHeader)msg.getHeader(this.id);
                 if(hdr == null)
                     break; // pass up
 
@@ -223,7 +225,7 @@ public class SEQUENCER extends Protocol {
 
             Message forward_msg=new Message(coord, null, val);
             SequencerHeader hdr=new SequencerHeader(SequencerHeader.FORWARD, local_addr, key);
-            forward_msg.putHeader(name, hdr);
+            forward_msg.putHeader(this.id, hdr);
 
             if (log.isTraceEnabled()) {
                 log.trace("resending msg " + local_addr + "::" + key + " to coord (" + coord + ")");
@@ -234,7 +236,8 @@ public class SEQUENCER extends Protocol {
 
 
     private void forwardToCoord(final Message msg, long seqno) {
-        msg.setSrc(local_addr);
+        if(msg.getSrc() == null)
+            msg.setSrc(local_addr);
         if(log.isTraceEnabled())
             log.trace("forwarding msg " + msg + " (seqno " + seqno + ") to coord (" + coord + ")");
 
@@ -246,7 +249,7 @@ public class SEQUENCER extends Protocol {
             }
             Message forward_msg=new Message(coord, null, marshalled_msg);
             SequencerHeader hdr=new SequencerHeader(SequencerHeader.FORWARD, local_addr, seqno);
-            forward_msg.putHeader(name, hdr);
+            forward_msg.putHeader(this.id, hdr);
             down_prot.down(new Event(Event.MSG, forward_msg));
             forwarded_msgs++;
         }
@@ -257,7 +260,7 @@ public class SEQUENCER extends Protocol {
 
     private void broadcast(final Message msg, boolean copy) {
         Message bcast_msg=null;
-        final SequencerHeader hdr=(SequencerHeader)msg.getHeader(name);
+        final SequencerHeader hdr=(SequencerHeader)msg.getHeader(this.id);
 
         if(!copy) {
             bcast_msg=msg; // no need to add a header, message already has one
@@ -265,7 +268,7 @@ public class SEQUENCER extends Protocol {
         else {
             bcast_msg=new Message(null, local_addr, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
             SequencerHeader new_hdr=new SequencerHeader(SequencerHeader.WRAPPED_BCAST, hdr.getOriginalSender(), hdr.getSeqno());
-            bcast_msg.putHeader(name, new_hdr);
+            bcast_msg.putHeader(this.id, new_hdr);
         }
 
         if(log.isTraceEnabled())
@@ -281,7 +284,7 @@ public class SEQUENCER extends Protocol {
      */
     private void unwrapAndDeliver(final Message msg) {
         try {
-            SequencerHeader hdr=(SequencerHeader)msg.getHeader(name);
+            SequencerHeader hdr=(SequencerHeader)msg.getHeader(this.id);
             Message msg_to_deliver=(Message)Util.objectFromByteBuffer(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
             long msg_seqno=hdr.getSeqno();
             if(!canDeliver(msg_to_deliver.getSrc(), msg_seqno))
@@ -339,11 +342,10 @@ public class SEQUENCER extends Protocol {
 
 
 
-    public static class SequencerHeader extends Header implements Streamable {
+    public static class SequencerHeader extends Header {
         private static final byte FORWARD       = 1;
         private static final byte BCAST         = 2;
         private static final byte WRAPPED_BCAST = 3;
-        private static final long serialVersionUID=6181860771697205253L;
 
         byte    type=-1;
         /** the original sender's address and a seqno */
@@ -383,16 +385,7 @@ public class SEQUENCER extends Protocol {
             }
         }
 
-        public void writeExternal(ObjectOutput out) throws IOException {
-            out.writeByte(type);
-            out.writeObject(tag);
-        }
-
-        public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-            type=in.readByte();
-            tag=(ViewId)in.readObject();
-        }
-
+  
         public void writeTo(DataOutputStream out) throws IOException {
             out.writeByte(type);
             Util.writeStreamable(tag, out);

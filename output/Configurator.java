@@ -6,24 +6,25 @@ import org.jgroups.Global;
 import org.jgroups.annotations.DeprecatedProperty;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.PropertyHelper;
+import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.TP;
-import org.jgroups.stack.ProtocolStack.ProtocolStackFactory;
+import org.jgroups.util.StackType;
 import org.jgroups.util.Tuple;
 import org.jgroups.util.Util;
-import org.jgroups.util.StackType;
 
 import java.io.IOException;
 import java.io.PushbackReader;
 import java.io.Reader;
 import java.io.StringReader;
 import java.lang.reflect.*;
-import java.net.*;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.concurrent.ConcurrentMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 
 /**
@@ -35,27 +36,26 @@ import java.util.regex.Pattern;
  * of the protocol stack and the properties of each layer.
  * @author Bela Ban
  * @author Richard Achmatowicz
- * @version $Id: Configurator.java,v 1.75 2009/12/11 13:18:20 belaban Exp $
  */
-public class Configurator implements ProtocolStackFactory {
-
+public class Configurator {
     protected static final Log log=LogFactory.getLog(Configurator.class);
     private final ProtocolStack stack;
+    
      
     public Configurator() {      
-        stack = null;
+        stack=null;
     }
 
     public Configurator(ProtocolStack protocolStack) {
          stack=protocolStack;
     }
 
-    public Protocol setupProtocolStack() throws Exception{
-         return setupProtocolStack(stack.getSetupString(), stack);
+    public Protocol setupProtocolStack(List<ProtocolConfiguration> config) throws Exception{
+         return setupProtocolStack(config, stack);
     }
      
     public Protocol setupProtocolStack(ProtocolStack copySource)throws Exception{
-        Vector<Protocol> protocols=copySource.copyProtocols(stack);
+        List<Protocol> protocols=copySource.copyProtocols(stack);
         Collections.reverse(protocols);
         return connectProtocols(protocols);                  
     }
@@ -83,9 +83,8 @@ public class Configurator implements ProtocolStackFactory {
      *   -----------------------
      * </pre>
      */
-    private static Protocol setupProtocolStack(String configuration, ProtocolStack st) throws Exception {
-        Vector<ProtocolConfiguration> protocol_configs=parseConfigurations(configuration);
-        Vector<Protocol> protocols=createProtocols(protocol_configs, st);
+    private static Protocol setupProtocolStack(List<ProtocolConfiguration> protocol_configs, ProtocolStack st) throws Exception {
+        List<Protocol> protocols=createProtocols(protocol_configs, st);
         if(protocols == null)
             return null;
         // basic protocol sanity check
@@ -98,31 +97,56 @@ public class Configurator implements ProtocolStackFactory {
         StackType ip_version=Util.getIpStackType(); // 0 = n/a, 4 = IPv4, 6 = IPv6
 
         if(!addrs.isEmpty()) {
-            // check that all user-supplied InetAddresses have a consistent version
-            StackType addr_versions=determineIpVersionFromAddresses(addrs);
+            // check that all user-supplied InetAddresses have a consistent version:
+            // 1. If an addr is IPv6 and we have an IPv4 stack --> FAIL
+            // 2. If an address is an IPv4 class D (multicast) address and the stack is IPv6: FAIL
+            // Else pass
 
-            if(ip_version == StackType.Unknown)
-                ip_version=addr_versions;
-            else {
-                if(addr_versions != ip_version) { // mismatch between user supplied addresses and type of stack
-                    throw new RuntimeException("the type of the stack (" + ip_version + ") and the user supplied " +
-                            "addresses (" + addr_versions + ") don't match: " + Util.print(addrs) +
-                            ".\nUse system props " + Global.IPv4 + " or " + Global.IPv6 + " to pick the correct stack");
-                }
+            for(InetAddress addr: addrs) {
+                if(addr instanceof Inet6Address && ip_version == StackType.IPv4)
+                    throw new IllegalArgumentException("found IPv6 address " + addr + " in an IPv4 stack");
+                if(addr instanceof Inet4Address && addr.isMulticastAddress() && ip_version == StackType.IPv6)
+                    throw new Exception("found IPv4 multicast address " + addr + " in an IPv6 stack");
             }
         }
 
-        if(ip_version == StackType.Unknown) {
-            ip_version=StackType.IPv6;
-            log.info("found neither an IPv4 nor an IPv6 stack, and no addresses were found to pick a stack, " +
-                    "defaulting to IPv" + ip_version);
-        }
 
         // process default values
         setDefaultValues(protocol_configs, protocols, ip_version) ;
         
         return connectProtocols(protocols);        
     }
+
+
+    public static void setDefaultValues(List<Protocol> protocols) throws Exception {
+        if(protocols == null)
+            return;
+
+        // basic protocol sanity check
+        sanityCheck(protocols);
+
+        // check InetAddress related features of stack
+        Collection<InetAddress> addrs=getInetAddresses(protocols);
+        StackType ip_version=Util.getIpStackType(); // 0 = n/a, 4 = IPv4, 6 = IPv6
+
+        if(!addrs.isEmpty()) {
+            // check that all user-supplied InetAddresses have a consistent version:
+            // 1. If an addr is IPv6 and we have an IPv4 stack --> FAIL
+            // 2. If an address is an IPv4 class D (multicast) address and the stack is IPv6: FAIL
+            // Else pass
+
+            for(InetAddress addr : addrs) {
+                if(addr instanceof Inet6Address && ip_version == StackType.IPv4)
+                    throw new IllegalArgumentException("found IPv6 address " + addr + " in an IPv4 stack");
+                if(addr instanceof Inet4Address && addr.isMulticastAddress() && ip_version == StackType.IPv6)
+                    throw new Exception("found IPv4 multicast address " + addr + " in an IPv6 stack");
+            }
+        }
+
+        // process default values
+        setDefaultValues(protocols, ip_version);
+    }
+
 
     /**
      * Creates a new protocol given the protocol specification. Initializes the properties and starts the
@@ -145,7 +169,7 @@ public class Configurator implements ProtocolStackFactory {
         config=new ProtocolConfiguration(prot_spec);
 
         // create an instance of the protocol class and configure it
-        prot=config.createLayer(stack);
+        prot=createLayer(stack, config);
         prot.init();
         return prot;
     }
@@ -163,14 +187,14 @@ public class Configurator implements ProtocolStackFactory {
      * @param protocol_list List of Protocol elements (from top to bottom)
      * @return Protocol stack
      */
-    private static Protocol connectProtocols(Vector<Protocol> protocol_list) {
+    public static Protocol connectProtocols(List<Protocol> protocol_list) {
         Protocol current_layer=null, next_layer=null;
 
         for(int i=0; i < protocol_list.size(); i++) {
-            current_layer=protocol_list.elementAt(i);
+            current_layer=protocol_list.get(i);
             if(i + 1 >= protocol_list.size())
                 break;
-            next_layer=protocol_list.elementAt(i + 1);
+            next_layer=protocol_list.get(i + 1);
             next_layer.setDownProtocol(current_layer);
             current_layer.setUpProtocol(next_layer);
 
@@ -203,8 +227,8 @@ public class Configurator implements ProtocolStackFactory {
      * @param config_str Configuration string
      * @return Vector of strings
      */
-    private static Vector<String> parseProtocols(String config_str) throws IOException {
-        Vector<String> retval=new Vector<String>();
+    private static List<String> parseProtocols(String config_str) throws IOException {
+        List<String> retval=new LinkedList<String>();
         PushbackReader reader=new PushbackReader(new StringReader(config_str));
         int ch;
         StringBuilder sb;
@@ -265,17 +289,17 @@ public class Configurator implements ProtocolStackFactory {
     /**
      * Return a number of ProtocolConfigurations in a vector
      * @param configuration protocol-stack configuration string
-     * @return Vector of ProtocolConfigurations
+     * @return List of ProtocolConfigurations
      */
-    public static Vector<ProtocolConfiguration> parseConfigurations(String configuration) throws Exception {
-        Vector<ProtocolConfiguration> retval=new Vector<ProtocolConfiguration>();
-        Vector<String> protocol_string=parseProtocols(configuration);              
+    public static List<ProtocolConfiguration> parseConfigurations(String configuration) throws Exception {
+        List<ProtocolConfiguration> retval=new ArrayList<ProtocolConfiguration>();
+        List<String> protocol_string=parseProtocols(configuration);
 
         if(protocol_string == null)
             return null;
         
-        for(String component_string:protocol_string) {                       
-            retval.addElement(new ProtocolConfiguration(component_string));
+        for(String component_string: protocol_string) {                       
+            retval.add(new ProtocolConfiguration(component_string));
         }
         return retval;
     }
@@ -332,16 +356,16 @@ public class Configurator implements ProtocolStackFactory {
      * each ProtocolConfiguration and returns all Protocols in a vector.
      * @param protocol_configs Vector of ProtocolConfigurations
      * @param stack The protocol stack
-     * @return Vector of Protocols
+     * @return List of Protocols
      */
-    private static Vector<Protocol> createProtocols(Vector<ProtocolConfiguration> protocol_configs, final ProtocolStack stack) throws Exception {
-        Vector<Protocol> retval=new Vector<Protocol>();
+    private static List<Protocol> createProtocols(List<ProtocolConfiguration> protocol_configs, final ProtocolStack stack) throws Exception {
+        List<Protocol> retval=new LinkedList<Protocol>();
         ProtocolConfiguration protocol_config;
         Protocol layer;
         String singleton_name;
 
         for(int i=0; i < protocol_configs.size(); i++) {
-            protocol_config=protocol_configs.elementAt(i);
+            protocol_config=protocol_configs.get(i);
             singleton_name=protocol_config.getProperties().get(Global.SINGLETON_NAME);
             if(singleton_name != null && singleton_name.trim().length() > 0) {
                Map<String,Tuple<TP, ProtocolStack.RefCounter>> singleton_transports=ProtocolStack.getSingletonTransports();
@@ -356,19 +380,90 @@ public class Configurator implements ProtocolStackFactory {
                         retval.add(layer);
                     }
                     else {
-                        layer=protocol_config.createLayer(stack);
+                        layer=createLayer(stack, protocol_config);
                         if(layer == null)
                             return null;
                         singleton_transports.put(singleton_name, new Tuple<TP, ProtocolStack.RefCounter>((TP)layer,new ProtocolStack.RefCounter((short)0,(short)0)));
-                        retval.addElement(layer);
+                        retval.add(layer);
                     }
                 }
                 continue;
             }
-            layer=protocol_config.createLayer(stack);
+            layer=createLayer(stack, protocol_config);
             if(layer == null)
                 return null;
-            retval.addElement(layer);
+            retval.add(layer);
+        }
+        return retval;
+    }
+
+
+    protected static Protocol createLayer(ProtocolStack stack, ProtocolConfiguration config) throws Exception {
+        String              protocol_name=config.getProtocolName();
+        Map<String, String> properties=config.getProperties();
+        Protocol            retval=null;
+
+        if(protocol_name == null || properties == null)
+            return null;
+
+        String defaultProtocolName=ProtocolConfiguration.protocol_prefix + '.' + protocol_name;
+        Class<?> clazz=null;
+
+        try {
+            clazz=Util.loadClass(defaultProtocolName, stack.getClass());
+        }
+        catch(ClassNotFoundException e) {
+        }
+
+        if(clazz == null) {
+            try {
+                clazz=Util.loadClass(protocol_name, stack.getClass());
+            }
+            catch(ClassNotFoundException e) {
+            }
+            if(clazz == null) {
+                throw new Exception("unable to load class for protocol " + protocol_name +
+                        " (either as an absolute - " + protocol_name + " - or relative - " +
+                        defaultProtocolName + " - package name)!");
+            }
+        }
+
+        try {
+            retval=(Protocol)clazz.newInstance();
+            if(retval == null)
+                throw new Exception("creation of instance for protocol " + protocol_name + "failed !");
+            retval.setProtocolStack(stack);
+
+            removeDeprecatedProperties(retval, properties);
+            // before processing Field and Method based properties, take dependencies specified
+            // with @Property.dependsUpon into account
+            AccessibleObject[] dependencyOrderedFieldsAndMethods = computePropertyDependencies(retval, properties) ;
+            for(AccessibleObject ordered: dependencyOrderedFieldsAndMethods) {
+                if (ordered instanceof Field) {
+                    resolveAndAssignField(retval, (Field)ordered, properties) ;
+                }
+                else if (ordered instanceof Method) {
+                    resolveAndInvokePropertyMethod(retval, (Method)ordered, properties) ;
+                }
+            }
+
+            List<Object> additional_objects=retval.getConfigurableObjects();
+            if(additional_objects != null && !additional_objects.isEmpty()) {
+                for(Object obj: additional_objects) {
+                    resolveAndAssignFields(obj, properties);
+                    resolveAndInvokePropertyMethods(obj, properties);
+                }
+            }
+
+            if(!properties.isEmpty()) {
+                throw new IllegalArgumentException("the following properties in " + protocol_name
+                        + " are not recognized: " + properties);
+            }
+        }
+        catch(InstantiationException inst_ex) {
+            log.error("an instance of " + protocol_name + " could not be created. Please check that it implements" +
+                    " interface Protocol and that is has a public empty constructor !");
+            throw inst_ex;
         }
         return retval;
     }
@@ -377,23 +472,32 @@ public class Configurator implements ProtocolStackFactory {
     /**
      Throws an exception if sanity check fails. Possible sanity check is uniqueness of all protocol names
      */
-    public static void sanityCheck(Vector<Protocol> protocols) throws Exception {
-        Vector<String> names=new Vector<String>();
+    public static void sanityCheck(List<Protocol> protocols) throws Exception {
+        List<String> names=new ArrayList<String>();
         Protocol prot;
         String name;       
-        Vector<ProtocolReq> req_list=new Vector<ProtocolReq>();        
+        List<ProtocolReq> req_list=new ArrayList<ProtocolReq>();
 
         // Checks for unique names
         for(int i=0; i < protocols.size(); i++) {
-            prot=protocols.elementAt(i);
+            prot=protocols.get(i);
             name=prot.getName();
             for(int j=0; j < names.size(); j++) {
-                if(name.equals(names.elementAt(j))) {
+                if(name.equals(names.get(j))) {
                     throw new Exception("Configurator.sanityCheck(): protocol name " + name +
                             " has been used more than once; protocol names have to be unique !");
                 }
             }
-            names.addElement(name);
+            names.add(name);
+        }
+
+        // check for unique IDs
+        Set<Short> ids=new HashSet<Short>();
+        for(Protocol protocol: protocols) {
+            short id=protocol.getId();
+            if(id > 0 && ids.add(id) == false)
+                throw new Exception("Protocol ID " + id + " (name=" + protocol.getName() +
+                        ") is duplicate; protocol IDs have to be unique");
         }
 
 
@@ -407,7 +511,7 @@ public class Configurator implements ProtocolStackFactory {
                 if(!providesDownServices(req_list, evt_type)) {
                     throw new Exception("Configurator.sanityCheck(): event " +
                             Event.type2String(evt_type) + " is required by " +
-                            pr.name + ", but not provided by any of the layers above");
+                            pr.name + ", but not provided by any of the layers below");
                 }
             } 
             
@@ -492,8 +596,8 @@ public class Configurator implements ProtocolStackFactory {
      * where InetAddressInfo instances encapsulate the InetAddress related information 
      * of the Fields and Methods.
      */
-    public static Map<String, Map<String,InetAddressInfo>> createInetAddressMap(Vector<ProtocolConfiguration> protocol_configs, 
-    		Vector<Protocol> protocols) throws Exception {
+    public static Map<String, Map<String,InetAddressInfo>> createInetAddressMap(List<ProtocolConfiguration> protocol_configs,
+                                                                                List<Protocol> protocols) throws Exception {
     	// Map protocol -> Map<String, InetAddressInfo>, where the latter is protocol specific
     	Map<String, Map<String,InetAddressInfo>> inetAddressMap = new HashMap<String, Map<String, InetAddressInfo>>() ;
 
@@ -579,18 +683,47 @@ public class Configurator implements ProtocolStackFactory {
     	}
     	return inetAddressMap ;
     }
-    
-    
+
+
+    public static List<InetAddress> getInetAddresses(List<Protocol> protocols) throws Exception {
+        List<InetAddress> retval=new LinkedList<InetAddress>();
+
+        // collect InetAddressInfo
+        for(Protocol protocol : protocols) {
+            String protocolName=protocol.getName();
+
+            //traverse class hierarchy and find all annotated fields and add them to the list if annotated
+            for(Class<?> clazz=protocol.getClass(); clazz != null; clazz=clazz.getSuperclass()) {
+                Field[] fields=clazz.getDeclaredFields();
+                for(int j=0; j < fields.length; j++) {
+                    if(fields[j].isAnnotationPresent(Property.class)) {
+                        if(InetAddressInfo.isInetAddressRelated(protocol, fields[j])) {
+                            Object value=getValueFromProtocol(protocol, fields[j]);
+                            if(value instanceof InetAddress)
+                                retval.add((InetAddress)value);
+                            else if(value instanceof IpAddress)
+                                retval.add(((IpAddress)value).getIpAddress());
+                            else if(value instanceof InetSocketAddress)
+                                retval.add(((InetSocketAddress)value).getAddress());
+                        }
+                    }
+                }
+            }
+        }
+        return retval;
+    }
+
+
     /*
-     * Method which processes @Property.default() values, associated with the annotation
-     * using the defaultValue= attribute. This method does the following:
-     * - locate all properties which have no user value assigned
-     * - if the defaultValue attribute is not "", generate a value for the field using the 
-     * property converter for that property and assign it to the field
-     */
-    public static void setDefaultValues(Vector<ProtocolConfiguration> protocol_configs, Vector<Protocol> protocols,
+    * Method which processes @Property.default() values, associated with the annotation
+    * using the defaultValue= attribute. This method does the following:
+    * - locate all properties which have no user value assigned
+    * - if the defaultValue attribute is not "", generate a value for the field using the
+    * property converter for that property and assign it to the field
+    */
+    public static void setDefaultValues(List<ProtocolConfiguration> protocol_configs, List<Protocol> protocols,
                                         StackType ip_version) throws Exception {
-        InetAddress default_ip_address=Util.getFirstNonLoopbackAddress(ip_version);
+        InetAddress default_ip_address=Util.getNonLoopbackAddress();
         if(default_ip_address == null) {
             log.warn("unable to find an address other than loopback for IP version " + ip_version);
             default_ip_address=Util.getLocalhost(ip_version);
@@ -678,6 +811,53 @@ public class Configurator implements ProtocolStackFactory {
         }
     }
 
+
+    public static void setDefaultValues(List<Protocol> protocols, StackType ip_version) throws Exception {
+        InetAddress default_ip_address=Util.getNonLoopbackAddress();
+        if(default_ip_address == null) {
+            log.warn("unable to find an address other than loopback for IP version " + ip_version);
+            default_ip_address=Util.getLocalhost(ip_version);
+        }
+
+        for(Protocol protocol : protocols) {
+            String protocolName=protocol.getName();
+
+            //traverse class hierarchy and find all annotated fields and add them to the list if annotated
+            Field[] fields=Util.getAllDeclaredFieldsWithAnnotations(protocol.getClass(), Property.class);
+            for(int j=0; j < fields.length; j++) {
+                // get the default value for the field - check for InetAddress types
+                if(InetAddressInfo.isInetAddressRelated(protocol, fields[j])) {
+                    Object propertyValue=getValueFromProtocol(protocol, fields[j]);
+                    if(propertyValue == null) {
+                        // add to collection of @Properties with no user specified value
+                        Property annotation=fields[j].getAnnotation(Property.class);
+
+                        String defaultValue=ip_version == StackType.IPv4? annotation.defaultValueIPv4() : annotation.defaultValueIPv6();
+                        if(defaultValue != null && defaultValue.length() > 0) {
+                            // condition for invoking converter
+                            Object converted=null;
+                            try {
+                                if(defaultValue.equalsIgnoreCase(Global.NON_LOOPBACK_ADDRESS))
+                                    converted=default_ip_address;
+                                else
+                                    converted=PropertyHelper.getConvertedValue(protocol, fields[j], defaultValue, true);
+                                if(converted != null)
+                                    setField(fields[j], protocol, converted);
+                            }
+                            catch(Exception e) {
+                                throw new Exception("default could not be assigned for field " + fields[j].getName() + " in "
+                                        + protocolName + " with default value " + defaultValue, e);
+                            }
+
+                            if(log.isDebugEnabled())
+                                log.debug("set property " + protocolName + "." + fields[j].getName() + " to default value " + converted);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public static Object getValueFromProtocol(Protocol protocol, Field field) throws IllegalAccessException {
         if(protocol == null || field == null) return null;
         if(!Modifier.isPublic(field.getModifiers()))
@@ -694,7 +874,7 @@ public class Configurator implements ProtocolStackFactory {
 
 
     /** Check whether any of the protocols 'below' provide evt_type */
-    static boolean providesUpServices(Vector<ProtocolReq> req_list, int evt_type) {        
+    static boolean providesUpServices(List<ProtocolReq> req_list, int evt_type) {
         for (ProtocolReq pr:req_list){
             if(pr.providesUpService(evt_type))
                 return true;
@@ -704,8 +884,8 @@ public class Configurator implements ProtocolStackFactory {
 
 
     /** Checks whether any of the protocols 'above' provide evt_type */
-    static boolean providesDownServices(Vector<ProtocolReq> req_list, int evt_type) {
-        for (ProtocolReq pr:req_list){
+    static boolean providesDownServices(List<ProtocolReq> req_list, int evt_type) {
+        for(ProtocolReq pr:req_list){
             if(pr.providesDownService(evt_type))
                 return true;
         }
@@ -878,7 +1058,8 @@ public class Configurator implements ProtocolStackFactory {
             if(propertyName != null && propertyValue != null) {
                 String deprecated_msg=annotation.deprecatedMessage();
                 if(deprecated_msg != null && deprecated_msg.length() > 0) {
-                    log.warn(method.getDeclaringClass().getSimpleName() + "." + methodName + ": " + deprecated_msg);
+                    log.warn(method.getDeclaringClass().getSimpleName() + "." + methodName + " has been deprecated : " +
+                            deprecated_msg);
                 }
             }
 
@@ -923,7 +1104,8 @@ public class Configurator implements ProtocolStackFactory {
             if(propertyName != null && propertyValue != null) {
                 String deprecated_msg=annotation.deprecatedMessage();
                 if(deprecated_msg != null && deprecated_msg.length() > 0) {
-                    log.warn(field.getDeclaringClass().getSimpleName() + "." + field.getName() + ": " + deprecated_msg);
+                    log.warn(field.getDeclaringClass().getSimpleName() + "." + field.getName() + " has been deprecated: " +
+                            deprecated_msg);
                 }
             }
             
@@ -938,7 +1120,7 @@ public class Configurator implements ProtocolStackFactory {
     				String name=obj instanceof Protocol? ((Protocol)obj).getName() : obj.getClass().getName();
     				throw new Exception("Property assignment of " + propertyName + " in "
     						+ name + " with original property value " + propertyValue + " and converted to " + converted 
-    						+ " could not be assigned. Exception is " +e, e);
+    						+ " could not be assigned", e);
     			}
     		}
 
@@ -1005,6 +1187,10 @@ public class Configurator implements ProtocolStackFactory {
 
         for(String system_property_name: system_property_names) {
             if(system_property_name != null && system_property_name.length() > 0) {
+                if(system_property_name.equals(Global.BIND_ADDR) || system_property_name.equals(Global.BIND_ADDR_OLD))
+                    if(Util.isBindAddressPropertyIgnored())
+                        continue;
+                
                 try {
                     retval=System.getProperty(system_property_name);
                     if(retval != null)
@@ -1117,183 +1303,7 @@ public class Configurator implements ProtocolStackFactory {
     }
 
 
-    /**
-     * Parses and encapsulates the specification for 1 protocol of the protocol stack, e.g.
-     * <code>UNICAST(timeout=5000)</code>
-     */
-    public static class ProtocolConfiguration {
-        private final String             protocol_name;
-        private String                   properties_str;
-        private final Map<String,String> properties=new HashMap<String,String>();
-        private static final String      protocol_prefix="org.jgroups.protocols";
-
-
-        /**
-         * Creates a new ProtocolConfiguration.
-         * @param config_str The configuration specification for the protocol, e.g.
-         *                   <pre>VERIFY_SUSPECT(timeout=1500)</pre>
-         */
-        public ProtocolConfiguration(String config_str) throws Exception {
-            int index=config_str.indexOf('(');  // e.g. "UDP(in_port=3333)"
-            int end_index=config_str.lastIndexOf(')');
-
-            if(index == -1) {
-                protocol_name=config_str;
-                properties_str="";
-            }
-            else {
-                if(end_index == -1) {
-                    throw new Exception("Configurator.ProtocolConfiguration(): closing ')' " +
-                            "not found in " + config_str + ": properties cannot be set !");
-                }
-                else {
-                    properties_str=config_str.substring(index + 1, end_index);
-                    protocol_name=config_str.substring(0, index);
-                }
-            }
-            parsePropertiesString(properties_str, properties) ;            
-        }
-
-        public String getProtocolName() {
-            return protocol_name;
-        }
-
-        public Map<String, String> getProperties() {
-            return properties;
-        }
-
-        public Map<String, String> getOriginalProperties() throws Exception {
-        	Map<String,String> props = new HashMap<String,String>();
-        	parsePropertiesString(properties_str, props) ;
-        	return props ;
-        }
-        
-        private void parsePropertiesString(String properties_str, Map<String, String> properties) throws Exception {
-        	int index = 0 ;
-            
-        	/* "in_port=5555;out_port=6666" */
-            if(properties_str.length() > 0) {
-                String[] components=properties_str.split(";");
-                for(String property : components) {
-                    String name, value;
-                    index=property.indexOf('=');
-                    if(index == -1) {
-                        throw new Exception("Configurator.ProtocolConfiguration(): '=' not found in " + property
-                                + " of " + protocol_name);
-                    }
-                    name=property.substring(0, index);
-                    value=property.substring(index + 1, property.length());
-                    properties.put(name, value);
-                }
-            }
-        }
-
-        public void substituteVariables() {
-            for(Iterator<Map.Entry<String,String>> it=properties.entrySet().iterator(); it.hasNext();) {
-                Map.Entry<String,String> entry=it.next();
-                String key=entry.getKey();
-                String val=entry.getValue();
-                String tmp=Util.substituteVariable(val);
-                if(!val.equals(tmp)) {
-                    properties.put(key,tmp);
-                }
-                else {
-                    if(tmp.contains("${")) {
-                        if(log.isWarnEnabled())
-                            log.warn("variable \"" + val + "\" in " + protocol_name + " could not be substituted; " +
-                                    key + " is removed from properties");
-                        it.remove();
-                    }
-                }
-            }
-            properties_str=propertiesToString();
-        }
-        
-        private Protocol createLayer(ProtocolStack prot_stack) throws Exception {
-            Protocol retval=null;
-            if(protocol_name == null)
-                return null;
-
-            String defaultProtocolName=protocol_prefix + '.' + protocol_name;
-            Class<?> clazz=null;
-
-            try {
-                clazz=Util.loadClass(defaultProtocolName, this.getClass());
-            }
-            catch(ClassNotFoundException e) {
-            }
-
-            if(clazz == null) {
-                try {
-                    clazz=Util.loadClass(protocol_name, this.getClass());
-                }
-                catch(ClassNotFoundException e) {
-                }
-                if(clazz == null) {
-                    throw new Exception("unable to load class for protocol " + protocol_name +
-                            " (either as an absolute - " + protocol_name + " - or relative - " +
-                            defaultProtocolName + " - package name)!");
-                }
-            }
-
-            try {
-                retval=(Protocol)clazz.newInstance();
-                if(retval == null)
-                    throw new Exception("creation of instance for protocol " + protocol_name + "failed !");
-                retval.setProtocolStack(prot_stack);
-                
-                removeDeprecatedProperties(retval, properties);   
-                // before processing Field and Method based properties, take dependencies specified
-                // with @Property.dependsUpon into account
-                AccessibleObject[] dependencyOrderedFieldsAndMethods = computePropertyDependencies(retval, properties) ;
-                for(AccessibleObject ordered: dependencyOrderedFieldsAndMethods) {
-                	if (ordered instanceof Field) {
-                		resolveAndAssignField(retval, (Field)ordered, properties) ;
-                	}
-                	else if (ordered instanceof Method) {
-                		resolveAndInvokePropertyMethod(retval, (Method)ordered, properties) ;                		
-                	}
-                }
-                
-                List<Object> additional_objects=retval.getConfigurableObjects();
-                if(additional_objects != null && !additional_objects.isEmpty()) {
-                    for(Object obj: additional_objects) {
-                        resolveAndAssignFields(obj, properties);
-                        resolveAndInvokePropertyMethods(obj, properties);
-                    }
-                }
-
-
-                if(!properties.isEmpty()) {
-                    throw new IllegalArgumentException("the following properties in " + protocol_name
-                            + " are not recognized: " + properties);
-                }
-            }
-            catch(InstantiationException inst_ex) {
-                log.error("an instance of " + protocol_name + " could not be created. Please check that it implements" +
-                        " interface Protocol and that is has a public empty constructor !");
-                throw inst_ex;
-            }
-            return retval;
-        }
-
-        public String toString() {
-            StringBuilder retval=new StringBuilder();
-            if(protocol_name == null)
-                retval.append("<unknown>");
-            else
-                retval.append(protocol_name);
-            if(properties != null)
-                retval.append("(" + Util.print(properties) + ')');
-            return retval.toString();
-        }
-
-        public String propertiesToString() {
-            return Util.printMapWithDelimiter(properties, ";");
-        }
-
-
-    }
+  
     
     public static class InetAddressInfo {
     	Protocol protocol ;

@@ -8,9 +8,8 @@ import org.jgroups.mux.MuxHeader;
 import org.jgroups.mux.ServiceInfo;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.*;
-import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.GossipData;
-import org.jgroups.stack.GossipRouter;
+import org.jgroups.stack.IpAddress;
 import org.jgroups.util.*;
 import org.jgroups.util.UUID;
 import org.testng.Assert;
@@ -23,7 +22,6 @@ import java.util.*;
 /**
  * Tests whether method size() of a header and its serialized size correspond
  * @author  Bela Ban
- * @version $Id: SizeTest.java,v 1.26 2009/07/08 15:30:33 belaban Exp $
  */
 @Test(groups=Global.FUNCTIONAL)
 public class SizeTest {
@@ -162,10 +160,9 @@ public class SizeTest {
     }
 
     public static void testNakackHeader() throws Exception {
-        _testSize(new NakAckHeader(NakAckHeader.MSG, 322649));
-        _testSize(new NakAckHeader(NakAckHeader.XMIT_REQ, 100, 104, Util.createRandomAddress()));
-        _testSize(new NakAckHeader(NakAckHeader.XMIT_RSP, 100, 104, Util.createRandomAddress()));
-        _testSize(new NakAckHeader(NakAckHeader.XMIT_RSP, 322649));
+        _testSize(NakAckHeader.createMessageHeader(322649));
+        _testSize(NakAckHeader.createXmitRequestHeader(100, 104, Util.createRandomAddress()));
+        _testSize(NakAckHeader.createXmitResponseHeader());
     }
 
 
@@ -234,13 +231,19 @@ public class SizeTest {
 
 
     public static void testUnicastHeader() throws Exception {
-        UNICAST.UnicastHeader hdr=new UNICAST.UnicastHeader(UNICAST.UnicastHeader.DATA, 322649);
+        UNICAST.UnicastHeader hdr=UNICAST.UnicastHeader.createDataHeader(322649, (short)127, false);
         _testSize(hdr);
 
-        hdr=new UNICAST.UnicastHeader(UNICAST.UnicastHeader.DATA, 322649, System.currentTimeMillis());
+        hdr=UNICAST.UnicastHeader.createDataHeader(322649, Short.MAX_VALUE, false);
         _testSize(hdr);
 
-        hdr=new UNICAST.UnicastHeader(UNICAST.UnicastHeader.DATA, 322649, System.currentTimeMillis(), true);
+        hdr=UNICAST.UnicastHeader.createDataHeader(322649, (short)(Short.MAX_VALUE -10), true);
+        _testSize(hdr);
+
+        hdr=UNICAST.UnicastHeader.createAckHeader(322649);
+        _testSize(hdr);
+
+        hdr=UNICAST.UnicastHeader.createSendFirstSeqnoHeader();
         _testSize(hdr);
     }
 
@@ -486,7 +489,7 @@ public class SizeTest {
 
 
     public static void testFCHeader() throws Exception {
-        FC.FcHeader hdr=new FC.FcHeader(FC.FcHeader.REPLENISH);
+        FcHeader hdr=new FcHeader(FcHeader.REPLENISH);
         _testSize(hdr);
     }
 
@@ -503,6 +506,30 @@ public class SizeTest {
     }
 
 
+    public static void testStompHeader() throws Exception {
+        STOMP.StompHeader hdr=STOMP.StompHeader.createHeader(STOMP.StompHeader.Type.MESSAGE,
+                                                             "destination", "/topics/chat",
+                                                             "sender", UUID.randomUUID().toString());
+        _testSize(hdr);
+
+        hdr=STOMP.StompHeader.createHeader(STOMP.StompHeader.Type.ENDPOINT, "endpoint", "192.168.1.5:8787");
+        _testSize(hdr);
+    }
+
+    public static void testRelayHeader() throws Exception {
+        RELAY.RelayHeader hdr=RELAY.RelayHeader.create(RELAY.RelayHeader.Type.FORWARD);
+        _testSize(hdr);
+
+        hdr=RELAY.RelayHeader.createDisseminateHeader(Util.createRandomAddress("A"));
+        _testSize(hdr);
+
+        Map<Address,String> uuid_cache=new HashMap<Address,String>();
+        uuid_cache.put(Util.createRandomAddress("A"), "A");
+        uuid_cache.put(Util.createRandomAddress("B"), "B");
+        uuid_cache.put(Util.createRandomAddress("B"), "B");
+        // hdr=RELAY.RelayHeader.create(RELAY.RelayHeader.Type.UUIDS);
+        // _testSize(hdr);
+    }
 
     public static void testStateHeader() throws Exception {
         IpAddress addr=new IpAddress("127.0.0.1", 5555);
@@ -564,27 +591,36 @@ public class SizeTest {
     }
 
 
+
     public static void testIpAddressWithAdditionalData() throws Exception {
         IpAddress addr=new IpAddress(5555, false);
         addr.setAdditionalData("bela".getBytes());
         _testSize(addr);
     }
 
+    public static void testProxyAddress() throws Exception {
+        ProxyAddress addr=new ProxyAddress(Util.createRandomAddress("A"), Util.createRandomAddress("B"));
+        _testSize(addr);
+    }
+
    
     public static void testWriteAddress() throws IOException, IllegalAccessException, InstantiationException {
-        UUID uuid=UUID.randomUUID();
+        Address uuid=UUID.randomUUID();
         _testWriteAddress(uuid);
 
-        uuid.setAdditionalData("Bela Ban".getBytes());
+        ((UUID)uuid).setAdditionalData("Bela Ban".getBytes());
         _testWriteAddress(uuid);
 
-        IpAddress addr=new IpAddress(7500);
+        Address addr=new IpAddress(7500);
         _testWriteAddress(addr);
 
         addr=new IpAddress("127.0.0.1", 5678);
         _testWriteAddress(addr);
 
-        addr.setAdditionalData("Bela Ban".getBytes());
+        ((IpAddress)addr).setAdditionalData("Bela Ban".getBytes());
+        _testWriteAddress(addr);
+        
+        addr=new ProxyAddress(Util.createRandomAddress("A"), Util.createRandomAddress("B"));
         _testWriteAddress(addr);
     }
 
@@ -665,17 +701,10 @@ public class SizeTest {
     public static void testRequestCorrelatorHeader() throws Exception {
         RequestCorrelator.Header hdr;
 
-        hdr=new RequestCorrelator.Header(RequestCorrelator.Header.REQ, 322649, false, "HelloWorld");
+        hdr=new RequestCorrelator.Header(RequestCorrelator.Header.REQ, 322649, false, (short)1000);
         _testSize(hdr);
 
-        hdr=new RequestCorrelator.Header(RequestCorrelator.Header.RSP, 322649, true, "bla");
-        java.util.List<Address> l=new LinkedList<Address>();
-        l.add(new IpAddress(1111));
-        l.add(new IpAddress(2222));
-        hdr.dest_mbrs=l;
-        _testSize(hdr);
-
-        hdr=new RequestCorrelator.Header(RequestCorrelator.Header.RSP, 322649, true, "bla");
+        hdr=new RequestCorrelator.Header(RequestCorrelator.Header.RSP, 322649, true, (short)356);
 
         ByteArrayOutputStream output=new ByteArrayOutputStream();
         DataOutputStream out=new DataOutputStream(output);
@@ -693,7 +722,29 @@ public class SizeTest {
 
         Assert.assertEquals(322649, hdr.id);
         assert hdr.rsp_expected;
-        Assert.assertEquals("bla", hdr.corrName);
+        Assert.assertEquals((short)356, hdr.corrId);
+        Assert.assertEquals(RequestCorrelator.Header.RSP, hdr.type);
+
+
+        hdr=new RequestCorrelator.Header(RequestCorrelator.Header.RSP, 322649, true, (short)356);
+
+        output=new ByteArrayOutputStream();
+        out=new DataOutputStream(output);
+        hdr.writeTo(out);
+        out.flush();
+
+        buf=output.toByteArray();
+        out.close();
+
+        input=new ByteArrayInputStream(buf);
+        in=new DataInputStream(input);
+
+        hdr=new RequestCorrelator.Header();
+        hdr.readFrom(in);
+
+        Assert.assertEquals(322649, hdr.id);
+        assert hdr.rsp_expected;
+        Assert.assertEquals(356, hdr.corrId);
         Assert.assertEquals(RequestCorrelator.Header.RSP, hdr.type);
     }
 
@@ -730,7 +781,7 @@ public class SizeTest {
 
     private static void _testSize(Header hdr) throws Exception {
         long size=hdr.size();
-        byte[] serialized_form=Util.streamableToByteBuffer((Streamable)hdr);
+        byte[] serialized_form=Util.streamableToByteBuffer(hdr);
         System.out.println("size=" + size + ", serialized size=" + serialized_form.length);
         Assert.assertEquals(serialized_form.length, size);
     }
@@ -739,11 +790,11 @@ public class SizeTest {
 
 
 
-     private static void _testSize(Address addr) throws Exception {
+    private static void _testSize(Address addr) throws Exception {
         long size=addr.size();
         byte[] serialized_form=Util.streamableToByteBuffer(addr);
         System.out.println("size=" + size + ", serialized size=" + serialized_form.length);
-         Assert.assertEquals(serialized_form.length, size);
+        Assert.assertEquals(serialized_form.length, size);
     }
 
 

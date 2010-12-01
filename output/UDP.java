@@ -39,7 +39,6 @@ import java.util.Map;
  * </ul>
  * 
  * @author Bela Ban
- * @version $Id: UDP.java,v 1.211 2009/12/11 13:10:33 belaban Exp $
  */
 @DeprecatedProperty(names={"num_last_ports","null_src_addresses", "send_on_all_interfaces", "send_interfaces"})
 public class UDP extends TP {
@@ -57,35 +56,38 @@ public class UDP extends TP {
      * </UL>
      */
     @Property(description="Traffic class for sending unicast and multicast datagrams. Default is 8")
-    private int tos=8; // valid values: 2, 4, 8 (default), 16
+    protected int tos=8; // valid values: 2, 4, 8 (default), 16
 
     @Property(name="mcast_addr", description="The multicast address used for sending and receiving packets. Default is 228.8.8.8",
     		defaultValueIPv4="228.8.8.8", defaultValueIPv6="ff0e::8:8:8",
             systemProperty=Global.UDP_MCAST_ADDR,writable=false)
-    private InetAddress mcast_group_addr=null;
+    protected InetAddress mcast_group_addr=null;
 
     @Property(description="The multicast port used for sending and receiving packets. Default is 7600",
               systemProperty=Global.UDP_MCAST_PORT, writable=false)
-    private int mcast_port=7600;
+    protected int mcast_port=7600;
 
     @Property(description="Multicast toggle. If false multiple unicast datagrams are sent instead of one multicast. " +
             "Default is true", writable=false)
-    private boolean ip_mcast=true;
+    protected boolean ip_mcast=true;
 
     @Property(description="The time-to-live (TTL) for multicast datagram packets. Default is 8",systemProperty=Global.UDP_IP_TTL)
-    private int ip_ttl=8;
+    protected int ip_ttl=8;
 
     @Property(description="Send buffer size of the multicast datagram socket. Default is 100'000 bytes")
-    private int mcast_send_buf_size=100000;
+    protected int mcast_send_buf_size=100000;
 
     @Property(description="Receive buffer size of the multicast datagram socket. Default is 500'000 bytes")
-    private int mcast_recv_buf_size=500000;
+    protected int mcast_recv_buf_size=500000;
 
     @Property(description="Send buffer size of the unicast datagram socket. Default is 100'000 bytes")
-    private int ucast_send_buf_size=100000;
+    protected int ucast_send_buf_size=100000;
 
     @Property(description="Receive buffer size of the unicast datagram socket. Default is 64'000 bytes")
-    private int ucast_recv_buf_size=64000;
+    protected int ucast_recv_buf_size=64000;
+
+    @Property
+    protected boolean disable_loopback=false;
 
 
     /* --------------------------------------------- Fields ------------------------------------------------ */
@@ -93,7 +95,7 @@ public class UDP extends TP {
 
 
     /** The multicast address (mcast address and port) this member uses */
-    private IpAddress mcast_addr=null;
+    protected IpAddress mcast_addr=null;
 
     /**
      * Socket used for
@@ -103,16 +105,16 @@ public class UDP extends TP {
      * </ol>
      * The address of this socket will be our local address (<tt>local_addr</tt>)
      */
-    private DatagramSocket sock=null;
+    protected DatagramSocket sock=null;
 
     /** IP multicast socket for <em>receiving</em> multicast packets */
-    private MulticastSocket mcast_sock=null;
+    protected MulticastSocket mcast_sock=null;
 
     /** Runnable to receive multicast packets */
-    private PacketReceiver mcast_receiver=null;
+    protected PacketReceiver mcast_receiver=null;
 
     /** Runnable to receive unicast packets */
-    private PacketReceiver ucast_receiver=null;
+    protected PacketReceiver ucast_receiver=null;
 
 
     /**
@@ -133,6 +135,9 @@ public class UDP extends TP {
     public UDP() {
     }
 
+    public boolean supportsMulticasting() {
+        return ip_mcast;
+    }
 
     public void setMulticastAddress(InetAddress addr) {this.mcast_group_addr=addr;}
     public InetAddress getMulticastAddress() {return mcast_group_addr;}
@@ -153,24 +158,6 @@ public class UDP extends TP {
         }
         else {
             sendToAllPhysicalAddresses(data, offset, length);
-//            List<Address> mbrs;
-//            synchronized(members) {
-//                mbrs=new ArrayList<Address>(members);
-//            }
-//            for(Address mbr: mbrs) {
-//                Address physical_dest=getPhysicalAddressFromCache(mbr);
-//                if(physical_dest == null) {
-//                    if(log.isWarnEnabled())
-//                        log.warn("no physical address for " + mbr + ", dropping message");
-//                    if(System.currentTimeMillis() - last_who_has_request >= 5000) { // send only every 5 secs max
-//                        up_prot.up(new Event(Event.GET_PHYSICAL_ADDRESS, mbr));
-//                        last_who_has_request=System.currentTimeMillis();
-//                    }
-//                    return;
-//                }
-//                _send(((IpAddress)physical_dest).getIpAddress(), ((IpAddress)physical_dest).getPort(),
-//                      false, data, offset, length);
-//            }
         }
     }
 
@@ -179,12 +166,20 @@ public class UDP extends TP {
     }
 
 
-    private void _send(InetAddress dest, int port, boolean mcast, byte[] data, int offset, int length) throws Exception {
+    protected void _send(InetAddress dest, int port, boolean mcast, byte[] data, int offset, int length) throws Exception {
         DatagramPacket packet=new DatagramPacket(data, offset, length, dest, port);
         try {
             if(mcast) {
-                if(mcast_sock != null && !mcast_sock.isClosed())
-                    mcast_sock.send(packet);
+                if(mcast_sock != null && !mcast_sock.isClosed()) {
+                    try {
+                        mcast_sock.send(packet);
+                    }
+                    // solve reconnection issue with Windows (https://jira.jboss.org/browse/JGRP-1254)
+                    catch(NoRouteToHostException e) {
+                        log.warn(e.getMessage() +", reset interface");
+                        mcast_sock.setInterface(mcast_sock.getInterface());
+                    }
+                }
             }
             else {
                 if(sock != null && !sock.isClosed())
@@ -282,7 +277,7 @@ public class UDP extends TP {
      * (sending and receiving). This is due to Linux's non-BSD compatibility
      * in the JDK port (see DESIGN).
      */
-    private void createSockets() throws Exception {
+    protected void createSockets() throws Exception {
         // bind_addr not set, try to assign one by default. This is needed on Windows
 
         // changed by bela Feb 12 2003: by default multicast sockets will be bound to all network interfaces
@@ -338,9 +333,12 @@ public class UDP extends TP {
             // https://jira.jboss.org/jira/browse/JGRP-777 - this doesn't work on MacOS, and we don't have
             // cross talking on Windows anyway, so we just do it for Linux. (How about Solaris ?)
             if(can_bind_to_mcast_addr)
-                mcast_sock=Util.createMulticastSocket(mcast_group_addr, mcast_port, log);
+                mcast_sock=Util.createMulticastSocket(getSocketFactory(), Global.UDP_MCAST_SOCK, mcast_group_addr, mcast_port, log);
             else
-                mcast_sock=new MulticastSocket(mcast_port);
+                mcast_sock=getSocketFactory().createMulticastSocket(Global.UDP_MCAST_SOCK, mcast_port);
+
+            if(disable_loopback)
+                mcast_sock.setLoopbackMode(disable_loopback);
 
             mcast_sock.setTimeToLive(ip_ttl);
 
@@ -404,7 +402,7 @@ public class UDP extends TP {
      * @param mcastAddr
      * @throws IOException
      */
-    private void bindToInterfaces(List<NetworkInterface> interfaces,
+    protected void bindToInterfaces(List<NetworkInterface> interfaces,
                                   MulticastSocket s,
                                   InetAddress mcastAddr) {
         SocketAddress tmp_mcast_addr=new InetSocketAddress(mcastAddr, mcast_port);
@@ -432,7 +430,7 @@ public class UDP extends TP {
         int localPort=0;
         while(true) {
             try {
-                tmp=new DatagramSocket(localPort, bind_addr); // first time localPort is 0
+                tmp=getSocketFactory().createDatagramSocket(Global.UDP_UCAST_SOCK, localPort, bind_addr);
             }
             catch(SocketException socket_ex) {
                 // Vladimir May 30th 2007
@@ -461,7 +459,7 @@ public class UDP extends TP {
         int rcv_port=bind_port, max_port=bind_port + port_range;
         while(rcv_port <= max_port) {
             try {
-                tmp=new DatagramSocket(rcv_port, bind_addr);
+                tmp=getSocketFactory().createDatagramSocket(Global.UDP_UCAST_SOCK, rcv_port, bind_addr);
                 return tmp;
             }
             catch(SocketException bind_ex) {	// Cannot listen on this port
@@ -480,7 +478,7 @@ public class UDP extends TP {
     }
 
 
-    private String dumpSocketInfo() throws Exception {
+    protected String dumpSocketInfo() throws Exception {
         StringBuilder sb=new StringBuilder(128);
         sb.append(", mcast_addr=").append(mcast_addr);
         sb.append(", bind_addr=").append(bind_addr);
@@ -511,7 +509,7 @@ public class UDP extends TP {
             setBufferSize(mcast_sock, mcast_send_buf_size, mcast_recv_buf_size);
     }
 
-    private void setBufferSize(DatagramSocket sock, int send_buf_size, int recv_buf_size) {
+    protected void setBufferSize(DatagramSocket sock, int send_buf_size, int recv_buf_size) {
         try {
             sock.setSendBufferSize(send_buf_size);
             int actual_size=sock.getSendBufferSize();
@@ -549,7 +547,7 @@ public class UDP extends TP {
                 if(mcast_addr != null) {
                     mcast_sock.leaveGroup(mcast_addr.getIpAddress());
                 }
-                mcast_sock.close(); // this will cause the mcast receiver thread to break out of its loop
+                getSocketFactory().close(mcast_sock); // this will cause the mcast receiver thread to break out of its loop
                 mcast_sock=null;
                 if(log.isDebugEnabled()) log.debug("multicast socket closed");
             }
@@ -560,8 +558,8 @@ public class UDP extends TP {
     }
 
 
-    private void closeUnicastSocket() {
-        Util.close(sock);
+    protected void closeUnicastSocket() {
+        getSocketFactory().close(sock);
     }
 
 
@@ -658,7 +656,7 @@ public class UDP extends TP {
 
 
         public void run() {
-            final byte           receive_buf[]=new byte[65535];
+            final byte           receive_buf[]=new byte[66000]; // to be on the safe side (IPv6 == 65575 bytes, IPv4 = 65535)
             final DatagramPacket packet=new DatagramPacket(receive_buf, receive_buf.length);
 
             while(thread != null && Thread.currentThread().equals(thread)) {

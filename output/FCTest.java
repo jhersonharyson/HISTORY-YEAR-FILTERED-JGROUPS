@@ -1,11 +1,7 @@
-// $Id: FCTest.java,v 1.4 2008/05/23 10:45:56 belaban Exp $
 
 package org.jgroups.tests;
 
-import org.jgroups.Event;
-import org.jgroups.Message;
-import org.jgroups.View;
-import org.jgroups.Global;
+import org.jgroups.*;
 import org.jgroups.debug.Simulator;
 import org.jgroups.protocols.FC;
 import org.jgroups.protocols.FRAG2;
@@ -16,7 +12,6 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.util.Properties;
 import java.util.Vector;
 
 
@@ -36,7 +31,7 @@ public class FCTest {
     @BeforeMethod
     void setUp() throws Exception {
         IpAddress a1=new IpAddress(1111);
-        Vector members=new Vector();
+        Vector<Address> members=new Vector<Address>();
         members.add(a1);
         View v=new View(a1, 1, members);
         s=new Simulator();
@@ -48,7 +43,7 @@ public class FCTest {
         fc.setMaxCredits(10000);
         fc.setMaxBlockTime(1000);
         FRAG2 frag=new FRAG2();
-        frag.setFragSize(60000);
+        frag.setFragSize(8000);
         Protocol[] stack=new Protocol[]{frag, fc};
         s.setProtocolStack(stack);
         s.start();
