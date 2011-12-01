@@ -4,7 +4,6 @@ package org.jgroups.tests;
 import org.jgroups.*;
 import org.jgroups.util.Buffer;
 import org.jgroups.util.Util;
-import org.jgroups.util.UUID;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -137,18 +136,15 @@ public class UtilTest {
         assert !(retval);
 
         System.getProperties().remove(Global.IGNORE_BIND_ADDRESS_PROPERTY);
-        System.setProperty(Global.IGNORE_BIND_ADDRESS_PROPERTY_OLD, "false");
         retval=Util.isBindAddressPropertyIgnored();
-        assert !(retval);
+        assert !retval;
 
         System.getProperties().remove(Global.IGNORE_BIND_ADDRESS_PROPERTY);
-        System.setProperty(Global.IGNORE_BIND_ADDRESS_PROPERTY_OLD, "true");
         retval=Util.isBindAddressPropertyIgnored();
-        assert retval;
+        assert !retval;
 
 
         System.setProperty(Global.IGNORE_BIND_ADDRESS_PROPERTY, "true");
-        System.setProperty(Global.IGNORE_BIND_ADDRESS_PROPERTY_OLD, "true");
         retval=Util.isBindAddressPropertyIgnored();
         assert retval;
     }
@@ -294,7 +290,7 @@ public class UtilTest {
         System.out.println("list=" + list + ", list2=" + list2);
         Assert.assertEquals(list, list2);
 
-        byte[] buffer=new byte[]{'B', 'e', 'l', 'a', ' ', 'B', 'a', 'n'};
+        byte[] buffer={'B', 'e', 'l', 'a', ' ', 'B', 'a', 'n'};
         buf=Util.objectToByteBuffer(buffer);
 
         byte[] buffer2=(byte[])Util.objectFromByteBuffer(buf);
@@ -308,7 +304,7 @@ public class UtilTest {
         obj=Util.objectFromByteBuffer(buf);
         assert obj == null;
 
-        Object[] values=new Object[]{
+        Object[] values={
                 Boolean.TRUE,
                 Boolean.FALSE,
                 new Byte((byte)22),
@@ -389,14 +385,12 @@ public class UtilTest {
     }
 
 
-    public static void testWriteStreamable() throws IOException, IllegalAccessException, InstantiationException {
+    public static void testWriteStreamable() throws Exception {
         Message m=new Message(null, null, "Hello");
-        ViewId vid=new ViewId(null, 12345);
         ViewId vid2=new ViewId(Util.createRandomAddress(), 35623);
         ByteArrayOutputStream outstream=new ByteArrayOutputStream();
         DataOutputStream dos=new DataOutputStream(outstream);
         Util.writeGenericStreamable(m, dos);
-        Util.writeGenericStreamable(vid, dos);
         Util.writeGenericStreamable(vid2, dos);
         dos.close();
         byte[] buf=outstream.toByteArray();
@@ -404,36 +398,20 @@ public class UtilTest {
         DataInputStream dis=new DataInputStream(instream);
         Message m2=(Message)Util.readGenericStreamable(dis);
         ViewId v3=(ViewId)Util.readGenericStreamable(dis);
-        ViewId v4=(ViewId)Util.readGenericStreamable(dis);
         assert m2.getBuffer() != null;
         Assert.assertEquals(m.getLength(), m2.getLength());
         assert v3 != null;
-        Assert.assertEquals(vid, v3);
-        assert v4 != null;
-        Assert.assertEquals(vid2, v4);
-    }
-
-    public static void testWriteViewIdWithNullCoordinator() throws IOException, IllegalAccessException, InstantiationException {
-        ViewId vid=new ViewId(null, 12345);
-        ByteArrayOutputStream outstream=new ByteArrayOutputStream();
-        DataOutputStream dos=new DataOutputStream(outstream);
-        Util.writeGenericStreamable(vid, dos);
-        dos.close();
-        byte[] buf=outstream.toByteArray();
-        ByteArrayInputStream instream=new ByteArrayInputStream(buf);
-        DataInputStream dis=new DataInputStream(instream);
-        ViewId v4=(ViewId)Util.readGenericStreamable(dis);
-        Assert.assertEquals(vid, v4);
     }
 
 
-    public static void testWriteView() throws IOException, IllegalAccessException, InstantiationException {
-        ViewId vid=new ViewId(null, 12345);
-        Vector<Address> members=new Vector<Address>();
+
+    public static void testWriteView() throws Exception {
+        List<Address> members=new ArrayList<Address>();
         View v;
         Address a1=Util.createRandomAddress();
         Address a2=Util.createRandomAddress();
         Address a4=Util.createRandomAddress();
+        ViewId vid=new ViewId(a1, 12345);
         members.add(a1);
         members.add(a2);
         members.add(a4);
@@ -454,7 +432,7 @@ public class UtilTest {
     }
 
 
-    public static void testWriteString() throws IOException {
+    public static void testWriteString() throws Exception {
         String s1="Bela Ban", s2="Michelle Ban";
         ByteArrayOutputStream outstream=new ByteArrayOutputStream();
         DataOutputStream dos=new DataOutputStream(outstream);
@@ -470,7 +448,7 @@ public class UtilTest {
         Assert.assertEquals(s2, s4);
     }
 
-    public static void writeAddress() throws IOException, IllegalAccessException, InstantiationException {
+    public static void writeAddress() throws Exception {
         Address a1=Util.createRandomAddress();
         Address a2=Util.createRandomAddress();
         Address a4=Util.createRandomAddress();
@@ -490,7 +468,7 @@ public class UtilTest {
         Assert.assertEquals(a4, Util.readAddress(dis));
     }
 
-    public static void writeNullAddress() throws IOException, IllegalAccessException, InstantiationException {
+    public static void writeNullAddress() throws Exception {
         Address a1=null;
         ByteArrayOutputStream outstream=new ByteArrayOutputStream();
         DataOutputStream dos=new DataOutputStream(outstream);
@@ -503,7 +481,7 @@ public class UtilTest {
     }
 
 
-    public static void testWriteByteBuffer() throws IOException {
+    public static void testWriteByteBuffer() throws Exception {
         byte[] buf=new byte[1024], tmp;
         for(int i=0; i < buf.length; i++)
             buf[i]=0;
@@ -517,6 +495,85 @@ public class UtilTest {
         byte[] buf2=Util.readByteBuffer(dis);
         assert buf2 != null;
         Assert.assertEquals(buf.length, buf2.length);
+    }
+
+
+    public static void testEncodeAndDecode() {
+        long[] numbers={0, 1, 50, 127, 128, 254, 255, 256,
+          Short.MAX_VALUE, Short.MAX_VALUE +1, Short.MAX_VALUE *2, Short.MAX_VALUE *2 +1,
+          100000, 500000, 100000,
+          Integer.MAX_VALUE, (long)Integer.MAX_VALUE +1, (long)Integer.MAX_VALUE *2, (long)Integer.MAX_VALUE +10,
+          Long.MAX_VALUE /10, Long.MAX_VALUE -1, Long.MAX_VALUE};
+
+        for(long num: numbers) {
+            byte[] buf=Util.encode(num);
+            long result=Util.decode(buf);
+            System.out.println(num + " encoded to " + printBuffer(buf) + " (" + buf.length + " bytes), decoded to " + result);
+            assert num == result;
+        }
+    }
+
+    public static void testEncodeLength() {
+        byte lengths=Util.encodeLength((byte)8, (byte)8);
+        byte[] lens=Util.decodeLength(lengths);
+
+        assert 8 == lens[0];
+        assert 8 == lens[1];
+    }
+
+    public static void testEncodeLength2() {
+        int combinations=0;
+        for(byte i=1; i <= 8; i++) {
+            for(byte j=1; j <= 8; j++) {
+                byte lengths=Util.encodeLength(i, j);
+                byte[] lens=Util.decodeLength(lengths);
+                assert lens[0] == i && lens[1] == j : "lens[0]=" + lens[0] + ", lens[1]=" +lens[1] + ", i=" + i + ", j=" + j;
+                combinations++;
+            }
+        }
+        System.out.println("all " + combinations + " combinations were encoded / decoded successfully");
+    }
+
+    public static void testSize() {
+        int[] shifts={0, 1, 7, 8, 15, 16, 17, 23, 24, 25, 31, 32, 33, 39, 40, 41, 47, 48, 49, 55, 56};
+
+        assert Util.size(0) == 1;
+
+        for(int shift: shifts) {
+            long num=((long)1) << shift;
+            byte size=Util.size(num);
+            System.out.println(num + " needs " + size + " bytes");
+            int num_bytes_required=(shift / 8) +2;
+            assert size == num_bytes_required;
+        }
+
+    }
+
+
+    public static void testEncodeAndDecodeLongSequence() {
+        long[] numbers={0, 1, 50, 127, 128, 254, 255, 256,
+          Short.MAX_VALUE, Short.MAX_VALUE +1, Short.MAX_VALUE *2, Short.MAX_VALUE *2 +1,
+          100000, 500000, 100000,
+          Integer.MAX_VALUE, (long)Integer.MAX_VALUE +1, (long)Integer.MAX_VALUE *2, (long)Integer.MAX_VALUE +10,
+          Long.MAX_VALUE /10, Long.MAX_VALUE -1, Long.MAX_VALUE};
+
+        for(long num: numbers) {
+            byte[] buf=Util.encodeLongSequence(num, num);
+            long[] result=Util.decodeLongSequence(buf);
+            System.out.println(num + " | " + num + " encoded to " + buf.length +
+                                 " bytes, decoded to " + result[0] + " | " + result[1]);
+            assert num == result[0] && num == result[1];
+        }
+    }
+
+
+    public static String printBuffer(byte[] buf) {
+        StringBuilder sb=new StringBuilder();
+        if(buf != null) {
+            for(byte b: buf)
+                sb.append(b).append(" ");
+        }
+        return sb.toString();
     }
 
 
@@ -540,13 +597,13 @@ public class UtilTest {
     public static void testLeftMembers() {
         final Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
 
-        Vector<Address> v1=new Vector<Address>();
+        List<Address> v1=new ArrayList<Address>();
         v1.add(a);
         v1.add(b);
         v1.add(c);
         v1.add(d);
 
-        Vector<Address> v2=new Vector<Address>();
+        List<Address> v2=new ArrayList<Address>();
         v2.add(c);
         v2.add(d);
 
@@ -563,13 +620,13 @@ public class UtilTest {
     public static void testLeftMembers2() {
         final Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
 
-        Vector<Address> v1=new Vector<Address>();
+        List<Address> v1=new ArrayList<Address>();
         v1.add(a);
         v1.add(b);
         v1.add(c);
         v1.add(d);
 
-        Vector<Address> v2=new Vector<Address>();
+        List<Address> v2=new ArrayList<Address>();
         v2.add(c);
         v2.add(d);
         v2.add(a);
@@ -608,7 +665,7 @@ public class UtilTest {
     }
 
     public static void testPickRandomElement() {
-        Vector<Integer> v=new Vector<Integer>();
+        List<Integer> v=new ArrayList<Integer>();
         for(int i=0; i < 10; i++) {
             v.add(new Integer(i));
         }
@@ -637,6 +694,28 @@ public class UtilTest {
 
         num=Util.pickNext(list, 11);
         assert num == null;
+    }
+
+
+    public static void testPickNextN() {
+        List<Integer> list=Arrays.asList(1,2,3,4);
+        List<Integer> result=Util.pickNext(list, 0, 1);
+        assert result.isEmpty();
+
+        result=Util.pickNext(list, 1, 1);
+        System.out.println("result = " + result);
+        assert result.size() == 1;
+        assert result.contains(2);
+
+        result=Util.pickNext(list, 3, 2);
+        System.out.println("result = " + result);
+        assert result.size() == 2;
+        assert result.contains(4) && result.contains(1);
+
+        result=Util.pickNext(list, 4, 5);
+        System.out.println("result = " + result);
+        assert result.size() == 3;
+        assert result.contains(1) && result.contains(2) && result.contains(3);
     }
 
 
@@ -735,9 +814,9 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress();
-        org.jgroups.util.UUID.add((UUID)a, "A");
-        org.jgroups.util.UUID.add((UUID)b, "B");
-        org.jgroups.util.UUID.add((UUID)c, "C");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
 
         View v1=Util.createView(b, 1, b, a, c);
         View v2=Util.createView(b, 2, b, c);
@@ -764,10 +843,10 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords2() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
-        org.jgroups.util.UUID.add((UUID)a, "A");
-        org.jgroups.util.UUID.add((UUID)b, "B");
-        org.jgroups.util.UUID.add((UUID)c, "C");
-        org.jgroups.util.UUID.add((UUID)d, "D");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
+        org.jgroups.util.UUID.add(d, "D");
 
         View v1=Util.createView(a, 1, a, b);
         View v2=Util.createView(a, 1, a, b);
@@ -796,10 +875,10 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords3() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
-        org.jgroups.util.UUID.add((UUID)a, "A");
-        org.jgroups.util.UUID.add((UUID)b, "B");
-        org.jgroups.util.UUID.add((UUID)c, "C");
-        org.jgroups.util.UUID.add((UUID)d, "D");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
+        org.jgroups.util.UUID.add(d, "D");
 
         View v1=Util.createView(a, 1, a, b, c, d);
         View v2=Util.createView(a, 1, a, b, c, d);
@@ -827,10 +906,10 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords4() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
-        org.jgroups.util.UUID.add((UUID)a, "A");
-        org.jgroups.util.UUID.add((UUID)b, "B");
-        org.jgroups.util.UUID.add((UUID)c, "C");
-        org.jgroups.util.UUID.add((UUID)d, "D");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
+        org.jgroups.util.UUID.add(d, "D");
 
         View v1=Util.createView(a, 1, a, b);
         View v2=Util.createView(c, 1, c, d);

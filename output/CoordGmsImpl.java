@@ -19,7 +19,7 @@ import java.util.*;
  * @author Bela Ban
  */
 public class CoordGmsImpl extends ServerGmsImpl {
-    private final Long                MAX_SUSPEND_TIMEOUT=new Long(30000);
+    private final Long  MAX_SUSPEND_TIMEOUT=new Long(30000);
 
     public CoordGmsImpl(GMS g) {
         super(g);
@@ -130,7 +130,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
 
         new_mbrs.remove(gms.local_addr); // remove myself - cannot join myself (already joined)        
 
-        if(gms.view_id == null) {
+        if(gms.getViewId() == null) {
             // we're probably not the coord anymore (we just left ourselves), let someone else do it
             // (client will retry when it doesn't get a response)
             if(log.isDebugEnabled())
@@ -139,7 +139,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
             return;
         }
 
-        Vector<Address> current_members=gms.members.getMembers();
+        List<Address> current_members=gms.members.getMembers();
         leaving_mbrs.retainAll(current_members); // remove all elements of leaving_mbrs which are not current members
         if(suspected_mbrs.remove(gms.local_addr)) {
             if(log.isWarnEnabled()) log.warn("I am the coord and I'm being suspected -- will probably leave shortly");
@@ -152,7 +152,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
             if(gms.members.contains(mbr)) { // already joined: return current digest and membership
                 if(log.isWarnEnabled())
                     log.warn(mbr + " already present; returning existing view " + gms.view);
-                JoinRsp join_rsp=new JoinRsp(new View(gms.view_id, gms.members.getMembers()), gms.getDigest());
+                JoinRsp join_rsp=new JoinRsp(new View(gms.getViewId(), gms.members.getMembers()), gms.getDigest());
                 gms.sendJoinResponse(join_rsp, mbr);
                 it.remove();
             }
@@ -178,15 +178,15 @@ public class CoordGmsImpl extends ServerGmsImpl {
         gms.up(new Event(Event.PREPARE_VIEW,new_view));
         gms.down(new Event(Event.PREPARE_VIEW,new_view));
         
-        if(log.isDebugEnabled())
-            log.debug("new=" + new_mbrs + ", suspected=" + suspected_mbrs + ", leaving=" + leaving_mbrs +
-                    ", new view: " + new_view);
+        if(log.isTraceEnabled())
+            log.trace(gms.local_addr + ": new members=" + new_mbrs + ", suspected=" + suspected_mbrs + ", leaving=" + leaving_mbrs +
+                        ", new view: " + new_view);
              
         JoinRsp join_rsp=null;
         boolean hasJoiningMembers=!new_mbrs.isEmpty();
         try {            
-            boolean successfulFlush =!useFlushIfPresent || gms.startFlush(new_view);
-            if(!successfulFlush && hasJoiningMembers){
+            boolean successfulFlush =!useFlushIfPresent || !gms.flushProtocolInStack || gms.startFlush(new_view);
+            if(!successfulFlush && hasJoiningMembers) {
                 // Don't send a join response if the flush fails (http://jira.jboss.org/jira/browse/JGRP-759)
                 // The joiner should block until the previous FLUSH completed
                 sendLeaveResponses(leaving_mbrs); // we still have to send potential leave responses
@@ -206,17 +206,21 @@ public class CoordGmsImpl extends ServerGmsImpl {
                     log.error("received null digest from GET_DIGEST: will cause JOIN to fail");
                 }
                 else {
-                    // create a new digest, which contains the new member
+                    // create a new digest, which contains the new members, minus left members
                     join_digest=new MutableDigest(tmp.size() + new_mbrs.size());
-                    join_digest.add(tmp); // add the existing digest to the new one
-                    for(Address member:new_mbrs)
+                    for(Digest.DigestEntry entry: tmp) {
+                        Address mbr=entry.getMember();
+                        if(new_view.containsMember(mbr))
+                            join_digest.add(mbr, entry.getHighestDeliveredSeqno(), entry.getHighestReceivedSeqno(), false);
+                    }
+                    for(Address member: new_mbrs)
                         join_digest.add(member, 0, 0); // ... and add the new members. their first seqno will be 1
                 }
                 join_rsp=new JoinRsp(new_view, join_digest != null? join_digest.copy() : null);
             }
 
             sendLeaveResponses(leaving_mbrs); // no-op if no leaving members                            
-            gms.castViewChangeWithDest(new_view, join_rsp != null? join_rsp.getDigest() : null, join_rsp,new_mbrs);                      
+            gms.castViewChange(new_view,join_rsp != null? join_rsp.getDigest() : null,join_rsp,new_mbrs);
         }
         finally {
             if(hasJoiningMembers)
@@ -237,7 +241,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
      *                 be set by GMS
      */
     public void handleViewChange(View new_view, Digest digest) {
-        Vector<Address> mbrs=new_view.getMembers();
+        List<Address> mbrs=new_view.getMembers();
         if(leaving && !mbrs.contains(gms.local_addr))
             return;
         gms.installView(new_view, digest);

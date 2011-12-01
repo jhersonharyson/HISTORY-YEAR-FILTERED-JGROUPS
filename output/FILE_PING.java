@@ -1,17 +1,15 @@
 package org.jgroups.protocols;
 
-import org.jgroups.*;
-import org.jgroups.annotations.Experimental;
+import org.jgroups.Address;
+import org.jgroups.Event;
+import org.jgroups.PhysicalAddress;
+import org.jgroups.View;
 import org.jgroups.annotations.Property;
-import org.jgroups.util.Promise;
 import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
@@ -23,7 +21,6 @@ import java.util.concurrent.TimeUnit;
  * The design is at doc/design/FILE_PING.txt
  * @author Bela Ban
  */
-@Experimental
 public class FILE_PING extends Discovery {
     protected static final String SUFFIX=".node";
 
@@ -33,7 +30,7 @@ public class FILE_PING extends Discovery {
     @Property(description="The absolute path of the shared file")
     protected String location=File.separator + "tmp" + File.separator + "jgroups";
 
-    @Property(description="Interval (in milliseconds) at which the own address is written to the file system. 0 disables it.")
+    @Property(description="Interval (in milliseconds) at which the own Address is written. 0 disables it.")
     protected long interval=60000;
 
 
@@ -62,53 +59,40 @@ public class FILE_PING extends Discovery {
         super.stop();
     }
 
-    public void sendGetMembersRequest(String cluster_name, Promise promise, boolean return_views_only) throws Exception{
+    public boolean isDynamic() {
+        return true;
+    }
+
+    public Collection<PhysicalAddress> fetchClusterMembers(String cluster_name) {
         List<PingData> existing_mbrs=readAll(cluster_name);
+
         PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
         List<PhysicalAddress> physical_addrs=Arrays.asList(physical_addr);
         PingData data=new PingData(local_addr, null, false, UUID.get(local_addr), physical_addrs);
+        writeToFile(data, cluster_name); // write my own data to file
 
         // If we don't find any files, return immediately
-        if(existing_mbrs.isEmpty()) {
-            if(promise != null) {
-                promise.setResult(null);
-            }
-        }
-        else {
+        if(existing_mbrs.isEmpty())
+            return Collections.emptyList();
 
-            // 1. Send GET_MBRS_REQ message to members listed in the file
-            for(PingData tmp: existing_mbrs) {
-                Collection<PhysicalAddress> dests=tmp != null? tmp.getPhysicalAddrs() : null;
-                if(dests == null)
+        Set<PhysicalAddress> retval=new HashSet<PhysicalAddress>();
+
+        for(PingData tmp: existing_mbrs) {
+            Collection<PhysicalAddress> dests=tmp != null? tmp.getPhysicalAddrs() : null;
+            if(dests == null)
+                continue;
+            for(final PhysicalAddress dest: dests) {
+                if(dest == null)
                     continue;
-                for(final PhysicalAddress dest: dests) {
-                    if(dest == null || dest.equals(physical_addr))
-                        continue;
-                    PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ, data, cluster_name);
-                    hdr.return_view_only=return_views_only;
-                    final Message msg=new Message(dest);
-                    msg.setFlag(Message.OOB);
-                    msg.putHeader(this.id, hdr); // needs to be getName(), so we might get "MPING" !
-                    // down_prot.down(new Event(Event.MSG,  msg));
-                    if(log.isTraceEnabled())
-                        log.trace("[FIND_INITIAL_MBRS] sending PING request to " + msg.getDest());
-                    timer.execute(new Runnable() {
-                        public void run() {
-                            try {
-                                down_prot.down(new Event(Event.MSG, msg));
-                            }
-                            catch(Exception ex){
-                                if(log.isErrorEnabled())
-                                    log.error("failed sending discovery request to " + dest, ex);
-                            }
-                        }
-                    });
-                }
+                retval.add(dest);
             }
         }
 
-        // Write my own data to file
-        writeToFile(data, cluster_name);
+        return retval;
+    }
+
+    public boolean sendDiscoveryRequestsInParallel() {
+        return true;
     }
 
 
@@ -222,7 +206,7 @@ public class FILE_PING extends Discovery {
         if(!dir.exists())
             dir.mkdir();
 
-        String filename=local_addr instanceof UUID? ((UUID)local_addr).toStringLong() : local_addr.toString();
+        String filename=addressAsString(local_addr);
         File file=new File(dir, filename + SUFFIX);
         file.deleteOnExit();
 
@@ -244,6 +228,16 @@ public class FILE_PING extends Discovery {
             List<PhysicalAddress> physical_addrs=Arrays.asList(physical_addr);
             PingData data=new PingData(local_addr, null, false, UUID.get(local_addr), physical_addrs);
             writeToFile(data, group_addr);
+        }
+    }
+    
+    protected static String addressAsString(Address address) {
+        if (address == null) {
+            return "";
+        } else if (address instanceof UUID) {
+            return ((UUID) address).toStringLong();
+        } else {
+            return address.toString();
         }
     }
 

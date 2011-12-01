@@ -142,14 +142,14 @@ public class ConfiguratorTest {
                 "FD(max_tries=3;timeout=2000):" +
                 "VERIFY_SUSPECT(timeout=1500):" +
                 "BARRIER:" +
-                "pbcast.NAKACK(gc_lag=0;use_mcast_xmit=false;retransmit_timeout=300,600,1200,2400,4800;" +
+                "pbcast.NAKACK(use_mcast_xmit=false;retransmit_timeout=300,600,1200,2400,4800;" +
                 "discard_delivered_msgs=true):" +
                 "UNICAST(loopback=false;timeout=300,600,1200,2400,3600):" +
                 "pbcast.STABLE(desired_avg_gossip=50000;max_bytes=1000000;stability_delay=1000):" +
                 "pbcast.GMS(print_local_addr=true;view_bundling=true;join_timeout=3000):" +
                 "FC(max_block_time=10000;max_credits=5000000;min_threshold=0.25):" +
                 "FRAG2(frag_size=60000):" +
-                "pbcast.STREAMING_STATE_TRANSFER(use_reading_thread=true)";
+                "pbcast.STATE(use_reading_thread=true)";
         
         List<ProtocolConfiguration> ret=Configurator.parseConfigurations(config);
         System.out.println("config:\n" + ret);

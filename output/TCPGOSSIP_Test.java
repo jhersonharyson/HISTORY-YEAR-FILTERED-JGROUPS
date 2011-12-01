@@ -5,7 +5,6 @@ import org.jgroups.JChannel;
 import org.jgroups.View;
 import org.jgroups.protocols.TCPGOSSIP;
 import org.jgroups.stack.GossipRouter;
-import org.jgroups.stack.Protocol;
 import org.jgroups.util.StackType;
 import org.jgroups.util.Util;
 import org.testng.annotations.AfterClass;
@@ -127,14 +126,14 @@ public class TCPGOSSIP_Test extends ChannelTestBase {
 
             // restart and....
             gossipRouter.start();
-            Util.blockUntilViewsReceived(60000, 500, coordinator, channel, third);
+            Util.waitUntilAllChannelsHaveSameSize(60000, 500, coordinator, channel, third);
 
             // confirm they found each other
             View view = channel.getView();
             assert channel.getView().size() == 3;
             assert third.getView().size() == 3;
-            assert view.containsMember(channel.getLocalAddress());
-            assert view.containsMember(coordinator.getLocalAddress());
+            assert view.containsMember(channel.getAddress());
+            assert view.containsMember(coordinator.getAddress());
         } finally {
             Util.close(third);
         }
@@ -158,14 +157,14 @@ public class TCPGOSSIP_Test extends ChannelTestBase {
 
             // restart and....
             gossipRouter.start();
-            Util.blockUntilViewsReceived(60000, 500, coordinator, channel, third);
+            Util.waitUntilAllChannelsHaveSameSize(60000, 500, coordinator, channel, third);
 
             // confirm they found each other
             View view = channel.getView();
             assert channel.getView().size() == 3;
             assert third.getView().size() == 3;
-            assert view.containsMember(channel.getLocalAddress());
-            assert view.containsMember(coordinator.getLocalAddress());
+            assert view.containsMember(channel.getAddress());
+            assert view.containsMember(coordinator.getAddress());
         } finally {
             Util.close(third);
         }

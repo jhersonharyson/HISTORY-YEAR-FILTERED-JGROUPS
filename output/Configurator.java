@@ -4,6 +4,7 @@ package org.jgroups.stack;
 import org.jgroups.Event;
 import org.jgroups.Global;
 import org.jgroups.annotations.DeprecatedProperty;
+import org.jgroups.annotations.LocalAddress;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.PropertyHelper;
 import org.jgroups.conf.ProtocolConfiguration;
@@ -50,11 +51,11 @@ public class Configurator {
          stack=protocolStack;
     }
 
-    public Protocol setupProtocolStack(List<ProtocolConfiguration> config) throws Exception{
+    public Protocol setupProtocolStack(List<ProtocolConfiguration> config) throws Exception {
          return setupProtocolStack(config, stack);
     }
      
-    public Protocol setupProtocolStack(ProtocolStack copySource)throws Exception{
+    public Protocol setupProtocolStack(ProtocolStack copySource) throws Exception {
         List<Protocol> protocols=copySource.copyProtocols(stack);
         Collections.reverse(protocols);
         return connectProtocols(protocols);                  
@@ -87,8 +88,7 @@ public class Configurator {
         List<Protocol> protocols=createProtocols(protocol_configs, st);
         if(protocols == null)
             return null;
-        // basic protocol sanity check
-        sanityCheck(protocols);
+
         
         // check InetAddress related features of stack
         Map<String, Map<String,InetAddressInfo>> inetAddressMap = createInetAddressMap(protocol_configs, protocols) ;
@@ -112,18 +112,15 @@ public class Configurator {
 
 
         // process default values
-        setDefaultValues(protocol_configs, protocols, ip_version) ;
-        
-        return connectProtocols(protocols);        
+        setDefaultValues(protocol_configs, protocols, ip_version);
+        ensureValidBindAddresses(protocols);
+        return connectProtocols(protocols);
     }
 
 
     public static void setDefaultValues(List<Protocol> protocols) throws Exception {
         if(protocols == null)
             return;
-
-        // basic protocol sanity check
-        sanityCheck(protocols);
 
         // check InetAddress related features of stack
         Collection<InetAddress> addrs=getInetAddresses(protocols);
@@ -187,7 +184,7 @@ public class Configurator {
      * @param protocol_list List of Protocol elements (from top to bottom)
      * @return Protocol stack
      */
-    public static Protocol connectProtocols(List<Protocol> protocol_list) {
+    public static Protocol connectProtocols(List<Protocol> protocol_list) throws Exception {
         Protocol current_layer=null, next_layer=null;
 
         for(int i=0; i < protocol_list.size(); i++) {
@@ -216,6 +213,10 @@ public class Configurator {
                 }
             }
         }
+
+        // basic protocol sanity check
+        sanityCheck(protocol_list);
+
         return current_layer;
     }
 
@@ -473,23 +474,6 @@ public class Configurator {
      Throws an exception if sanity check fails. Possible sanity check is uniqueness of all protocol names
      */
     public static void sanityCheck(List<Protocol> protocols) throws Exception {
-        List<String> names=new ArrayList<String>();
-        Protocol prot;
-        String name;       
-        List<ProtocolReq> req_list=new ArrayList<ProtocolReq>();
-
-        // Checks for unique names
-        for(int i=0; i < protocols.size(); i++) {
-            prot=protocols.get(i);
-            name=prot.getName();
-            for(int j=0; j < names.size(); j++) {
-                if(name.equals(names.get(j))) {
-                    throw new Exception("Configurator.sanityCheck(): protocol name " + name +
-                            " has been used more than once; protocol names have to be unique !");
-                }
-            }
-            names.add(name);
-        }
 
         // check for unique IDs
         Set<Short> ids=new HashSet<Short>();
@@ -501,31 +485,72 @@ public class Configurator {
         }
 
 
-        // Checks whether all requirements of all layers are met
-        for(Protocol p:protocols){           
-            req_list.add(new ProtocolReq(p));
-        }    
-        
-        for(ProtocolReq pr:req_list){
-            for(Integer evt_type:pr.up_reqs) {                
-                if(!providesDownServices(req_list, evt_type)) {
-                    throw new Exception("Configurator.sanityCheck(): event " +
-                            Event.type2String(evt_type) + " is required by " +
-                            pr.name + ", but not provided by any of the layers below");
-                }
-            } 
-            
-            for(Integer evt_type:pr.down_reqs) {                
-                if(!providesUpServices(req_list, evt_type)) {
-                    throw new Exception("Configurator.sanityCheck(): event " +
-                            Event.type2String(evt_type) + " is required by " +
-                            pr.name + ", but not provided by any of the layers above");
-                }
-            }                     
-        }            
+        // For each protocol, get its required up and down services and check (if available) if they're satisfied
+        for(Protocol protocol: protocols) {
+            List<Integer> required_down_services=protocol.requiredDownServices();
+            List<Integer> required_up_services=protocol.requiredUpServices();
+
+            if(required_down_services != null && !required_down_services.isEmpty()) {
+
+                // the protocols below 'protocol' have to provide the services listed in required_down_services
+                List<Integer> tmp=new ArrayList<Integer>(required_down_services);
+                removeProvidedUpServices(protocol, tmp);
+                if(!tmp.isEmpty())
+                    throw new Exception("events " + printEvents(tmp) + " are required by " + protocol.getName() +
+                                          ", but not provided by any of the protocols below it");
+            }
+
+            if(required_up_services != null && !required_up_services.isEmpty()) {
+
+                // the protocols above 'protocol' have to provide the services listed in required_up_services
+                List<Integer> tmp=new ArrayList<Integer>(required_up_services);
+                removeProvidedDownServices(protocol, tmp);
+                if(!tmp.isEmpty())
+                    throw new Exception("events " + printEvents(tmp) + " are required by " + protocol.getName() +
+                                          ", but not provided by any of the protocols above it");
+            }
+        }
     }
-    
-    
+
+    protected static String printEvents(List<Integer> events) {
+        StringBuilder sb=new StringBuilder("[");
+        for(int evt: events)
+            sb.append(Event.type2String(evt)).append(" ");
+        sb.append("]");
+        return sb.toString();
+    }
+
+    /**
+     * Removes all events provided by the protocol below protocol from events
+     * @param protocol
+     * @param events
+     */
+    protected static void removeProvidedUpServices(Protocol protocol, List<Integer> events) {
+        if(protocol == null || events == null)
+            return;
+        for(Protocol prot=protocol.getDownProtocol(); prot != null && !events.isEmpty(); prot=prot.getDownProtocol()) {
+            List<Integer> provided_up_services=prot.providedUpServices();
+            if(provided_up_services != null && !provided_up_services.isEmpty())
+                events.removeAll(provided_up_services);
+        }
+    }
+
+      /**
+     * Removes all events provided by the protocol above protocol from events
+     * @param protocol
+     * @param events
+     */
+    protected static void removeProvidedDownServices(Protocol protocol, List<Integer> events) {
+        if(protocol == null || events == null)
+            return;
+        for(Protocol prot=protocol.getUpProtocol(); prot != null && !events.isEmpty(); prot=prot.getUpProtocol()) {
+            List<Integer> provided_down_services=prot.providedDownServices();
+            if(provided_down_services != null && !provided_down_services.isEmpty())
+                events.removeAll(provided_down_services);
+        }
+    }
+
+
     /**
      * Returns all inet addresses found
      */
@@ -540,7 +565,7 @@ public class Configurator {
                 List<InetAddress> addresses=inetAddressInfo.getInetAddresses();
                 for(InetAddress address : addresses) {
                     if(address == null)
-                        throw new RuntimeException("This address should not be null! - something is wrong");
+                        throw new RuntimeException("failed converting address info to IP address: " + inetAddressInfo);
                     addrs.add(address);
                 }
             }
@@ -794,7 +819,7 @@ public class Configurator {
                                     else
                                         converted=PropertyHelper.getConvertedValue(protocol, fields[j], properties, defaultValue, true);
                                     if(converted != null)
-                                        setField(fields[j], protocol, converted);
+                                        Util.setField(fields[j], protocol, converted);
                                 }
                                 catch(Exception e) {
                                     throw new Exception("default could not be assigned for field " + propertyName + " in "
@@ -842,7 +867,7 @@ public class Configurator {
                                 else
                                     converted=PropertyHelper.getConvertedValue(protocol, fields[j], defaultValue, true);
                                 if(converted != null)
-                                    setField(fields[j], protocol, converted);
+                                    Util.setField(fields[j], protocol, converted);
                             }
                             catch(Exception e) {
                                 throw new Exception("default could not be assigned for field " + fields[j].getName() + " in "
@@ -857,6 +882,32 @@ public class Configurator {
             }
         }
     }
+
+
+    /**
+     * Makes sure that all fields annotated with @LocalAddress is (1) an InetAddress and (2) a valid address on any
+     * local network interface
+     * @param protocols
+     * @throws Exception
+     */
+    public static void ensureValidBindAddresses(List<Protocol> protocols) throws Exception {
+        for(Protocol protocol : protocols) {
+            String protocolName=protocol.getName();
+
+            //traverse class hierarchy and find all annotated fields and add them to the list if annotated
+            Field[] fields=Util.getAllDeclaredFieldsWithAnnotations(protocol.getClass(), LocalAddress.class);
+            for(int i=0; i < fields.length; i++) {
+                Object val=getValueFromProtocol(protocol, fields[i]);
+                if(val == null)
+                    continue;
+                if(!(val instanceof InetAddress))
+                    throw new Exception("field " + protocolName + "." + fields[i].getName() + " is not an InetAddress");
+                Util.checkIfValidAddress((InetAddress)val, protocolName);
+            }
+        }
+    }
+
+
 
     public static Object getValueFromProtocol(Protocol protocol, Field field) throws IllegalAccessException {
         if(protocol == null || field == null) return null;
@@ -873,24 +924,6 @@ public class Configurator {
     }
 
 
-    /** Check whether any of the protocols 'below' provide evt_type */
-    static boolean providesUpServices(List<ProtocolReq> req_list, int evt_type) {
-        for (ProtocolReq pr:req_list){
-            if(pr.providesUpService(evt_type))
-                return true;
-        }
-        return false;              
-    }
-
-
-    /** Checks whether any of the protocols 'above' provide evt_type */
-    static boolean providesDownServices(List<ProtocolReq> req_list, int evt_type) {
-        for(ProtocolReq pr:req_list){
-            if(pr.providesDownService(evt_type))
-                return true;
-        }
-        return false;
-    }
 
     /**
      * This method creates a list of all properties (Field or Method) in dependency order, 
@@ -1114,7 +1147,7 @@ public class Configurator {
     			try {
     				converted=PropertyHelper.getConvertedValue(obj, field, props, propertyValue, true);
     				if(converted != null)
-    					setField(field, obj, converted);
+    					Util.setField(field, obj, converted);
     			}
     			catch(Exception e) {
     				String name=obj instanceof Protocol? ((Protocol)obj).getName() : obj.getClass().getName();
@@ -1156,30 +1189,7 @@ public class Configurator {
     }
 
 
-    public static void setField(Field field, Object target, Object value) {
-        if(!Modifier.isPublic(field.getModifiers())) {
-            field.setAccessible(true);
-        }
-        try {
-            field.set(target, value);
-        }
-        catch(IllegalAccessException iae) {
-            throw new IllegalArgumentException("Could not set field " + field, iae);
-        }
-    }
-
-    public static Object getField(Field field, Object target) {
-        if(!Modifier.isPublic(field.getModifiers())) {
-            field.setAccessible(true);
-        }
-        try {
-            return field.get(target);
-        }
-        catch(IllegalAccessException iae) {
-            throw new IllegalArgumentException("Could not get field " + field, iae);
-        }
-    }
-
+  
 
     private static String grabSystemProp(Property annotation) {
         String[] system_property_names=annotation.systemProperty();
@@ -1187,7 +1197,7 @@ public class Configurator {
 
         for(String system_property_name: system_property_names) {
             if(system_property_name != null && system_property_name.length() > 0) {
-                if(system_property_name.equals(Global.BIND_ADDR) || system_property_name.equals(Global.BIND_ADDR_OLD))
+                if(system_property_name.equals(Global.BIND_ADDR))
                     if(Util.isBindAddressPropertyIgnored())
                         continue;
                 
@@ -1209,102 +1219,7 @@ public class Configurator {
 
 
 
-    private static class ProtocolReq {
-        final Vector<Integer> up_reqs=new Vector<Integer>();
-        final Vector<Integer> down_reqs=new Vector<Integer>();
-        final Vector<Integer> up_provides=new Vector<Integer>();
-        final Vector<Integer> down_provides=new Vector<Integer>();
-        final String name;
 
-        ProtocolReq(Protocol p) {
-            this.name=p.getName();
-            if(p.requiredUpServices() != null) {
-                up_reqs.addAll(p.requiredUpServices());
-            }
-            if(p.requiredDownServices() != null) {
-                down_reqs.addAll(p.requiredDownServices());
-            }
-
-            if(p.providedUpServices() != null) {
-                up_provides.addAll(p.providedUpServices());
-            }
-            if(p.providedDownServices() != null) {
-                down_provides.addAll(p.providedDownServices());
-            }
-
-        }
-
-        boolean providesUpService(int evt_type) {
-            for(Integer type:up_provides) {
-                if(type == evt_type)
-                    return true;
-            }
-            return false;
-        }
-
-        boolean providesDownService(int evt_type) {
-
-            for(Integer type:down_provides) {
-                if(type == evt_type)
-                    return true;
-            }
-            return false;
-        }
-
-        public String toString() {
-            StringBuilder ret=new StringBuilder();
-            ret.append('\n' + name + ':');
-            if(!up_reqs.isEmpty())
-                ret.append("\nRequires from above: " + printUpReqs());
-
-            if(!down_reqs.isEmpty())
-                ret.append("\nRequires from below: " + printDownReqs());
-
-            if(!up_provides.isEmpty())
-                ret.append("\nProvides to above: " + printUpProvides());
-
-            if(!down_provides.isEmpty())
-                ret.append("\nProvides to below: ").append(printDownProvides());
-            return ret.toString();
-        }
-
-        String printUpReqs() {
-            StringBuilder ret;
-            ret=new StringBuilder("[");
-            for(Integer type:up_reqs) {
-                ret.append(Event.type2String(type) + ' ');
-            }
-            return ret.toString() + ']';
-        }
-
-        String printDownReqs() {
-            StringBuilder ret=new StringBuilder("[");
-            for(Integer type:down_reqs) {
-                ret.append(Event.type2String(type) + ' ');
-            }
-            return ret.toString() + ']';
-        }
-
-        String printUpProvides() {
-            StringBuilder ret=new StringBuilder("[");
-            for(Integer type:up_provides) {
-                ret.append(Event.type2String(type) + ' ');
-            }
-            return ret.toString() + ']';
-        }
-
-        String printDownProvides() {
-            StringBuilder ret=new StringBuilder("[");
-            for(Integer type:down_provides) {
-                ret.append(Event.type2String(type) + ' ');
-            }
-            return ret.toString() + ']';
-        }
-    }
-
-
-  
-    
     public static class InetAddressInfo {
     	Protocol protocol ;
     	AccessibleObject fieldOrMethod ;

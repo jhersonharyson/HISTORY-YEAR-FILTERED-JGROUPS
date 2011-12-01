@@ -9,10 +9,7 @@ import org.jgroups.stack.Protocol;
 import org.jgroups.util.Range;
 import org.jgroups.util.Util;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Vector;
+import java.util.*;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
@@ -41,14 +38,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * @author Bela Ban
  */
 @MBean(description="Fragments messages larger than fragmentation size into smaller packets")
-@DeprecatedProperty(names={"overhead"})
 public class FRAG2 extends Protocol {
     
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
     
     @Property(description="The max number of bytes in a message. Larger messages will be fragmented")
-    int frag_size=1500;
+    int frag_size=60000;
   
     /* --------------------------------------------- Fields ------------------------------------------------------ */
     
@@ -61,7 +57,7 @@ public class FRAG2 extends Protocol {
     /** Used to assign fragmentation-specific sequence IDs (monotonically increasing) */
     private int curr_id=1;
 
-    private final Vector<Address> members=new Vector<Address>(11);    
+    private final List<Address> members=new ArrayList<Address>(11);
 
     @ManagedAttribute(description="Number of sent messages")
     AtomicLong num_sent_msgs=new AtomicLong(0);
@@ -74,10 +70,6 @@ public class FRAG2 extends Protocol {
 
     public int getFragSize() {return frag_size;}
     public void setFragSize(int s) {frag_size=s;}
-    /** @deprecated overhead was removed in 2.6.10 */
-    public int getOverhead() {return 0;}
-    /** @deprecated overhead was removed in 2.6.10 */
-    public void setOverhead(int o) {}
     public long getNumberOfSentMessages() {return num_sent_msgs.get();}
     public long getNumberOfSentFragments() {return num_sent_frags.get();}
     public long getNumberOfReceivedMessages() {return num_received_msgs.get();}
@@ -191,8 +183,8 @@ public class FRAG2 extends Protocol {
 
 
     private void handleViewChange(View view) {
-        Vector<Address> new_mbrs=view.getMembers(), left_mbrs;
-        left_mbrs=Util.determineLeftMembers(members, new_mbrs);
+        List<Address> new_mbrs=view.getMembers();
+        List<Address> left_mbrs=Util.determineLeftMembers(members, new_mbrs);
         members.clear();
         members.addAll(new_mbrs);
 

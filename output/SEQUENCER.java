@@ -2,7 +2,6 @@
 package org.jgroups.protocols;
 
 import org.jgroups.*;
-import org.jgroups.annotations.Experimental;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
@@ -19,7 +18,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * Implementation of total order protocol using a sequencer. Consult doc/design/SEQUENCER.txt for details
  * @author Bela Ban
  */
-@Experimental
 @MBean(description="Implementation of total order protocol using a sequencer")
 public class SEQUENCER extends Protocol {
     private Address                    local_addr=null, coord=null;
@@ -82,7 +80,7 @@ public class SEQUENCER extends Protocol {
                 if(msg.isFlagSet(Message.NO_TOTAL_ORDER))
                     break;
                 Address dest=msg.getDest();
-                if(dest == null || dest.isMulticastAddress()) { // only handle multicasts
+                if(dest == null) { // only handle multicasts
                     long next_seqno=seqno.getAndIncrement();
                     if(is_coord) {
                         SequencerHeader hdr=new SequencerHeader(SequencerHeader.BCAST, local_addr, next_seqno);
@@ -166,7 +164,7 @@ public class SEQUENCER extends Protocol {
     /* --------------------------------- Private Methods ----------------------------------- */
 
     private void handleViewChange(View v) {
-        Vector<Address> mbrs=v.getMembers();
+        List<Address> mbrs=v.getMembers();
         if(mbrs.isEmpty()) return;
         boolean coord_changed=false;
 
@@ -174,7 +172,7 @@ public class SEQUENCER extends Protocol {
             members.clear();
             members.addAll(mbrs);
             Address prev_coord=coord;
-            coord=mbrs.firstElement();
+            coord=mbrs.iterator().next();
             is_coord=local_addr != null && local_addr.equals(coord);
             coord_changed=prev_coord != null && !prev_coord.equals(coord);
         }
@@ -361,7 +359,7 @@ public class SEQUENCER extends Protocol {
         }
 
         public Address getOriginalSender() {
-            return tag != null? tag.getCoordAddress() : null;
+            return tag != null? tag.getCreator() : null;
         }
 
         public long getSeqno() {
@@ -386,12 +384,12 @@ public class SEQUENCER extends Protocol {
         }
 
   
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             out.writeByte(type);
             Util.writeStreamable(tag, out);
         }
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             type=in.readByte();
             tag=(ViewId)Util.readStreamable(ViewId.class, in);
         }

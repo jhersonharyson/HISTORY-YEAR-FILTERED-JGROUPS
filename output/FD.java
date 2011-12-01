@@ -38,7 +38,6 @@ import java.util.concurrent.locks.ReentrantLock;
  * @author Bela Ban
  */
 @MBean(description="Failure detection based on simple heartbeat protocol")
-@DeprecatedProperty(names={"shun"})
 public class FD extends Protocol {
     
     /* -----------------------------------------    Properties     -------------------------------------------------- */
@@ -108,10 +107,6 @@ public class FD extends Protocol {
     public int getMaxTries() {return max_tries;}
     public void setMaxTries(int max_tries) {this.max_tries=max_tries;}
     public int getCurrentNumTries() {return num_tries;}
-    @Deprecated
-    public static boolean isShun() {return false;}
-    @Deprecated
-    public void setShun(boolean flag) {}
     @ManagedOperation(description="Print suspect history")
     public String printSuspectHistory() {
         StringBuilder sb=new StringBuilder();
@@ -168,6 +163,16 @@ public class FD extends Protocol {
         return new Monitor();
     }
 
+    @ManagedOperation(description="Stops checking for crashed members")
+    public void stopFailureDetection() {
+        stopMonitor();
+    }
+
+    @ManagedOperation(description="Resumes checking for crashed members")
+    public void startFailureDetection() {
+        startMonitor();
+    }
+
     /** Requires lock to held by caller */
     @GuardedBy("lock")
     private void startMonitor() {
@@ -186,6 +191,9 @@ public class FD extends Protocol {
             monitor_future=null;
         }
     }
+
+    @ManagedAttribute(description="Whether the failure detection monitor is running",writable=false)
+    public boolean isMonitorRunning() {return monitor_future != null && !monitor_future.isDone();}
 
     /** Restarts the monitor if the ping destination has changed. If not, this is a no-op.
      * Requires lock to be held by the caller */
@@ -390,16 +398,16 @@ public class FD extends Protocol {
         }
 
 
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             out.writeByte(type);
             Util.writeAddresses(mbrs, out);
             Util.writeAddress(from, out);
         }
 
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             type=in.readByte();
-            mbrs=(Collection<Address>)Util.readAddresses(in, Vector.class);
+            mbrs=(Collection<Address>)Util.readAddresses(in, ArrayList.class);
             from=Util.readAddress(in);
         }
 
@@ -475,7 +483,7 @@ public class FD extends Protocol {
      * any longer. Then the task terminates.
      */
     protected final class Broadcaster {
-        final Vector<Address> suspected_mbrs=new Vector<Address>(7);
+        final List<Address> suspected_mbrs=new ArrayList<Address>(7);
         final Lock bcast_lock=new ReentrantLock();
         @GuardedBy("bcast_lock")
         Future<?> bcast_future=null;
@@ -483,7 +491,7 @@ public class FD extends Protocol {
         BroadcastTask task;
 
 
-        Vector<Address> getSuspectedMembers() {
+        List<Address> getSuspectedMembers() {
             return suspected_mbrs;
         }
 
@@ -533,7 +541,7 @@ public class FD extends Protocol {
             if(!members.contains(mbr)) return;
             synchronized(suspected_mbrs) {
                 if(!suspected_mbrs.contains(mbr)) {
-                    suspected_mbrs.addElement(mbr);
+                    suspected_mbrs.add(mbr);
                     startBroadcastTask(mbr);
                 }
             }
@@ -543,7 +551,7 @@ public class FD extends Protocol {
             if(suspected_mbr == null) return;
             if(log.isDebugEnabled()) log.debug("member is " + suspected_mbr);
             synchronized(suspected_mbrs) {
-                suspected_mbrs.removeElement(suspected_mbr);
+                suspected_mbrs.remove(suspected_mbr);
                 if(suspected_mbrs.isEmpty())
                     stopBroadcastTask();
             }
@@ -563,10 +571,10 @@ public class FD extends Protocol {
 
 
     protected final class BroadcastTask implements Runnable {
-        private final Vector<Address> suspected_members=new Vector<Address>();
+        private final List<Address> suspected_members=new ArrayList<Address>();
 
 
-        BroadcastTask(Vector<Address> suspected_members) {
+        BroadcastTask(List<Address> suspected_members) {
             this.suspected_members.addAll(suspected_members);
         }
 
@@ -588,7 +596,7 @@ public class FD extends Protocol {
                 }
 
                 hdr=new FdHeader(FdHeader.SUSPECT);
-                hdr.mbrs=new Vector<Address>(suspected_members);
+                hdr.mbrs=new ArrayList<Address>(suspected_members);
                 hdr.from=local_addr;
             }
             suspect_msg=new Message();       // mcast SUSPECT to all members

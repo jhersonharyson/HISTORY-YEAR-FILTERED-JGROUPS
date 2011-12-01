@@ -6,8 +6,6 @@ import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.conf.PropertyConverter;
 import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.protocols.TP;
-import org.jgroups.util.ThreadFactory;
-import org.jgroups.util.TimeScheduler;
 import org.jgroups.util.Tuple;
 import org.jgroups.util.Util;
 
@@ -31,7 +29,7 @@ import java.util.concurrent.ConcurrentMap;
  *
  * @author Bela Ban
  */
-public class ProtocolStack extends Protocol implements Transport {
+public class ProtocolStack extends Protocol {
     public static final int ABOVE = 1; // used by insertProtocol()
     public static final int BELOW = 2; // used by insertProtocol()
 
@@ -48,7 +46,7 @@ public class ProtocolStack extends Protocol implements Transport {
     private volatile boolean              stopped=true;
 
 
-    private final TP.ProbeHandler props_handler=new TP.ProbeHandler() {
+    private final DiagnosticsHandler.ProbeHandler props_handler=new DiagnosticsHandler.ProbeHandler() {
 
         public Map<String, String> handleProbe(String... keys) {
             for(String key: keys) {
@@ -58,27 +56,95 @@ public class ProtocolStack extends Protocol implements Transport {
                     map.put("props", tmp);
                     return map;
                 }
+                if(key.startsWith("print-protocols")) {
+                    List<Protocol> prots=getProtocols();
+                    Collections.reverse(prots);
+                    StringBuilder sb=new StringBuilder();
+                    for(Protocol prot: prots)
+                        sb.append(prot.getName()).append("\n");
+                    HashMap<String, String> map=new HashMap<String, String>(1);
+                    map.put("protocols", sb.toString());
+                    return map;
+                }
+                if(key.startsWith("remove-protocol")) {
+                    key=key.substring("remove-protocol".length());
+                    int index=key.indexOf("=");
+                    if(index != -1) {
+                        String prot_name=key.substring(index +1);
+                        if(prot_name != null && prot_name.length() > 0) {
+                            try {
+                                Protocol removed=removeProtocol(prot_name);
+                                if(removed != null)
+                                    log.debug("removed protocol " + prot_name + " from stack");
+                            }
+                            catch(Exception e) {
+                                log.error("failed removing protocol " + prot_name, e);
+                            }
+                        }
+                    }
+                }
+                if(key.startsWith("insert-protocol")) {
+                    key=key.substring("insert-protocol".length()+1);
+                    int index=key.indexOf("=");
+                    if(index == -1) break;
+
+                    // 1. name of the protocol to be inserted
+                    String prot_name=key.substring(0, index).trim();
+                    Protocol prot=null;
+                    try {
+                        prot=createProtocol(prot_name);
+                        prot.init();
+                        prot.start();
+                    }
+                    catch(Exception e) {
+                        log.error("failed creating an instance of " + prot_name, e);
+                        break;
+                    }
+
+                    key=key.substring(index+1);
+
+                    index=key.indexOf('=');
+                    if(index == -1) {
+                        log.error("= missing in insert-protocol command");
+                        break;
+                    }
+
+                    // 2. "above" or "below"
+                    String tmp=key.substring(0, index);
+                    if(!tmp.equalsIgnoreCase("above") && !tmp.equalsIgnoreCase("below")) {
+                        log.error("Missing \"above\" or \"below\" in insert-protocol command");
+                        break;
+                    }
+
+                    key=key.substring(index+1);
+                    String neighbor_prot=key.trim();
+                    Protocol neighbor=findProtocol(neighbor_prot);
+                    if(neighbor == null) {
+                        log.error("Neighbor protocol " + neighbor_prot + " not found in stack");
+                        break;
+                    }
+                    int position=tmp.equalsIgnoreCase("above")? ABOVE : BELOW;
+                    try {
+                        insertProtocol(prot, position, neighbor.getClass());
+                    }
+                    catch(Exception e) {
+                        log.error("failed inserting protocol " + prot_name + " " + tmp + " " + neighbor_prot, e);
+                    }
+                }
             }
             return null;
         }
 
         public String[] supportedKeys() {
-            return new String[]{"props"};
+            return new String[]{"props", "print-protocols", "\nremove-protocol=<name>", "\ninsert-protocol=<name>;above | below=<name>"};
         }
     };
 
 
-    public ProtocolStack(JChannel channel) throws ChannelException {
-        // this.configs=configs;
+    public ProtocolStack(JChannel channel) throws Exception {
         this.channel=channel;
-
         Class<?> tmp=ClassConfigurator.class; // load this class, trigger init()
-        try {
-            tmp.newInstance();
-        }
-        catch(Exception e) {
-            throw new ChannelException("failed initializing ClassConfigurator", e);
-        }
+        tmp.newInstance();
     }
 
 
@@ -86,54 +152,12 @@ public class ProtocolStack extends Protocol implements Transport {
     public ProtocolStack() {
     }
 
+    public JChannel getChannel() {return channel;}
+
     public void setChannel(JChannel ch) {
         this.channel=ch;
     }
 
-    /**
-     * @deprecated Use {@link org.jgroups.stack.Protocol#getThreadFactory()}  instead
-     * @return
-     */
-    public ThreadFactory getThreadFactory() {
-        TP transport=getTransport();
-        return transport != null? transport.getThreadFactory() : null;
-    }
-
-    @Deprecated
-    public static ThreadFactory getTimerThreadFactory() {
-        throw new UnsupportedOperationException("get the timer thread factory directly from the transport");
-    }
-
-    /**
-     * @deprecated Use {@link org.jgroups.stack.Protocol#getThreadFactory()} instead
-     * @param f
-     */
-    public void setThreadFactory(ThreadFactory f) {
-    }
-
-    /**
-     * @deprecated Use {@link TP#setTimerThreadFactory(org.jgroups.util.ThreadFactory)} instead
-     * @param f
-     */
-    public static void setTimerThreadFactory(ThreadFactory f) {
-    }
-
-
-
-    /**
-     * @deprecated Use {@link org.jgroups.protocols.TP#getTimer()} to fetch the timer and call getCorePoolSize() directly
-     * @return
-     */
-    public int getTimerThreads() {
-        TP transport=getTransport();
-        TimeScheduler timer;
-        if(transport != null) {
-            timer=transport.getTimer();
-            if(timer != null)
-                return timer.getMinThreads();
-        }
-        return -1;
-    }
 
     /** Returns all protocols in a list, from top to bottom. <em>These are not copies of protocols,
      so modifications will affect the actual instances !</em> */
@@ -162,8 +186,8 @@ public class ProtocolStack extends Protocol implements Transport {
                 Field[] fields=clazz.getDeclaredFields();
                 for(Field field: fields) {
                     if(field.isAnnotationPresent(Property.class)) {
-                        Object value=Configurator.getField(field, prot);
-                        Configurator.setField(field, new_prot, value);
+                        Object value=Util.getField(field, prot);
+                        Util.setField(field, new_prot, value);
                     }
                 }
 
@@ -180,8 +204,8 @@ public class ProtocolStack extends Protocol implements Transport {
                         possible_names.add(Util.methodNameToAttributeName(methodName));
                         Field field=findField(prot, possible_names);
                         if(field != null) {
-                            Object value=Configurator.getField(field, prot);
-                            Configurator.setField(field, new_prot, value);
+                            Object value=Util.getField(field, prot);
+                            Util.setField(field, new_prot, value);
                         }
                     }
                 }
@@ -270,22 +294,6 @@ public class ProtocolStack extends Protocol implements Transport {
         }
 
         return retval;
-    }
-
-    /**
-     * @deprecated Use {@link org.jgroups.protocols.TP#getTimer()} instead to fetch the timer from the
-     * transport and then invoke the method on it
-     * @return
-     */
-    public String dumpTimerQueue() {
-        TP transport=getTransport();
-        TimeScheduler timer;
-        if(transport != null) {
-            timer=transport.getTimer();
-            if(timer != null)
-                return timer.dumpTimerTasks();
-        }
-        return "";
     }
 
     /**
@@ -403,7 +411,7 @@ public class ProtocolStack extends Protocol implements Transport {
             Property annotation;
             for(Field field: fields) {
                 if(field.isAnnotationPresent(Property.class)) {
-                    Object value=Configurator.getField(field, prot);
+                    Object value=Util.getField(field, prot);
                     if(value != null) {
                         annotation=field.getAnnotation(Property.class);
                         Class<?> conv_class=annotation.converter();
@@ -432,7 +440,7 @@ public class ProtocolStack extends Protocol implements Transport {
                     possible_names.add(Util.methodNameToAttributeName(methodName));
                     Field field=findField(prot, possible_names);
                     if(field != null) {
-                        Object value=Configurator.getField(field, prot);
+                        Object value=Util.getField(field, prot);
                         if(value != null) {
                             Class<?> conv_class=annotation.converter();
                             PropertyConverter conv=null;
@@ -547,7 +555,7 @@ public class ProtocolStack extends Protocol implements Transport {
 
         Protocol neighbor=findProtocol(neighbor_prot);
         if(neighbor == null)
-            throw new IllegalArgumentException("protocol \"" + neighbor_prot + "\" not found in " + stack.printProtocolSpec(false));
+            throw new IllegalArgumentException("protocol \"" + neighbor_prot + "\" not found in " + printProtocolSpec(false));
 
         if(position == ProtocolStack.BELOW && neighbor instanceof TP)
             throw new IllegalArgumentException("Cannot insert protocol " + prot.getName() + " below transport protocol");
@@ -604,7 +612,7 @@ public class ProtocolStack extends Protocol implements Transport {
 
         Protocol neighbor=findProtocol(neighbor_prots);
         if(neighbor == null)
-            throw new IllegalArgumentException("protocol \"" + neighbor_prots.toString() + "\" not found in " + stack.printProtocolSpec(false));
+            throw new IllegalArgumentException("protocol \"" + Arrays.toString(neighbor_prots) + "\" not found in " + stack.printProtocolSpec(false));
         insertProtocolInStack(prot, neighbor,  position);
     }
 
@@ -647,7 +655,24 @@ public class ProtocolStack extends Protocol implements Transport {
             below.setUpProtocol(above);
         prot.setUpProtocol(null);
         prot.setDownProtocol(null);
+        try {
+            prot.stop();
+        }
+        catch(Throwable t) {
+            log.error("failed stopping " + prot.getName() + ": " + t);
+        }
+        try {
+            prot.destroy();
+        }
+        catch(Throwable t) {
+            log.error("failed destroying " + prot.getName() + ": " + t);
+        }
         return prot;
+    }
+
+    public void removeProtocols(String ... protocols) throws Exception {
+        for(String protocol: protocols)
+            removeProtocol(protocol);
     }
 
 
@@ -733,6 +758,62 @@ public class ProtocolStack extends Protocol implements Transport {
         }
         return null;
     }
+
+    /**
+     * Replaces one protocol instance with another. Should be done before the stack is connected
+     * @param existing_prot
+     * @param new_prot
+     */
+    public void replaceProtocol(Protocol existing_prot, Protocol new_prot) throws Exception {
+        Protocol up_neighbor=existing_prot.getUpProtocol(), down_neighbor=existing_prot.getDownProtocol();
+
+        new_prot.setUpProtocol(existing_prot.getUpProtocol());
+        new_prot.setDownProtocol(existing_prot.getDownProtocol());
+        up_neighbor.setDownProtocol(new_prot);
+        if(down_neighbor != null)
+            down_neighbor.setUpProtocol(new_prot);
+
+        existing_prot.setDownProtocol(null);
+        existing_prot.setUpProtocol(null);
+        existing_prot.destroy();
+
+        if(new_prot.getUpProtocol() == this)
+            top_prot=new_prot;
+
+        new_prot.init();
+    }
+
+
+
+    protected Protocol createProtocol(String classname) throws Exception {
+        String defaultProtocolName=ProtocolConfiguration.protocol_prefix + '.' + classname;
+        Class<?> clazz=null;
+
+        try {
+            clazz=Util.loadClass(defaultProtocolName, getClass());
+        }
+        catch(ClassNotFoundException e) {
+        }
+
+        if(clazz == null) {
+            try {
+                clazz=Util.loadClass(classname, getClass());
+            }
+            catch(ClassNotFoundException e) {
+            }
+            if(clazz == null) {
+                throw new Exception("unable to load class for protocol " + classname + " (either as an absolute - "
+                                      + classname + " - or relative - " + defaultProtocolName + " - package name)");
+            }
+        }
+
+        Protocol retval=(Protocol)clazz.newInstance();
+        if(retval == null)
+            throw new Exception("creation of instance for protocol " + classname + "failed");
+        retval.setProtocolStack(this);
+        return retval;
+    }
+
 
     public void init() throws Exception {
         List<Protocol> protocols=getProtocols();
@@ -858,7 +939,14 @@ public class ProtocolStack extends Protocol implements Transport {
                                 continue;
                             }
                             else {
-                                prot.start();
+                                try {
+                                    prot.start();
+                                }
+                                catch(Exception ex) {
+                                    counter.decrementStartCount();
+                                    up_prots.remove(cluster_name);
+                                    throw ex;
+                                }
                                 above_prot=prot;
                                 continue;
                             }
@@ -918,48 +1006,22 @@ public class ProtocolStack extends Protocol implements Transport {
         stopped=true;
     }
 
-    /**
-     * Not needed anymore, just left in here for backwards compatibility with JBoss AS
-     * @deprecated
-     */
-    public void flushEvents() {
-
-    }
-
-
-
-    /*--------------------------- Transport interface ------------------------------*/
-
-    public void send(Message msg) throws Exception {
-        down(new Event(Event.MSG, msg));
-    }
-
-    public Object receive(long timeout) throws Exception {
-        throw new Exception("ProtocolStack.receive(): not implemented !");
-    }
-    /*------------------------- End of  Transport interface ---------------------------*/
-
-
-
 
 
     /*--------------------------- Protocol functionality ------------------------------*/
     public String getName()  {return "ProtocolStack";}
 
-
-
-
     public Object up(Event evt) {
         return channel.up(evt);
     }
-
-
 
     public Object down(Event evt) {
         if(top_prot != null)
             return top_prot.down(evt);
         return null;
     }
+
+
 
 
     /**

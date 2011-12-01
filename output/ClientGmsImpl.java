@@ -80,19 +80,14 @@ public class ClientGmsImpl extends GmsImpl {
                     rsp=join_promise.getResult(gms.join_timeout); // clears the result
                     continue;
                 }*/
-                if(log.isDebugEnabled())
-                    log.debug("initial_mbrs are " + responses);
-                if(responses == null || responses.isEmpty()) {
-                    if(gms.disable_initial_coord) {
-                        if(log.isTraceEnabled())
-                            log.trace("received an initial membership of 0, but cannot become coordinator " + "(disable_initial_coord=true), will retry fetching the initial membership");
-                        continue;
-                    }
-                    if(log.isDebugEnabled())
-                        log.debug("no initial members discovered: creating group as first member");
+                if(responses.isEmpty()) {
+                    if(log.isTraceEnabled())
+                        log.trace(gms.local_addr + ": no initial members discovered: creating group as first member");
                     becomeSingletonMember(mbr);
                     return;
                 }
+                if(log.isTraceEnabled())
+                    log.trace(gms.local_addr + ": initial_mbrs are " + print(responses));
 
                 coord=determineCoord(responses);
                 if(coord == null) { // e.g. because we have all clients only
@@ -107,7 +102,7 @@ public class ClientGmsImpl extends GmsImpl {
                         log.trace("could not determine coordinator from responses " + responses);
 
                     // so the member to become singleton member (and thus coord) is the first of all clients
-                    Set<Address> clients=new TreeSet<Address>(); // sorted
+                    SortedSet<Address> clients=new TreeSet<Address>(); // sorted
                     clients.add(mbr); // add myself again (was removed by findInitialMembers())
                     for(PingData response: responses) {
                         Address client_addr=response.getAddress();
@@ -116,7 +111,7 @@ public class ClientGmsImpl extends GmsImpl {
                     }
                     if(log.isTraceEnabled())
                         log.trace("clients to choose new coord from are: " + clients);
-                    Address new_coord=clients.iterator().next();
+                    Address new_coord=clients.first();
                     if(new_coord.equals(mbr)) {
                         if(log.isTraceEnabled())
                             log.trace("I (" + mbr + ") am the first of the clients, will become coordinator");
@@ -133,8 +128,8 @@ public class ClientGmsImpl extends GmsImpl {
                 }
 
                 if(log.isDebugEnabled())
-                    log.debug("sending handleJoin(" + mbr + ") to " + coord);
-                sendJoinMessage(coord, mbr, joinWithStateTransfer,useFlushIfPresent);
+                    log.debug("sending JOIN(" + mbr + ") to " + coord);
+                sendJoinMessage(coord,mbr,joinWithStateTransfer,useFlushIfPresent);
             }
 
             try {
@@ -142,7 +137,7 @@ public class ClientGmsImpl extends GmsImpl {
                     rsp=join_promise.getResult(gms.join_timeout);
                 if(rsp == null) {
                     if(log.isWarnEnabled())
-                        log.warn("join(" + mbr + ") sent to " + coord + " timed out (after " + gms.join_timeout + " ms), retrying");
+                        log.warn("JOIN(" + mbr + ") sent to " + coord + " timed out (after " + gms.join_timeout + " ms), retrying");
                     continue;
                 }
                 
@@ -152,10 +147,10 @@ public class ClientGmsImpl extends GmsImpl {
                     throw new SecurityException(failure);
 
                 // 2. Install digest
-                if(rsp.getDigest() == null || rsp.getDigest().getSenders() == null) {
+                if(rsp.getDigest() == null || rsp.getDigest().size() == 0) {
                     if(log.isWarnEnabled())
                         log.warn("digest response has no senders: digest=" + rsp.getDigest());
-                    rsp=null; // just skip the response we guess
+                    rsp=null;
                     continue;
                 }
                 MutableDigest tmp_digest=new MutableDigest(rsp.getDigest());
@@ -174,8 +169,8 @@ public class ClientGmsImpl extends GmsImpl {
                     tmp_digest.seal();
                     gms.setDigest(tmp_digest);
 
-                    if(log.isDebugEnabled())
-                        log.debug("[" + gms.local_addr + "]: JoinRsp=" + tmp_view + " [size=" + tmp_view.size() + "]\n\n");
+                    if(log.isTraceEnabled())
+                        log.trace(gms.local_addr + ": JOIN-RSP=" + tmp_view + " [size=" + tmp_view.size() + "]\n\n");
 
                     if(!installView(tmp_view)) {
                         if(log.isErrorEnabled())
@@ -231,13 +226,14 @@ public class ClientGmsImpl extends GmsImpl {
     }
 
 
+    /* --------------------------- Private Methods ------------------------------------ */
+    
     /**
      * Called by join(). Installs the view returned by calling Coord.handleJoin() and
      * becomes coordinator.
      */
     private boolean installView(View new_view) {
-        Vector<Address> mems=new_view.getMembers();
-        if(log.isDebugEnabled()) log.debug("new_view=" + new_view);
+        List<Address> mems=new_view.getMembers();
         if(gms.local_addr == null || mems == null || !mems.contains(gms.local_addr)) {
             if(log.isErrorEnabled())
                 log.error("I (" + gms.local_addr + ") am not member of " + mems + ", will not install view");
@@ -251,9 +247,12 @@ public class ClientGmsImpl extends GmsImpl {
     }
 
 
-
-    /* --------------------------- Private Methods ------------------------------------ */
-
+    protected static String print(List<PingData> rsps) {
+        StringBuilder sb=new StringBuilder();
+        for(PingData rsp: rsps)
+            sb.append(rsp.getAddress() + " ");
+        return sb.toString();
+    }
 
     void sendJoinMessage(Address coord, Address mbr,boolean joinWithTransfer, boolean useFlushIfPresent) {
         Message msg;
@@ -283,7 +282,7 @@ public class ClientGmsImpl extends GmsImpl {
         Map<Address,Integer> votes=new HashMap<Address,Integer>(5);
 
         // count *all* the votes (unlike the 2000 election)
-        for(PingData mbr:mbrs) {
+        for(PingData mbr: mbrs) {
             if(mbr.hasCoord()) {
                 if(!votes.containsKey(mbr.getCoordAddress()))
                     votes.put(mbr.getCoordAddress(), 1);
@@ -294,7 +293,7 @@ public class ClientGmsImpl extends GmsImpl {
             }
         }
         // we have seen members say someone else is coordinator but they disagree
-        for(PingData mbr:mbrs) {
+        for(PingData mbr: mbrs) {
             // remove members who don't agree with the election (Florida)
             if (votes.containsKey(mbr.getAddress()) && (!mbr.isCoord())) {
                 votes.remove(mbr.getAddress());
@@ -328,14 +327,14 @@ public class ClientGmsImpl extends GmsImpl {
     void becomeSingletonMember(Address mbr) {
         Digest initial_digest;
         ViewId view_id;
-        Vector<Address> mbrs=new Vector<Address>(1);
+        List<Address> mbrs=new ArrayList<Address>(1);
 
         // set the initial digest (since I'm the first member)
         initial_digest=new Digest(gms.local_addr, 0, 0); // initial seqno mcast by me will be 1 (highest seen +1)
         gms.setDigest(initial_digest);
 
         view_id=new ViewId(mbr);       // create singleton view with mbr as only member
-        mbrs.addElement(mbr);
+        mbrs.add(mbr);
 
         View new_view=new View(view_id, mbrs);
         gms.up(new Event(Event.PREPARE_VIEW,new_view));
@@ -346,7 +345,7 @@ public class ClientGmsImpl extends GmsImpl {
 
         gms.getUpProtocol().up(new Event(Event.BECOME_SERVER));
         gms.getDownProtocol().down(new Event(Event.BECOME_SERVER));
-        if(log.isDebugEnabled()) log.debug("created group (first member). My view is " + gms.view_id +
-                                           ", impl is " + gms.getImpl().getClass().getName());
+        if(log.isDebugEnabled()) log.debug("created group (first member). My view is " + gms.getViewId() +
+                                             ", impl is " + gms.getImpl().getClass().getName());
     }
 }

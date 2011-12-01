@@ -4,6 +4,7 @@ import org.jgroups.Event;
 import org.jgroups.Global;
 import org.jgroups.Header;
 import org.jgroups.Message;
+import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.Protocol;
 
@@ -21,6 +22,7 @@ import java.util.zip.Inflater;
  * 
  * @author Bela Ban
  */
+@MBean(description="Compresses messages to send and uncompresses received messages")
 public class COMPRESS extends Protocol {   
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
@@ -186,11 +188,11 @@ public class COMPRESS extends Protocol {
             return Global.INT_SIZE;
         }
 
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             out.writeInt(original_size);
         }
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             original_size=in.readInt();
         }
     }

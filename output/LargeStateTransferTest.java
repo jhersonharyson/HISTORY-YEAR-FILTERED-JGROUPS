@@ -1,10 +1,9 @@
 package org.jgroups.tests;
 
 
-import org.jgroups.ChannelException;
-import org.jgroups.ExtendedReceiverAdapter;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
+import org.jgroups.ReceiverAdapter;
 import org.jgroups.View;
 import org.jgroups.protocols.TP;
 import org.jgroups.protocols.pbcast.GMS;
@@ -15,7 +14,8 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.io.*;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 /**
  * Tests transfer of large states (http://jira.jboss.com/jira/browse/JGRP-225).
@@ -53,25 +53,25 @@ public class LargeStateTransferTest extends ChannelTestBase {
     }
 
 
-    public void testStateTransfer1() throws ChannelException {
+    public void testStateTransfer1() throws Exception {
         _testStateTransfer(SIZE_1, "testStateTransfer1");
     }
 
-    public void testStateTransfer2() throws ChannelException {
+    public void testStateTransfer2() throws Exception {
         _testStateTransfer(SIZE_2, "testStateTransfer2");
     }
 
-    public void testStateTransfer3() throws ChannelException {
+    public void testStateTransfer3() throws Exception {
         _testStateTransfer(SIZE_3, "testStateTransfer3");
     }
 
-    public void testStateTransfer4() throws ChannelException {
+    public void testStateTransfer4() throws Exception {
         _testStateTransfer(SIZE_4, "testStateTransfer4");
     }
 
 
 
-    private void _testStateTransfer(int size, String suffix) throws ChannelException {
+    private void _testStateTransfer(int size, String suffix) throws Exception {
         final String GROUP="LargeStateTransferTest-" + suffix;
         provider.setReceiver(new Provider(size));
         provider.connect(GROUP);
@@ -114,63 +114,41 @@ public class LargeStateTransferTest extends ChannelTestBase {
     }
 
 
-    private static class Provider extends ExtendedReceiverAdapter {
+    private static class Provider extends ReceiverAdapter {
         private final byte[] state;
 
         public Provider(int size) {
             state=new byte[size];
         }
 
-        public byte[] getState() {
-            return state;
-        }
-
-        public void getState(OutputStream ostream){      
-            DataOutputStream out =null;
-            try{
-               out=new DataOutputStream(ostream);
-               out.writeInt(state.length);
-               out.write(state, 0, state.length);
-            }
-            catch (IOException e){}
-            finally{
-               Util.close(out);
-            }
-        }
-        public void setState(byte[] state) {
-            throw new UnsupportedOperationException("not implemented by provider");
+        public void getState(OutputStream ostream) throws Exception {
+            ostream.write(state, 0, state.length);
         }
     }
 
 
-    private static class Requester extends ExtendedReceiverAdapter {
+    private static class Requester extends ReceiverAdapter {
         private final Promise<Integer> promise;
 
         public Requester(Promise<Integer> p) {
             this.promise=p;
         }
 
-        public byte[] getState() {
-            throw new UnsupportedOperationException("not implemented by requester");
-        }
 
-        public void setState(byte[] state) {
-            promise.setResult(new Integer(state.length));
-        }
-        public void setState(InputStream istream) {
-            DataInputStream in=null;
+        public void setState(InputStream istream) throws Exception {
             int size=0;
+            byte[] buf=new byte[50000];
             try {
-                in=new DataInputStream(istream);
-                size=in.readInt();
-                byte[] stateReceived=new byte[size];
-                in.readFully(stateReceived, 0, stateReceived.length);
+                for(;;) {
+                    int read=istream.read(buf, 0, buf.length);
+                    if(read == -1)
+                        break;
+                    size+=read;
+                }
             }
-            catch (IOException e) {}
             finally {
-                Util.close(in);
+                promise.setResult(size);
             }
-            promise.setResult(size);
         }
     }
 

@@ -36,7 +36,6 @@ public class DuplicateTest extends ChannelTestBase {
     @BeforeMethod
     void init() throws Exception {
         createChannels(true, true, (short)5, (short)5);
-        c1.setName("C1"); c2.setName("C2"); c3.setName("C3");
         a1=c1.getAddress();
         a2=c2.getAddress();
         a3=c3.getAddress();
@@ -195,11 +194,15 @@ public class DuplicateTest extends ChannelTestBase {
         c2=createChannel(c1);
         c3=createChannel(c1);
 
+        c1.setName("C1");
+        c2.setName("C2");
+        c3.setName("c3");
+
         c1.connect("DuplicateTest");
         c2.connect("DuplicateTest");
         c3.connect("DuplicateTest");
 
-        assert c3.getView().size() == 3 : "view was " + c1.getView() + " but should have been 3";
+        Util.waitUntilAllChannelsHaveSameSize(20000, 1000, c1, c2, c3);
     }
 
 

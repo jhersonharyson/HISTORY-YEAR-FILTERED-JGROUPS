@@ -2,20 +2,20 @@
 package org.jgroups.protocols.pbcast;
 
 import org.jgroups.*;
-import org.jgroups.util.Promise;
 import org.jgroups.util.Digest;
-import org.jgroups.util.MergeId;
+import org.jgroups.util.Promise;
 
-import java.util.Vector;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
+import java.util.List;
 
 
 /**
  * @author Bela Ban
  */
 public class ParticipantGmsImpl extends ServerGmsImpl {
-    private final Vector<Address>   suspected_mbrs=new Vector<Address>(11);
+    private final List<Address>     suspected_mbrs=new ArrayList<Address>(11);
     private final Promise<Boolean>  leave_promise=new Promise<Boolean>();
 
 
@@ -26,7 +26,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
 
     public void init() throws Exception {
         super.init();
-        suspected_mbrs.removeAllElements();
+        suspected_mbrs.clear();
         leave_promise.reset();
     }
 
@@ -79,7 +79,8 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
     public void handleJoinResponse(JoinRsp join_rsp) {
         View v=join_rsp.getView();
         ViewId tmp_vid=v != null? v.getVid() : null;
-        if(tmp_vid != null && gms.view_id != null && tmp_vid.compareTo(gms.view_id) > 0) {
+        ViewId my_view=gms.getViewId();
+        if(tmp_vid != null && my_view != null && tmp_vid.compareToIDs(my_view) > 0) {
             gms.installView(v);
         }
     }
@@ -115,7 +116,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
 
         for(Address mbr: suspectedMembers) {
             if(!suspected_mbrs.contains(mbr))
-                suspected_mbrs.addElement(mbr);
+                suspected_mbrs.add(mbr);
         }
 
         if(log.isDebugEnabled())
@@ -125,7 +126,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
             if(log.isDebugEnabled())
                 log.debug("members are " + gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
 
-            suspected_mbrs.removeAllElements();
+            suspected_mbrs.clear();
             gms.becomeCoordinator();
             for(Address mbr: suspectedMembers) {
                 gms.getViewHandler().add(new Request(Request.SUSPECT, mbr, true));
@@ -143,8 +144,8 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
      *                 be set by GMS
      */
     public void handleViewChange(View new_view, Digest digest) {
-        Vector<Address> mbrs=new_view.getMembers();
-        suspected_mbrs.removeAllElements();
+        List<Address> mbrs=new_view.getMembers();
+        suspected_mbrs.clear();
         if(leaving && !mbrs.contains(gms.local_addr)) { // received a view in which I'm not member: ignore
             return;
         }
@@ -165,10 +166,10 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
      */
     boolean wouldIBeCoordinator() {
         Address new_coord;
-        Vector<Address> mbrs=gms.members.getMembers(); // getMembers() returns a *copy* of the membership vector
+        List<Address> mbrs=gms.members.getMembers(); // getMembers() returns a *copy* of the membership vector
         mbrs.removeAll(suspected_mbrs);
         if(mbrs.size() < 1) return false;
-        new_coord=mbrs.firstElement();
+        new_coord=mbrs.get(0);
         return gms.local_addr.equals(new_coord);
     }
 

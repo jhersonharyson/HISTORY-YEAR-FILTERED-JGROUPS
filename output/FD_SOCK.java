@@ -34,18 +34,24 @@ import java.util.concurrent.TimeUnit;
  * @author Bela Ban May 29 2001
  */
 @MBean(description="Failure detection protocol based on sockets connecting members")
-@DeprecatedProperty(names={"srv_sock_bind_addr"})
 public class FD_SOCK extends Protocol implements Runnable {
     private static final int NORMAL_TERMINATION=9;
     private static final int ABNORMAL_TERMINATION=-1;
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
 
+    @LocalAddress
     @Property(description="The NIC on which the ServerSocket should listen on. " +
-            "The following special values are also recognized: GLOBAL, SITE_LOCAL, LINK_LOCAL and NON_LOOPBACK",
-              systemProperty={Global.BIND_ADDR, Global.BIND_ADDR_OLD},
-              defaultValueIPv4=Global.NON_LOOPBACK_ADDRESS, defaultValueIPv6=Global.NON_LOOPBACK_ADDRESS)
-    InetAddress bind_addr=null; 
+      "The following special values are also recognized: GLOBAL, SITE_LOCAL, LINK_LOCAL and NON_LOOPBACK",
+              systemProperty={Global.BIND_ADDR},writable=false)
+    InetAddress bind_addr=null;
+
+    @Property(description="Use \"external_addr\" if you have hosts on different networks, behind " +
+      "firewalls. On each firewall, set up a port forwarding rule (sometimes called \"virtual server\") to " +
+      "the local IP (e.g. 192.168.1.100) of the host then on each host, set \"external_addr\" TCP transport " +
+      "parameter to the external (public IP) address of the firewall.",
+              systemProperty=Global.EXTERNAL_ADDR,writable=false)
+    protected InetAddress external_addr=null ;
     
     @Property(name="bind_interface", converter=PropertyConverters.BindInterface.class, 
     		description="The interface (NIC) which should be used by this transport", dependsUpon="bind_addr")
@@ -87,11 +93,11 @@ public class FD_SOCK extends Protocol implements Runnable {
     /* --------------------------------------------- Fields ------------------------------------------------------ */
 
     
-    private final Vector<Address> members=new Vector<Address>(11); // list of group members (updated on VIEW_CHANGE)
+    private final List<Address> members=new ArrayList<Address>(11); // list of group members (updated on VIEW_CHANGE)
 
     protected final Set<Address> suspected_mbrs=new HashSet<Address>();
 
-    private final Vector<Address> pingable_mbrs=new Vector<Address>(11);
+    private final List<Address> pingable_mbrs=new ArrayList<Address>(11);
 
     volatile boolean srv_sock_sent=false; // has own socket been broadcast yet ?
     /** Used to rendezvous on GET_CACHE and GET_CACHE_RSP */
@@ -268,6 +274,10 @@ public class FD_SOCK extends Protocol implements Runnable {
                     Map<String,Object> config=(Map<String,Object>)evt.getArg();
                     bind_addr=(InetAddress)config.get("bind_addr");
                 }
+                if(external_addr == null) {
+                    Map<String,Object> config=(Map<String,Object>)evt.getArg();
+                    external_addr=(InetAddress)config.get("external_addr");
+                }
                 break;
         }
 
@@ -286,8 +296,13 @@ public class FD_SOCK extends Protocol implements Runnable {
             case Event.CONNECT_WITH_STATE_TRANSFER:  
             case Event.CONNECT_USE_FLUSH:
             case Event.CONNECT_WITH_STATE_TRANSFER_USE_FLUSH: 	
-                Object ret=down_prot.down(evt);                
-                startServerSocket();
+                Object ret=down_prot.down(evt);
+                try {
+                    startServerSocket();
+                }
+                catch(Exception e) {
+                    throw new IllegalArgumentException("failed to start server socket", e);
+                }
                 return ret;
 
             case Event.DISCONNECT:                
@@ -300,15 +315,15 @@ public class FD_SOCK extends Protocol implements Runnable {
 
             case Event.VIEW_CHANGE:
                 View v=(View) evt.getArg();
-                final Vector<Address> new_mbrs=v.getMembers();
+                final List<Address> new_mbrs=v.getMembers();
 
                 synchronized(this) {
-                    members.removeAllElements();
+                    members.clear();
                     members.addAll(new_mbrs);
                     suspected_mbrs.retainAll(new_mbrs);
                     cache.keySet().retainAll(members); // remove all entries in 'cache' which are not in the new membership
                     bcast_task.adjustSuspectedMembers(members);
-                    pingable_mbrs.removeAllElements();
+                    pingable_mbrs.clear();
                     pingable_mbrs.addAll(members);
                     if(log.isDebugEnabled()) log.debug("VIEW_CHANGE received: " + members);
 
@@ -386,7 +401,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 // covers use cases #7 and #8 in ManualTests.txt
                 if(log.isDebugEnabled()) log.debug("could not create socket to " + ping_dest);
                 broadcastSuspectMessage(ping_dest);
-                pingable_mbrs.removeElement(ping_dest);
+                pingable_mbrs.remove(ping_dest);
                 continue;
             }
 
@@ -400,7 +415,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                         case NORMAL_TERMINATION:
                             if(log.isDebugEnabled())
                                 log.debug("peer " + ping_dest + " closed socket gracefully");
-                            pingable_mbrs.removeElement(ping_dest);
+                            pingable_mbrs.remove(ping_dest);
                             break;
                         case ABNORMAL_TERMINATION: // -1 means EOF
                             handleSocketClose(null);
@@ -465,7 +480,7 @@ public class FD_SOCK extends Protocol implements Runnable {
             if(log.isDebugEnabled())
                 log.debug("peer " + ping_dest + " closed socket (" + (ex != null ? ex.getClass().getName() : "eof") + ')');
             broadcastSuspectMessage(ping_dest);
-            pingable_mbrs.removeElement(ping_dest);
+            pingable_mbrs.remove(ping_dest);
         }
         else {
             if(log.isDebugEnabled()) log.debug("socket to " + ping_dest + " was closed gracefully");
@@ -551,10 +566,10 @@ public class FD_SOCK extends Protocol implements Runnable {
 
 
 
-    void startServerSocket() {
+    void startServerSocket() throws Exception {
         srv_sock=Util.createServerSocket(getSocketFactory(),
-                                         Global.FD_SOCK_SRV_SOCK, bind_addr, start_port); // grab a random unused port above 10000
-        srv_sock_addr=new IpAddress(bind_addr, srv_sock.getLocalPort());
+                                         Global.FD_SOCK_SRV_SOCK, bind_addr, start_port, start_port+port_range); // grab a random unused port above 10000
+        srv_sock_addr=new IpAddress(external_addr != null? external_addr : bind_addr, srv_sock.getLocalPort());
         if(srv_sock_handler != null) {
             srv_sock_handler.start(); // won't start if already running            
         }
@@ -763,12 +778,12 @@ public class FD_SOCK extends Protocol implements Runnable {
         if(pingable_mbrs == null || pingable_mbrs.size() < 2 || local_addr == null)
             return null;
         for(int i=0; i < pingable_mbrs.size(); i++) {
-            tmp=pingable_mbrs.elementAt(i);
+            tmp=pingable_mbrs.get(i);
             if(local_addr.equals(tmp)) {
                 if(i + 1 >= pingable_mbrs.size())
-                    return pingable_mbrs.elementAt(0);
+                    return pingable_mbrs.get(0);
                 else
-                    return pingable_mbrs.elementAt(i + 1);
+                    return pingable_mbrs.get(i + 1);
             }
         }
         return null;
@@ -776,7 +791,7 @@ public class FD_SOCK extends Protocol implements Runnable {
 
 
     Address determineCoordinator() {
-        return !members.isEmpty()? members.elementAt(0) : null;
+        return !members.isEmpty()? members.get(0) : null;
     }
 
 
@@ -906,7 +921,7 @@ public class FD_SOCK extends Protocol implements Runnable {
             return retval;
         }
 
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             int size;
             out.writeByte(type);
             Util.writeAddress(mbr, out);
@@ -930,7 +945,7 @@ public class FD_SOCK extends Protocol implements Runnable {
             }
         }
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             int size;
             type=in.readByte();
             mbr=Util.readAddress(in);
@@ -1165,7 +1180,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         /**
          * Removes all elements from suspected_mbrs that are <em>not</em> in the new membership
          */
-        public void adjustSuspectedMembers(Vector<Address> new_mbrship) {
+        public void adjustSuspectedMembers(List<Address> new_mbrship) {
             if(new_mbrship == null || new_mbrship.isEmpty()) return;
             synchronized(suspected_mbrs) {
                 boolean modified=suspected_mbrs.retainAll(new_mbrship);

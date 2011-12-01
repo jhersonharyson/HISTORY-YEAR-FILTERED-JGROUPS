@@ -52,14 +52,6 @@ public class TUNNEL extends TP {
     * --------------------------------------------------
     */
 
-    @Deprecated
-    @Property(name = "router_host", deprecatedMessage = "router_host is deprecated. Specify target GRs using gossip_router_hosts", description = "Router host address")
-    private String router_host = null;
-
-    @Deprecated
-    @Property(name = "router_port", deprecatedMessage = "router_port is deprecated. Specify target GRs using gossip_router_hosts", description = "Router port")
-    private int router_port = 0;
-
     @Property(description = "Interval in msec to attempt connecting back to router in case of torn connection. Default is 5000 msec")
     private long reconnect_interval = 5000;
 
@@ -86,7 +78,7 @@ public class TUNNEL extends TP {
         return false;
     }
 
-    @Property
+    @Property(description="A comma-separated list of GossipRouter hosts, e.g. HostA[12001],HostB[12001]")
    public void setGossipRouterHosts(String hosts) throws UnknownHostException {
       gossip_router_hosts.clear();
       // if we get passed value of List<SocketAddress>#toString() we have to strip []
@@ -98,26 +90,6 @@ public class TUNNEL extends TP {
 
    public String toString() {
       return "TUNNEL";
-   }
-
-   @Deprecated
-   public String getRouterHost() {
-      return router_host;
-   }
-
-   @Deprecated
-   public void setRouterHost(String router_host) {
-      this.router_host = router_host;
-   }
-
-   @Deprecated
-   public int getRouterPort() {
-      return router_port;
-   }
-
-   @Deprecated
-   public void setRouterPort(int router_port) {
-      this.router_port = router_port;
    }
 
    public long getReconnectInterval() {
@@ -153,24 +125,11 @@ public class TUNNEL extends TP {
             throw new Exception("TUNNEL and shared transport mode are not supported!");
         }
 
-        if ((router_host == null || router_port == 0) && gossip_router_hosts.isEmpty()) {
-            throw new Exception("either router_host and router_port have to be set or a list of gossip routers");
-        }
-
-        if (router_host != null && router_port != 0 && !gossip_router_hosts.isEmpty()) {
-            throw new Exception("cannot specify both router host and port along with gossip_router_hosts");
-        }
-
-        if (router_host != null && router_port != 0 && gossip_router_hosts.isEmpty()) {
-            gossip_router_hosts.add(new InetSocketAddress(router_host, router_port));
-        }
-
-        if (log.isDebugEnabled()) {
+        if (log.isDebugEnabled())
             log.debug("GossipRouters are:" + gossip_router_hosts.toString());
-        }
         
         stubManager = RouterStubManager.emptyGossipClientStubManager(this);
-        sock = getSocketFactory().createDatagramSocket(Global.TUNNEL_UCAST_SOCK, 0, bind_addr);
+        sock = getSocketFactory().createDatagramSocket(Global.TUNNEL_UCAST_SOCK, bind_port, bind_addr);
         
         // loopback turned on is mandatory
         loopback = true;
@@ -202,6 +161,9 @@ public class TUNNEL extends TP {
                  local = adapter.local_addr;
              }
              
+             if(stubManager != null) {
+                stubManager.destroyStubs();
+             }
              stubManager = new TUNNELStubManager(this,group,local,getReconnectInterval());
              for (InetSocketAddress gr : gossip_router_hosts) {
                  RouterStub stub = stubManager.createAndRegisterStub(gr.getHostName(), gr.getPort(), bind_addr);
@@ -374,7 +336,9 @@ public class TUNNEL extends TP {
               Collections.shuffle(stubs);  // todo: why is this needed ?
          for (RouterStub stub : stubs) {
             try {
-               stub.sendToAllMembers(group, data, offset, length);
+                if(!stub.isConnected())
+                    continue;
+                stub.sendToAllMembers(group, data, offset, length);
                if (log.isTraceEnabled())
                   log.trace("sent a message to all members, GR used " + stub.getGossipRouterAddress());
                sent = true;
@@ -394,7 +358,9 @@ public class TUNNEL extends TP {
               Collections.shuffle(stubs); 
          for (RouterStub stub : stubs) {
             try {
-               stub.sendToMember(group, dest, data, offset, length);
+                if(!stub.isConnected())
+                    continue;
+                stub.sendToMember(group, dest, data, offset, length);
                if (log.isDebugEnabled())
                   log.debug("sent a message to " + dest + ", GR used " + stub.getGossipRouterAddress());
                sent = true;

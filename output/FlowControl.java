@@ -323,7 +323,7 @@ public abstract class FlowControl extends Protocol {
                     break;
 
                 Address dest=msg.getDest();
-                boolean multicast=dest == null || dest.isMulticastAddress();
+                boolean multicast=dest == null;
                 boolean handle_multicasts=handleMulticastMessage();
                 boolean process=(handle_multicasts && multicast) || (!handle_multicasts && !multicast);
                 if(!process)
@@ -362,7 +362,7 @@ public abstract class FlowControl extends Protocol {
                     break;
 
                 Address dest=msg.getDest();
-                boolean multicast=dest == null || dest.isMulticastAddress();
+                boolean multicast=dest == null;
                 boolean handle_multicasts=handleMulticastMessage();
                 FcHeader hdr=(FcHeader)msg.getHeader(this.id);
                 boolean process=(handle_multicasts && multicast) || (!handle_multicasts && !multicast) || hdr != null;
@@ -426,7 +426,7 @@ public abstract class FlowControl extends Protocol {
                 if(frag_size > max_credits) {
                     log.warn("The fragmentation size of the fragmentation protocol is " + frag_size +
                             ", which is greater than the max credits. While this is not incorrect, " +
-                            "it may lead to long blockings. Frag size should be less than max_credits " +
+                            "it may cause blockings. Frag size should be less than max_credits " +
                             "(http://jira.jboss.com/jira/browse/JGRP-590)");
                 }
                 frag_size_received=true;
@@ -462,16 +462,14 @@ public abstract class FlowControl extends Protocol {
      * @param requested_credits Number of bytes that the sender has left to send messages to us
      */
     protected void handleCreditRequest(Map<Address,Credit> map, Address sender, long requested_credits) {
-        Credit cred;
-        if(sender == null || (cred=map.get(sender)) == null)
-            return;
-
-        long credit_response=Math.min(max_credits, Math.min(requested_credits, max_credits - cred.get()));
-        if(credit_response > 0) {
+        if(requested_credits > 0 && sender != null) {
+            Credit cred=map.get(sender);
+            if(cred == null)
+                return;
             if(log.isTraceEnabled())
-                log.trace("received credit request from " + sender + ": sending " + credit_response + " credits");
-            cred.set(max_credits);
-            sendCredit(sender, credit_response);
+                log.trace("received credit request from " + sender + ": sending " + requested_credits + " credits");
+            cred.increment(requested_credits);
+            sendCredit(sender, requested_credits);
         }
     }
 
@@ -502,7 +500,7 @@ public abstract class FlowControl extends Protocol {
     }
 
 
-    protected void handleViewChange(Vector<Address> mbrs) {
+    protected void handleViewChange(List<Address> mbrs) {
         if(mbrs == null) return;
         if(log.isTraceEnabled()) log.trace("new membership: " + mbrs);
 

@@ -1,17 +1,19 @@
 package org.jgroups.protocols.pbcast;
 
 import org.jgroups.*;
-import org.jgroups.annotations.DeprecatedProperty;
 import org.jgroups.annotations.GuardedBy;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
+import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.StateTransferInfo;
 import org.jgroups.util.Digest;
+import org.jgroups.util.StateTransferResult;
 import org.jgroups.util.Util;
 
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -21,12 +23,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * current digest and asks the application for a copy of its current state S.
  * Then the member returns both S and D to the requester. The requester first
  * sets its digest to D and then returns the state to the application.
- * 
  * @author Bela Ban
+ * @see STATE
+ * @see STATE_SOCK
  */
 @MBean(description="State transfer protocol based on byte array transfer")
-@DeprecatedProperty(names= { "use_flush", "flush_timeout" })
 public class STATE_TRANSFER extends Protocol {
+
+
 
     /* --------------------------------------------- JMX statistics --------------------------------------------- */
 
@@ -43,20 +47,21 @@ public class STATE_TRANSFER extends Protocol {
     private Address local_addr=null;
 
     @GuardedBy("members")
-    private final Vector<Address> members=new Vector<Address>();
+    private final List<Address> members=new ArrayList<Address>();
 
     /**
-     * Map<String,Set> of state requesters. Keys are state IDs, values are Sets
-     * of Addresses (one for each requester)
+     * Set of state requesters
      */
-    private final Map<String,Set<Address>> state_requesters=new HashMap<String,Set<Address>>();
+    private final Set<Address> state_requesters=new HashSet<Address>();
 
     /** set to true while waiting for a STATE_RSP */
     private volatile boolean waiting_for_state_response=false;
 
     private boolean flushProtocolInStack=false;
 
-    public STATE_TRANSFER() {}
+    /** Used to prevent spurious open and close barrier calls */
+    @ManagedAttribute(description="whether or not the barrier is closed")
+    protected AtomicBoolean barrier_closed=new AtomicBoolean(false);
 
 
     @ManagedAttribute
@@ -75,10 +80,10 @@ public class STATE_TRANSFER extends Protocol {
         return avg_state_size;
     }
 
-    public Vector<Integer> requiredDownServices() {
-        Vector<Integer> retval=new Vector<Integer>();
-        retval.addElement(new Integer(Event.GET_DIGEST));
-        retval.addElement(new Integer(Event.OVERWRITE_DIGEST));
+    public List<Integer> requiredDownServices() {
+        List<Integer> retval=new ArrayList<Integer>();
+        retval.add(Event.GET_DIGEST);
+        retval.add(Event.OVERWRITE_DIGEST);
         return retval;
     }
 
@@ -103,6 +108,26 @@ public class STATE_TRANSFER extends Protocol {
         waiting_for_state_response=false;
     }
 
+    @ManagedOperation(description="Closes BARRIER and suspends STABLE")
+    public void closeBarrierAndSuspendStable() {
+        if(!isDigestNeeded() || !barrier_closed.compareAndSet(false, true))
+            return;
+        if(log.isTraceEnabled())
+            log.trace(local_addr + ": sending down CLOSE_BARRIER and SUSPEND_STABLE");
+        down_prot.down(new Event(Event.CLOSE_BARRIER));
+        down_prot.down(new Event(Event.SUSPEND_STABLE));
+    }
+
+    @ManagedOperation(description="Opens BARRIER and resumes STABLE")
+    public void openBarrierAndResumeStable() {
+        if(!isDigestNeeded() || !barrier_closed.compareAndSet(true, false))
+            return;
+        if(log.isTraceEnabled())
+            log.trace(local_addr + ": sending down OPEN_BARRIER and RESUME_STABLE");
+        down_prot.down(new Event(Event.OPEN_BARRIER));
+        down_prot.down(new Event(Event.RESUME_STABLE));
+    }
+
     public Object up(Event evt) {
         switch(evt.getType()) {
 
@@ -114,19 +139,22 @@ public class STATE_TRANSFER extends Protocol {
 
                 switch(hdr.type) {
                     case StateHeader.STATE_REQ:
-                        handleStateReq(hdr);
+                        handleStateReq(msg.getSrc());
                         break;
                     case StateHeader.STATE_RSP:
-                        // fix for https://jira.jboss.org/jira/browse/JGRP-1013
-                        if(isDigestNeeded())
-                            down_prot.down(new Event(Event.CLOSE_BARRIER));
+                        closeBarrierAndSuspendStable(); // fix for https://jira.jboss.org/jira/browse/JGRP-1013
                         try {
                             handleStateRsp(hdr, msg.getBuffer());
                         }
-                        finally {
-                            if(isDigestNeeded())
-                                down_prot.down(new Event(Event.OPEN_BARRIER));
+                        catch(Throwable t) {
+                            handleException(t);
                         }
+                        finally {
+                            openBarrierAndResumeStable();
+                        }
+                        break;
+                    case StateHeader.STATE_EX:
+                        handleException((Throwable)msg.getObject());
                         break;
                     default:
                         if(log.isErrorEnabled())
@@ -169,30 +197,26 @@ public class STATE_TRANSFER extends Protocol {
                     target=info.target;
                     if(target.equals(local_addr)) {
                         if(log.isErrorEnabled())
-                            log.error("GET_STATE: cannot fetch state from myself !");
+                            log.error(local_addr + ": cannot fetch state from myself !");
                         target=null;
                     }
                 }
                 if(target == null) {
                     if(log.isDebugEnabled())
-                        log.debug("GET_STATE: first member (no state)");
+                        log.debug(local_addr + ": first member (no state)");
                     up_prot.up(new Event(Event.GET_STATE_OK, new StateTransferInfo()));
                 }
                 else {
                     Message state_req=new Message(target, null, null);
-                    state_req.putHeader(this.id, new StateHeader(StateHeader.STATE_REQ,
-                                                              local_addr,
-                                                              System.currentTimeMillis(),
-                                                              null,
-                                                              info.state_id));
+                    state_req.putHeader(this.id, new StateHeader(StateHeader.STATE_REQ));
                     if(log.isDebugEnabled())
-                        log.debug("GET_STATE: asking " + target + " for state");
+                        log.debug(local_addr + ": asking " + target + " for state");
 
                     // suspend sending and handling of message garbage collection gossip messages,
                     // fixes bugs #943480 and #938584). Wake up when state has been received
-                    if(log.isDebugEnabled())
+                    /*if(log.isDebugEnabled())
                         log.debug("passing down a SUSPEND_STABLE event");
-                    down_prot.down(new Event(Event.SUSPEND_STABLE, new Long(info.timeout)));
+                    down_prot.down(new Event(Event.SUSPEND_STABLE, new Long(info.timeout)));*/
                     waiting_for_state_response=true;
                     start=System.currentTimeMillis();
                     down_prot.down(new Event(Event.MSG, state_req));
@@ -228,93 +252,10 @@ public class STATE_TRANSFER extends Protocol {
         return !flushProtocolInStack;
     }
 
-    private void requestApplicationStates(Address requester, Digest digest, boolean open_barrier) {
-        Set<String> appl_ids=new HashSet<String>(state_requesters.keySet());
 
-        List<StateTransferInfo> responses=new LinkedList<StateTransferInfo>();
-        for(Iterator<String> it=appl_ids.iterator();it.hasNext();) {
-            String id=it.next();
-            StateTransferInfo info=new StateTransferInfo(requester, id, 0L, null);
-            StateTransferInfo rsp=(StateTransferInfo)up_prot.up(new Event(Event.GET_APPLSTATE, info));
-            responses.add(rsp);
-        }
-        if(open_barrier)
-            down_prot.down(new Event(Event.OPEN_BARRIER));
-        for(StateTransferInfo rsp:responses) {
-            sendApplicationStateResponse(rsp, digest);
-        }
-    }
-
-    private void sendApplicationStateResponse(StateTransferInfo rsp, Digest digest) {
-        byte[] state=rsp.state;
-        String id=rsp.state_id;
-        List<Message> responses=null;
-
-        synchronized(state_requesters) {
-            if(state_requesters.isEmpty()) {
-                if(log.isWarnEnabled())
-                    log.warn("GET_APPLSTATE_OK: received application state, but there are no requesters !");
-                return;
-            }
-            if(stats) {
-                num_state_reqs.incrementAndGet();
-                if(state != null)
-                    num_bytes_sent.addAndGet(state.length);
-                avg_state_size=num_bytes_sent.doubleValue() / num_state_reqs.doubleValue();
-            }
-
-            Set<Address> requesters=state_requesters.get(id);
-            if(requesters == null || requesters.isEmpty()) {
-                log.warn("received state for id=" + id
-                         + ", but there are no requesters for this ID");
-            }
-            else {
-                responses=new LinkedList<Message>();
-                for(Iterator<Address> it=requesters.iterator();it.hasNext();) {
-                    Address requester=it.next();
-                    Message state_rsp=new Message(requester, null, state);
-                    StateHeader hdr=new StateHeader(StateHeader.STATE_RSP,
-                                                    local_addr,
-                                                    0,
-                                                    digest,
-                                                    id);
-                    state_rsp.putHeader(this.id, hdr);
-                    responses.add(state_rsp);
-                }
-                state_requesters.remove(id);
-            }
-        }
-
-        if(responses != null && !responses.isEmpty()) {
-            for(Message state_rsp:responses) {
-                if(log.isTraceEnabled()) {
-                    int length=state != null? state.length : 0;
-                    log.trace("sending state for ID=" + id
-                              + " to "
-                              + state_rsp.getDest()
-                              + " ("
-                              + length
-                              + " bytes)");
-                }
-                down_prot.down(new Event(Event.MSG, state_rsp));
-
-                // This has to be done in a separate thread, so we don't block on FC
-                // (see http://jira.jboss.com/jira/browse/JGRP-225 for details). This will be reverted once
-                // we have the threadless stack  (http://jira.jboss.com/jira/browse/JGRP-181)
-                // and out-of-band messages (http://jira.jboss.com/jira/browse/JGRP-205)
-                //                new Thread() {
-                //                    public void run() {
-                //                        down_prot.down(new Event(Event.MSG, state_rsp));
-                //                    }
-                //                }.start();
-                // down_prot.down(new Event(Event.MSG, state_rsp));
-            }
-        }
-    }
 
     /**
-     * Return the first element of members which is not me. Otherwise return
-     * null.
+     * Return the first element of members which is not me. Otherwise return null.
      */
     private Address determineCoordinator() {
         synchronized(members) {
@@ -328,12 +269,12 @@ public class STATE_TRANSFER extends Protocol {
     }
 
     private void handleViewChange(View v) {
-        Address old_coord;
-        Vector<Address> new_members=v.getMembers();
-        boolean send_up_null_state_rsp=false;
+        Address       old_coord;
+        List<Address> new_members=v.getMembers();
+        boolean       send_up_exception=false;
 
         synchronized(members) {
-            old_coord=(!members.isEmpty()? members.firstElement() : null);
+            old_coord=(!members.isEmpty()? members.get(0) : null);
             members.clear();
             members.addAll(new_members);
 
@@ -341,67 +282,95 @@ public class STATE_TRANSFER extends Protocol {
             // Note this only takes a coordinator crash into account, a getState(target, timeout), where target is not
             // null is not handled ! (Usually we get the state from the coordinator)
             // http://jira.jboss.com/jira/browse/JGRP-148
-            if(waiting_for_state_response && old_coord != null && !members.contains(old_coord)) {
-                send_up_null_state_rsp=true;
-            }
+            if(waiting_for_state_response && old_coord != null && !members.contains(old_coord))
+                send_up_exception=true;
         }
 
-        if(send_up_null_state_rsp) {
+        if(send_up_exception) {
             if(log.isWarnEnabled())
-                log.warn("discovered that the state provider (" + old_coord
-                         + ") crashed; will return null state to application");
-            StateHeader hdr=new StateHeader(StateHeader.STATE_RSP, local_addr, 0, null, null);
-            handleStateRsp(hdr, null); // sends up null GET_STATE_OK
-        }
-    }
-
-    /**
-     * If a state transfer is in progress, we don't need to send a GET_APPLSTATE
-     * event to the application, but instead we just add the sender to the
-     * requester list so it will receive the same state when done. If not, we
-     * add the sender to the requester list and send a GET_APPLSTATE event up.
-     */
-    private void handleStateReq(StateHeader hdr) {
-        Address sender=hdr.sender;
-        if(sender == null) {
-            if(log.isErrorEnabled())
-                log.error("sender is null !");
-            return;
+                log.warn(local_addr + ": discovered that the state provider (" + old_coord + ") left");
+            waiting_for_state_response=false;
+            Exception ex=new EOFException("state provider " + old_coord + " left");
+            up_prot.up(new Event(Event.GET_STATE_OK, new StateTransferResult(ex)));
+            openBarrierAndResumeStable();
         }
 
-        String id=hdr.state_id; // id could be null, which means get the entire state
         synchronized(state_requesters) {
-            boolean empty=state_requesters.isEmpty();
-            Set<Address> requesters=state_requesters.get(id);
-            if(requesters == null) {
-                requesters=new HashSet<Address>();
-                state_requesters.put(id, requesters);
-            }
-            requesters.add(sender);
+            boolean was_empty=state_requesters.isEmpty();
+            state_requesters.removeAll(new_members);
+            if(!was_empty && state_requesters.isEmpty())
+                openBarrierAndResumeStable();
+        }
+    }
 
-            if(!isDigestNeeded()) { // state transfer is in progress, digest was already requested
-                requestApplicationStates(sender, null, false);
+    protected void handleException(Throwable exception) {
+          openBarrierAndResumeStable();
+          up_prot.up(new Event(Event.GET_STATE_OK, new StateTransferResult(exception)));
+    }
+
+
+    private void handleStateReq(Address requester) {
+        if(requester == null)
+            return;
+
+        if(log.isDebugEnabled())
+            log.debug(local_addr + ": received state request from " + requester);
+
+        synchronized(state_requesters) {
+            if(state_requesters.isEmpty())
+                closeBarrierAndSuspendStable();
+            state_requesters.add(requester);
+
+            Digest digest=null;
+            try {
+                if(isDigestNeeded())
+                    digest=(Digest)down_prot.down(new Event(Event.GET_DIGEST));
+                getStateFromApplication(requester, digest);
             }
-            else if(empty) {
-                if(!flushProtocolInStack) {
-                    down_prot.down(new Event(Event.CLOSE_BARRIER));
-                }
-                Digest digest=(Digest)down_prot.down(new Event(Event.GET_DIGEST));
-                if(log.isDebugEnabled())
-                    log.debug("digest is " + digest + ", getting application state");
-                try {
-                    requestApplicationStates(sender, digest, !flushProtocolInStack);
-                }
-                catch(Throwable t) {
-                    if(log.isErrorEnabled())
-                        log.error("failed getting state from application", t);
-                    if(!flushProtocolInStack) {
-                        down_prot.down(new Event(Event.OPEN_BARRIER));
-                    }
-                }
+            catch(Throwable t) {
+                sendException(requester, t);
+            }
+            finally {
+                if(state_requesters.remove(requester) && state_requesters.isEmpty())
+                    openBarrierAndResumeStable();
             }
         }
     }
+
+
+    protected void getStateFromApplication(Address requester, Digest digest) {
+        StateTransferInfo rsp=(StateTransferInfo)up_prot.up(new Event(Event.GET_APPLSTATE));
+        byte[] state=rsp.state;
+
+        if(stats) {
+            num_state_reqs.incrementAndGet();
+            if(state != null)
+                num_bytes_sent.addAndGet(state.length);
+            avg_state_size=num_bytes_sent.doubleValue() / num_state_reqs.doubleValue();
+        }
+
+        Message state_rsp=new Message(requester, null, state);
+        state_rsp.putHeader(this.id, new StateHeader(StateHeader.STATE_RSP, digest));
+        if(log.isTraceEnabled()) {
+            int length=state != null? state.length : 0;
+            if(log.isTraceEnabled())
+                log.trace(local_addr + ": sending state to " + state_rsp.getDest() + " (size=" + Util.printBytes(length) + ")");
+        }
+        down_prot.down(new Event(Event.MSG, state_rsp));
+    }
+
+
+    protected void sendException(Address requester, Throwable exception) {
+        try {
+            Message ex_msg=new Message(requester, null, exception);
+            ex_msg.putHeader(getId(), new StateHeader(StateHeader.STATE_EX));
+            down(new Event(Event.MSG, ex_msg));
+        }
+        catch(Throwable t) {
+            log.error(local_addr + ": failed sending exception " + exception.toString() + " to " + requester);
+        }
+    }
+
 
     /** Set the digest and the send the state up to the application */
     private void handleStateRsp(StateHeader hdr, byte[] state) {
@@ -409,20 +378,13 @@ public class STATE_TRANSFER extends Protocol {
         boolean digest_needed=isDigestNeeded();
 
         waiting_for_state_response=false;
-        if(digest_needed && tmp_digest != null) {
+        if(digest_needed && tmp_digest != null)
             down_prot.down(new Event(Event.OVERWRITE_DIGEST, tmp_digest)); // set the digest (e.g. in NAKACK)
-        }
         stop=System.currentTimeMillis();
-
-        // resume sending and handling of message garbage collection gossip messages, fixes bugs #943480 and #938584).
-        // Wakes up a previously suspended message garbage collection protocol (e.g. STABLE)
-        if(log.isDebugEnabled())
-            log.debug("passing down a RESUME_STABLE event");
-        down_prot.down(new Event(Event.RESUME_STABLE));
-
-        log.debug("received state, size=" + (state == null? "0" : state.length) + " bytes. Time=" + (stop - start) + " milliseconds");
-        StateTransferInfo info=new StateTransferInfo(hdr.sender, hdr.state_id, 0L, state);
-        up_prot.up(new Event(Event.GET_STATE_OK, info));
+        log.debug(local_addr + ": received state, size=" + (state == null? "0" : Util.printBytes(state.length)) +
+                    ", time=" + (stop - start) + " milliseconds");
+        StateTransferResult result=new StateTransferResult(state);
+        up_prot.up(new Event(Event.GET_STATE_OK, result));
     }
 
     /* ------------------------ End of Private Methods ------------------------------ */
@@ -434,31 +396,23 @@ public class STATE_TRANSFER extends Protocol {
      *
      */
     public static class StateHeader extends Header {
-        public static final byte STATE_REQ=1;
-        public static final byte STATE_RSP=2;
+        public static final byte STATE_REQ = 1;
+        public static final byte STATE_RSP = 2;
+        public static final byte STATE_EX  = 3;
 
-        long id=0; // state transfer ID (to separate multiple state transfers at the same time)
-        byte type=0;
-        Address sender; // sender of state STATE_REQ or STATE_RSP
-        Digest my_digest=null; // digest of sender (if type is STATE_RSP)
-        String state_id=null; // for partial state transfer
+        protected byte    type=0;
+        protected Digest  my_digest; // digest of sender (if type is STATE_RSP)
 
         public StateHeader() { // for externalization
         }
 
-        public StateHeader(byte type,Address sender,long id,Digest digest) {
+        public StateHeader(byte type) {
             this.type=type;
-            this.sender=sender;
-            this.id=id;
-            this.my_digest=digest;
         }
 
-        public StateHeader(byte type,Address sender,long id,Digest digest,String state_id) {
+        public StateHeader(byte type, Digest digest) {
             this.type=type;
-            this.sender=sender;
-            this.id=id;
             this.my_digest=digest;
-            this.state_id=state_id;
         }
 
         public int getType() {
@@ -469,81 +423,39 @@ public class STATE_TRANSFER extends Protocol {
             return my_digest;
         }
 
-        public String getStateId() {
-            return state_id;
-        }
-
-        public boolean equals(Object o) {
-            StateHeader other;
-
-            if(sender != null && o != null) {
-                if(!(o instanceof StateHeader))
-                    return false;
-                other=(StateHeader)o;
-                return sender.equals(other.sender) && id == other.id;
-            }
-            return false;
-        }
-
-        public int hashCode() {
-            if(sender != null)
-                return sender.hashCode() + (int)id;
-            else
-                return (int)id;
-        }
-
         public String toString() {
             StringBuilder sb=new StringBuilder();
             sb.append("type=").append(type2Str(type));
-            if(sender != null)
-                sb.append(", sender=").append(sender).append(" id=").append(id);
             if(my_digest != null)
                 sb.append(", digest=").append(my_digest);
-            if(state_id != null)
-                sb.append(", state_id=").append(state_id);
             return sb.toString();
         }
 
         static String type2Str(int t) {
             switch(t) {
-                case STATE_REQ:
-                    return "STATE_REQ";
-                case STATE_RSP:
-                    return "STATE_RSP";
-                default:
-                    return "<unknown>";
+                case STATE_REQ: return "STATE_REQ";
+                case STATE_RSP: return "STATE_RSP";
+                case STATE_EX:  return "STATE_EX";
+                default:        return "<unknown>";
             }
         }
 
 
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             out.writeByte(type);
-            out.writeLong(id);
-            Util.writeAddress(sender, out);
             Util.writeStreamable(my_digest, out);
-            Util.writeString(state_id, out);
         }
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             type=in.readByte();
-            id=in.readLong();
-            sender=Util.readAddress(in);
             my_digest=(Digest)Util.readStreamable(Digest.class, in);
-            state_id=Util.readString(in);
         }
 
         public int size() {
-            int retval=Global.LONG_SIZE + Global.BYTE_SIZE; // id and type
-
-            retval+=Util.size(sender);
-
-            retval+=Global.BYTE_SIZE; // presence byte for my_digest
+            int retval=Global.BYTE_SIZE; // type
+            retval+=Global.BYTE_SIZE;    // presence byte for my_digest
             if(my_digest != null)
                 retval+=my_digest.serializedSize();
-
-            retval+=Global.BYTE_SIZE; // presence byte for state_id
-            if(state_id != null)
-                retval+=state_id.length() + 2;
             return retval;
         }
     }

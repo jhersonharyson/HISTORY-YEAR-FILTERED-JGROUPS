@@ -3,10 +3,10 @@ package org.jgroups.protocols;
 import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.PhysicalAddress;
-import org.jgroups.stack.IpAddress;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 
 /**
@@ -15,20 +15,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * @author Bela Ban
  */
 public class SHARED_LOOPBACK extends TP {
-    private static int next_port=10000;
-
     private PhysicalAddress physical_addr=null;
-    private Address local_addr=null;
 
     /** Map of cluster names and address-protocol mappings. Used for routing messages to all or single members */
-    private static final Map<String,Map<Address,SHARED_LOOPBACK>> routing_table=new ConcurrentHashMap<String,Map<Address,SHARED_LOOPBACK>>();
+    private static final ConcurrentMap<String,Map<Address,SHARED_LOOPBACK>> routing_table=new ConcurrentHashMap<String,Map<Address,SHARED_LOOPBACK>>();
 
-
-    public SHARED_LOOPBACK() {
-    }
 
     public boolean supportsMulticasting() {
-        return false;
+        return true; // kind of...
     }
 
     public String toString() {
@@ -97,20 +91,6 @@ public class SHARED_LOOPBACK extends TP {
 
     /*------------------------------ Protocol interface ------------------------------ */
 
-    public void init() throws Exception {
-        local_addr=new IpAddress("127.0.0.1", next_port++);
-        super.init();
-                        
-    }
-
-    public void start() throws Exception {
-        super.start();
-    }
-
-    public void stop() {
-        super.stop();
-    }
-
 
     public Object down(Event evt) {
         Object retval=super.down(evt);
@@ -126,25 +106,28 @@ public class SHARED_LOOPBACK extends TP {
             case Event.SET_LOCAL_ADDRESS:
                 local_addr=(Address)evt.getArg();
                 break;
-
-            case Event.DISCONNECT:
-                unregister(channel_name, local_addr);
-                break;
         }
 
         return retval;
     }
 
-    private static void register(String channel_name, Address local_addr, SHARED_LOOPBACK shared_loopback) {
+    public void stop() {
+        super.stop();
+        // unregister(channel_name, local_addr);
+    }
+
+    protected static void register(String channel_name, Address local_addr, SHARED_LOOPBACK shared_loopback) {
         Map<Address,SHARED_LOOPBACK> map=routing_table.get(channel_name);
         if(map == null) {
             map=new ConcurrentHashMap<Address,SHARED_LOOPBACK>();
-            routing_table.put(channel_name, map);
+            Map<Address,SHARED_LOOPBACK> tmp=routing_table.putIfAbsent(channel_name,map);
+            if(tmp != null)
+                map=tmp;
         }
         map.put(local_addr, shared_loopback);
     }
 
-    private static void unregister(String channel_name, Address local_addr) {
+    protected static void unregister(String channel_name, Address local_addr) {
         Map<Address,SHARED_LOOPBACK> map=routing_table.get(channel_name);
         if(map != null) {
             map.remove(local_addr);

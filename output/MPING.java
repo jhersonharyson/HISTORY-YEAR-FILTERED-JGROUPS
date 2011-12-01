@@ -3,14 +3,20 @@ package org.jgroups.protocols;
 import org.jgroups.Event;
 import org.jgroups.Global;
 import org.jgroups.Message;
+import org.jgroups.annotations.LocalAddress;
 import org.jgroups.annotations.Property;
-import org.jgroups.annotations.DeprecatedProperty;
 import org.jgroups.conf.PropertyConverters;
 import org.jgroups.util.*;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
 import java.net.*;
-import java.util.*;
+import java.util.Enumeration;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Uses its own IP multicast socket to send and receive discovery requests/responses. Can be used in
@@ -21,7 +27,6 @@ import java.util.*;
  * e.g. 192.168.0.2:7800).
  * @author Bela Ban
  */
-@DeprecatedProperty(names="bind_to_all_interfaces")
 public class MPING extends PING implements Runnable {
     
     private static final boolean can_bind_to_mcast_addr; // are we running on Linux ?
@@ -34,10 +39,10 @@ public class MPING extends PING implements Runnable {
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
 
+    @LocalAddress
     @Property(description="Bind address for multicast socket. " +
             "The following special values are also recognized: GLOBAL, SITE_LOCAL, LINK_LOCAL and NON_LOOPBACK",
-              systemProperty={Global.BIND_ADDR, Global.BIND_ADDR_OLD},
-              defaultValueIPv4=Global.NON_LOOPBACK_ADDRESS, defaultValueIPv6=Global.NON_LOOPBACK_ADDRESS)
+              systemProperty={Global.BIND_ADDR})
     InetAddress bind_addr=null;
     
     @Property(name="bind_interface", converter=PropertyConverters.BindInterface.class, 
@@ -48,7 +53,7 @@ public class MPING extends PING implements Runnable {
     @Property(description="Time to live for discovery packets. Default is 8", systemProperty=Global.MPING_IP_TTL)
     int ip_ttl=8;
 
-    @Property(name="mcast_addr", systemProperty=Global.MPING_MCAST_ADDR,
+    @Property(description="Multicast address to be used for discovery", name="mcast_addr", systemProperty=Global.MPING_MCAST_ADDR,
               defaultValueIPv4="230.5.6.7", defaultValueIPv6="ff0e::5:6:7")
     InetAddress mcast_addr=null;
 
@@ -235,10 +240,13 @@ public class MPING extends PING implements Runnable {
             NetworkInterface i=(NetworkInterface)it.next();
             for(Enumeration en2=i.getInetAddresses(); en2.hasMoreElements();) {
                 InetAddress addr=(InetAddress)en2.nextElement();
-                s.joinGroup(tmp_mcast_addr, i);
-                if(log.isTraceEnabled())
-                    log.trace("joined " + tmp_mcast_addr + " on " + i.getName() + " (" + addr + ")");
-                break;
+                if ((Util.getIpStackType() == StackType.IPv4 && addr instanceof Inet4Address)
+                  || (Util.getIpStackType() == StackType.IPv6 && addr instanceof Inet6Address)) {
+                    s.joinGroup(tmp_mcast_addr, i);
+                    if(log.isTraceEnabled())
+                        log.trace("joined " + tmp_mcast_addr + " on " + i.getName() + " (" + addr + ")");
+                    break;
+                }
             }
         }
     }
@@ -262,9 +270,8 @@ public class MPING extends PING implements Runnable {
         super.stop();
     }
 
-    void sendMcastDiscoveryRequest(Message msg) {
-        Buffer           buf;
-        DatagramPacket   packet;
+    @Override
+    protected void sendMcastDiscoveryRequest(Message msg) {
         DataOutputStream out=null;
 
         try {
@@ -274,9 +281,8 @@ public class MPING extends PING implements Runnable {
             out=new DataOutputStream(out_stream);
             msg.writeTo(out);
             out.flush(); // flushes contents to out_stream
-            buf=new Buffer(out_stream.getRawBuffer(), 0, out_stream.size());
-            packet=new DatagramPacket(buf.getBuf(), buf.getOffset(), buf.getLength(), mcast_addr, mcast_port);
-            discovery_reception.reset();
+            Buffer buf=new Buffer(out_stream.getRawBuffer(), 0, out_stream.size());
+            DatagramPacket packet=new DatagramPacket(buf.getBuf(), buf.getOffset(), buf.getLength(), mcast_addr, mcast_port);
             if(mcast_send_sockets != null) {
                 MulticastSocket s;
                 for(int i=0; i < mcast_send_sockets.length; i++) {
@@ -293,9 +299,8 @@ public class MPING extends PING implements Runnable {
                 if(mcast_sock != null)
                     mcast_sock.send(packet);
             }
-            waitForDiscoveryRequestReception();
         }
-        catch(IOException ex) {
+        catch(Exception ex) {
             log.error("failed sending discovery request", ex);
         }
         finally {

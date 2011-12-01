@@ -2,8 +2,6 @@ package org.jgroups.tests;
 
 import org.jgroups.*;
 import org.jgroups.protocols.MERGE2;
-import org.jgroups.protocols.MERGE3;
-import org.jgroups.protocols.MERGEFAST;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK;
 import org.jgroups.stack.ProtocolStack;
@@ -17,7 +15,7 @@ import java.util.*;
  * 
  * @author vlada
  */
-@Test(groups=Global.FLUSH,sequential=true)
+@Test(groups=Global.STACK_DEPENDENT,sequential=true)
 public class MergeTest extends ChannelTestBase {
    
     @Test
@@ -45,15 +43,14 @@ public class MergeTest extends ChannelTestBase {
                 assert ch.getView().size() == 1 : "view of " + ch.getAddress() + ": " + ch.getView();
             }
 
-            System.out.println("\n==== injecting merge event ====");
-            for(String member: members) {
-                injectMergeEvent(channels, member, members);
-            }
-            for(int i=0; i < 20; i++) {
+            Address merge_leader=determineLeader(channels, members);
+            System.out.println("\n==== injecting merge event into merge leader : " + merge_leader + " ====");
+            injectMergeEvent(channels, merge_leader, members);
+            for(int i=0; i < 40; i++) {
                 System.out.print(".");
                 if(allChannelsHaveViewOf(channels, members.length))
                     break;
-                Util.sleep(500);
+                Util.sleep(1000);
             }
             System.out.println("\n");
             print(channels);
@@ -84,7 +81,7 @@ public class MergeTest extends ChannelTestBase {
             if(nakack != null)
                 nakack.setLogDiscardMessages(false);
 
-            stack.removeProtocol(MERGE2.class, MERGE3.class, MERGEFAST.class);
+            stack.removeProtocol(MERGE2.class);
 
             tmp.connect(cluster_name);
             retval[i]=tmp;
@@ -143,12 +140,12 @@ public class MergeTest extends ChannelTestBase {
 
 
     private static View createView(String partition, JChannel[] channels) throws Exception {
-        Vector<Address> members=new Vector<Address>();
+        List<Address> members=new ArrayList<Address>();
         Address addr=findAddress(partition, channels);
         if(addr == null)
             throw new Exception(partition + " not associated with a channel");
         members.add(addr);
-        return new View(members.firstElement(), 10, members);
+        return new View(members.get(0), 10, members);
     }
 
 

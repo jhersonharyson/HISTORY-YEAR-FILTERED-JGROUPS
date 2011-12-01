@@ -3,7 +3,6 @@ package org.jgroups.protocols;
 
 import org.jgroups.Global;
 import org.jgroups.PhysicalAddress;
-import org.jgroups.annotations.DeprecatedProperty;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.util.Util;
@@ -40,7 +39,6 @@ import java.util.Map;
  * 
  * @author Bela Ban
  */
-@DeprecatedProperty(names={"num_last_ports","null_src_addresses", "send_on_all_interfaces", "send_interfaces"})
 public class UDP extends TP {
 
     /* ------------------------------------------ Properties  ------------------------------------------ */
@@ -86,7 +84,8 @@ public class UDP extends TP {
     @Property(description="Receive buffer size of the unicast datagram socket. Default is 64'000 bytes")
     protected int ucast_recv_buf_size=64000;
 
-    @Property
+    @Property(description="If true, disables IP_MULTICAST_LOOP on the MulticastSocket (for sending and receiving of " +
+      "multicast packets). IP multicast packets send on a host P will therefore not be received by anyone on P. Use with caution.")
     protected boolean disable_loopback=false;
 
 
@@ -128,13 +127,6 @@ public class UDP extends TP {
     // private boolean null_src_addresses=true;
 
 
-
-    /**
-     * Creates the UDP protocol, and initializes the state variables, does however not start any sockets or threads.
-     */
-    public UDP() {
-    }
-
     public boolean supportsMulticasting() {
         return ip_mcast;
     }
@@ -145,6 +137,31 @@ public class UDP extends TP {
     public void setMulticastPort(int mcast_port) {this.mcast_port=mcast_port;}
     public void setMcastPort(int mcast_port) {this.mcast_port=mcast_port;}
 
+    /**
+     * Set the ttl for multicast socket
+     * @param ttl the time to live for the socket.
+     * @throws IOException
+     */
+    public void setMulticastTTL(int ttl) throws IOException {
+        this.ip_ttl=ttl;
+        mcast_sock.setTimeToLive((byte)ttl);
+    }
+
+    /**
+     * Getter for current multicast TTL
+     * @return
+     */
+    public int getMulticastTTL() {
+        return this.ip_ttl;
+    }
+
+    @Property(name="max_bundle_size", description="Maximum number of bytes for messages to be queued until they are sent")
+    public void setMaxBundleSize(int size) {
+        super.setMaxBundleSize(size);
+        if(size > Global.MAX_DATAGRAM_PACKET_SIZE)
+            throw new IllegalArgumentException("max_bundle_size (" + size + ") cannot exceed the max datagram " +
+                                                 "packet size of " + Global.MAX_DATAGRAM_PACKET_SIZE);
+    }
 
     public String getInfo() {
         StringBuilder sb=new StringBuilder();
@@ -204,17 +221,8 @@ public class UDP extends TP {
      * Creates the unicast and multicast sockets and starts the unicast and multicast receiver threads
      */
     public void start() throws Exception {
-        if(log.isDebugEnabled()) log.debug("creating sockets");
-        try {
-            createSockets();
-        }
-        catch(Exception ex) {
-            String tmp="problem creating sockets (bind_addr=" + bind_addr + ", mcast_addr=" + mcast_addr + ")";
-            throw new Exception(tmp, ex);
-        }
-
+        createSockets();
         super.start();
-
         ucast_receiver=new PacketReceiver(sock,
                                           "unicast receiver",
                                           new Runnable() {
@@ -387,7 +395,9 @@ public class UDP extends TP {
     }
 
     protected IpAddress createLocalAddress() {
-        return sock != null && !sock.isClosed()? new IpAddress(sock.getLocalAddress(), sock.getLocalPort()) : null;
+        if(sock == null || sock.isClosed())
+            return null;
+        return new IpAddress(external_addr != null? external_addr : sock.getLocalAddress(), sock.getLocalPort());
     }
 
 

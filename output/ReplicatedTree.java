@@ -10,7 +10,7 @@ import org.jgroups.logging.LogFactory;
 import org.jgroups.util.Util;
 
 import javax.management.MBeanServer;
-import java.io.Serializable;
+import java.io.*;
 import java.util.*;
 
 
@@ -30,7 +30,7 @@ public class ReplicatedTree extends ReceiverAdapter {
     final Vector<ReplicatedTreeListener> listeners=new Vector<ReplicatedTreeListener>();
     JChannel channel=null;
     String groupname="ReplicatedTree-Group";
-    final Vector<Address> members=new Vector<Address>();
+    final List<Address> members=new ArrayList<Address>();
     long state_fetch_timeout=10000;
     boolean jmx=false;
 
@@ -122,7 +122,7 @@ public class ReplicatedTree extends ReceiverAdapter {
         return channel != null? channel.getAddress() : null;
     }
 
-    public Vector<Address> getMembers() {
+    public List<Address> getMembers() {
         return members;
     }
 
@@ -130,14 +130,8 @@ public class ReplicatedTree extends ReceiverAdapter {
     /**
      * Fetch the group state from the current coordinator. If successful, this will trigger setState().
      */
-    public void fetchState(long timeout) throws ChannelClosedException, ChannelNotConnectedException {
-        boolean rc=channel.getState(null, timeout);
-        if(log.isInfoEnabled()) {
-            if(rc)
-                log.info("state was retrieved successfully");
-            else
-                log.info("state could not be retrieved (first member)");
-        }
+    public void fetchState(long timeout) throws Exception {
+        channel.getState(null, timeout);
     }
 
 
@@ -153,13 +147,7 @@ public class ReplicatedTree extends ReceiverAdapter {
 
 
     public final void start() throws Exception {
-        boolean rc=channel.getState(null, state_fetch_timeout);
-        if(log.isInfoEnabled()) {
-            if(rc)
-                log.info("state was retrieved successfully");
-            else
-                log.info("state could not be retrieved (first member)");
-        }
+        channel.getState(null, state_fetch_timeout);
     }
 
 
@@ -560,35 +548,16 @@ public class ReplicatedTree extends ReceiverAdapter {
         }
     }
 
-    /** Return a copy of the current cache (tree) */
-    public byte[] getState() {
-        try {
-            return Util.objectToByteBuffer(root.clone());
-        }
-        catch(Throwable ex) {
-            if(log.isErrorEnabled()) log.error("exception returning cache: " + ex);
-            return null;
-        }
+
+    public void getState(OutputStream ostream) throws Exception {
+        Util.objectToStream(root.clone(), new DataOutputStream(ostream));
     }
 
-    /** Set the cache (tree) to this value */
-    public void setState(byte[] new_state) {
-        Node new_root=null;
-        Object obj;
 
-        if(new_state == null) {
-            if(log.isInfoEnabled()) log.info("new cache is null");
-            return;
-        }
-        try {
-            obj=Util.objectFromByteBuffer(new_state);
-            new_root=(Node)((Node)obj).clone();
-            root=new_root;
-            notifyAllNodesCreated(root);
-        }
-        catch(Throwable ex) {
-            if(log.isErrorEnabled()) log.error("could not set cache: " + ex);
-        }
+    public void setState(InputStream istream) throws Exception {
+        Object obj=Util.objectFromStream(new DataInputStream(istream));
+        root=(Node)((Node)obj).clone();
+        notifyAllNodesCreated(root);
     }
 
     /*-------------------- End of MessageListener ----------------------*/
@@ -600,16 +569,15 @@ public class ReplicatedTree extends ReceiverAdapter {
     /*----------------------- MembershipListener ------------------------*/
 
     public void viewAccepted(View new_view) {
-        Vector<Address> new_mbrs=new_view.getMembers();
+        List<Address> new_mbrs=new_view.getMembers();
 
         // todo: if MergeView, fetch and reconcile state from coordinator
         // actually maybe this is best left up to the application ? we just notify them and let the appl handle it ?
 
         if(new_mbrs != null) {
             notifyViewChange(new_view);
-            members.removeAllElements();
-            for(int i=0; i < new_mbrs.size(); i++)
-                members.addElement(new_mbrs.elementAt(i));
+            members.clear();
+            members.addAll(new_mbrs);
         }
 		//if size is bigger than one, there are more peers in the group
 		//otherwise there is only one server.
@@ -965,7 +933,7 @@ public class ReplicatedTree extends ReceiverAdapter {
                 "FD_SOCK:" +
                 "VERIFY_SUSPECT(timeout=1500):" +
                 "pbcast.STABLE(desired_avg_gossip=20000):" +
-                "pbcast.NAKACK(gc_lag=50;retransmit_timeout=600,1200,2400,4800):" +
+                "pbcast.NAKACK(retransmit_timeout=600,1200,2400,4800):" +
                 "UNICAST(timeout=5000):" +
                 "FRAG(frag_size=16000;down_thread=false;up_thread=false):" +
                 "pbcast.GMS(join_timeout=5000;" +

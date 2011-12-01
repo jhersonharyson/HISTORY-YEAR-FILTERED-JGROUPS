@@ -33,22 +33,28 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
         c1=createChannel(true, 3);
         c1.setName("A");
         final String GROUP="RpcDispatcherUnitTest";
-        d1=new RpcDispatcher(c1, null, null, o1);
+        d1=new RpcDispatcher(c1, o1);
         c1.connect(GROUP);
 
         c2=createChannel(c1);
         c2.setName("B");
-        d2=new RpcDispatcher(c2, null, null, o2);
+        d2=new RpcDispatcher(c2, o2);
         c2.connect(GROUP);
 
         c3=createChannel(c1);
         c3.setName("C");
-        d3=new RpcDispatcher(c3, null, null, o3);
+        d3=new RpcDispatcher(c3, o3);
         c3.connect(GROUP);
 
         System.out.println("c1.view=" + c1.getView() + "\nc2.view=" + c2.getView() + "\nc3.view=" + c3.getView());
-        View view=c3.getView();
-        assert view.size() == 3 : "view=" + view;
+        View view=null;
+        for(int i=0; i < 10; i++) {
+            view=c3.getView();
+            if(view.size() == 3)
+                break;
+            Util.sleep(1000);
+        }
+        assert view != null && view.size() == 3 : "view=" + view;
 
         a1=c1.getAddress();
         a2=c2.getAddress();
@@ -72,15 +78,15 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
     }
 
 
-    public void testInvocationOnEntireGroup() {
-        RspList rsps=d1.callRemoteMethods(null, "foo", null, null, RequestOptions.SYNC);
+    public void testInvocationOnEntireGroup() throws Exception {
+        RspList rsps=d1.callRemoteMethods(null, "foo", null, null, RequestOptions.SYNC());
         System.out.println("rsps:\n" + rsps);
         assert rsps.size() == 3;
         assert o1.wasCalled() && o2.wasCalled() && o3.wasCalled();
     }
 
-    public void testInvocationOnEntireGroupWithTargetList() {
-        RspList rsps=d1.callRemoteMethods(members, "foo", null, null, RequestOptions.SYNC);
+    public void testInvocationOnEntireGroupWithTargetList() throws Exception {
+        RspList rsps=d1.callRemoteMethods(members, "foo", null, null, RequestOptions.SYNC());
         System.out.println("rsps:\n" + rsps);
         assert rsps.size() == 3;
         assert o1.wasCalled() && o2.wasCalled() && o3.wasCalled();
@@ -88,8 +94,8 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
 
 
     /** Invoke a method on all but myself */
-    public void testInvocationWithExclusionOfSelf() {
-        RequestOptions options=new RequestOptions(Request.GET_ALL, 5000).setExclusionList(a1);
+    public void testInvocationWithExclusionOfSelf() throws Exception {
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setExclusionList(a1);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);
@@ -98,8 +104,8 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
         assert !o1.wasCalled() && o2.wasCalled() && o3.wasCalled();
     }
 
-    public void testInvocationWithExclusionOfTwo() {
-        RequestOptions options=new RequestOptions(Request.GET_ALL, 5000).setExclusionList(a2, a3);
+    public void testInvocationWithExclusionOfTwo() throws Exception {
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setExclusionList(a2, a3);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);
@@ -108,8 +114,8 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
         assert o1.wasCalled() && !o2.wasCalled() && !o3.wasCalled();
     }
 
-    public void testInvocationOnEmptyTargetSet() {
-        RequestOptions options=new RequestOptions(Request.GET_ALL, 5000).setExclusionList(a1, a2, a3);
+    public void testInvocationOnEmptyTargetSet() throws Exception {
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setExclusionList(a1, a2, a3);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);

@@ -6,9 +6,8 @@ import org.jgroups.stack.Protocol;
 import org.jgroups.util.ConcurrentLinkedBlockingQueue;
 import org.jgroups.util.Util;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executor;
 
@@ -84,7 +83,7 @@ public class DAISYCHAIN extends Protocol {
             case Event.MSG:
                 final Message msg=(Message)evt.getArg();
                 Address dest=msg.getDest();
-                if(dest != null && !dest.isMulticastAddress())
+                if(dest != null)
                     break; // only process multicast messages
 
                 if(next == null) // view hasn't been received yet, use the normal transport
@@ -227,11 +226,11 @@ public class DAISYCHAIN extends Protocol {
             return Global.SHORT_SIZE;
         }
 
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             out.writeShort(ttl);
         }
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             ttl=in.readShort();
         }
 

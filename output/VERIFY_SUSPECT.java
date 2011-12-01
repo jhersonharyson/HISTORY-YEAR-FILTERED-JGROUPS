@@ -2,6 +2,8 @@
 package org.jgroups.protocols;
 
 import org.jgroups.*;
+import org.jgroups.annotations.LocalAddress;
+import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.PropertyConverters;
 import org.jgroups.stack.IpAddress;
@@ -20,6 +22,7 @@ import java.util.*;
  * below the GMS layer (receiver of the SUSPECT event). Note that SUSPECT events may be reordered by this protocol.
  * @author Bela Ban
  */
+@MBean(description="Double-checks suspicions reports")
 public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
     /* ------------------------------------------ Properties  ------------------------------------------ */
@@ -32,11 +35,11 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     
     @Property(description="Use InetAddress.isReachable() to verify suspected member instead of regular messages")
     private boolean use_icmp=false; 
-    
+
+    @LocalAddress
     @Property(description="Interface for ICMP pings. Used if use_icmp is true " +
             "The following special values are also recognized: GLOBAL, SITE_LOCAL, LINK_LOCAL and NON_LOOPBACK",
-              systemProperty={Global.BIND_ADDR, Global.BIND_ADDR_OLD},
-              defaultValueIPv4=Global.NON_LOOPBACK_ADDRESS, defaultValueIPv6=Global.NON_LOOPBACK_ADDRESS)
+              systemProperty={Global.BIND_ADDR})
     private InetAddress bind_addr; // interface for ICMP pings
     
     @Property(name="bind_interface", converter=PropertyConverters.BindInterface.class, 
@@ -47,14 +50,14 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     
     
     /** network interface to be used to send the ICMP packets */
-    private NetworkInterface intf=null;
+    protected NetworkInterface intf=null;
     
-    private Address local_addr=null;
+    protected Address local_addr=null;
     
     /**keys=Addresses, vals=time in mcses since added **/
-    private final Hashtable<Address,Long> suspects=new Hashtable<Address,Long>();
+    protected final Map<Address,Long> suspects=new HashMap<Address,Long>();
     
-    private Thread timer=null;
+    protected Thread timer=null;
     
     
     
@@ -62,8 +65,14 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     }
 
     public Object down(Event evt) {
-        if(evt.getType() == Event.SET_LOCAL_ADDRESS) {
-            local_addr=(Address)evt.getArg();
+        switch(evt.getType()) {
+            case Event.SET_LOCAL_ADDRESS:
+                local_addr=(Address)evt.getArg();
+                break;
+            case Event.VIEW_CHANGE:
+                View v=(View)evt.getArg();
+                adjustSuspectedMembers(v.getMembers());
+                break;
         }
         return down_prot.down(evt);
     }
@@ -131,6 +140,19 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
         return up_prot.up(evt);
     }
 
+    /**
+     * Removes all elements from suspects that are <em>not</em> in the new membership
+     */
+    protected void adjustSuspectedMembers(List<Address> new_mbrship) {
+        synchronized(suspects) {
+            for(Iterator<Map.Entry<Address,Long>> it=suspects.entrySet().iterator(); it.hasNext();) {
+                Map.Entry<Address,Long> entry=it.next();
+                if(!new_mbrship.contains(entry.getKey()))
+                    it.remove();
+            }
+        }
+    }
+
 
     /**
      * Will be started when a suspect is added to the suspects hashtable. Continually iterates over the
@@ -147,8 +169,10 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
             List<Address> confirmed_suspects=new LinkedList<Address>();
             synchronized(suspects) {
-                for(Enumeration<Address> e=suspects.keys(); e.hasMoreElements();) {
-                    Address mbr=e.nextElement();
+                for(Iterator<Map.Entry<Address,Long>> it=suspects.entrySet().iterator(); it.hasNext();) {
+                    Map.Entry<Address,Long> entry=it.next();
+                    Address mbr=entry.getKey();
+
                     val=suspects.get(mbr).longValue();                    
                     diff=System.currentTimeMillis() - val;
                     if(diff >= timeout) {  // haven't been unsuspected, pass up SUSPECT
@@ -156,7 +180,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
                             log.trace("diff=" + diff + ", mbr " + mbr + " is dead (passing up SUSPECT event)");                      
                         
                         confirmed_suspects.add(mbr);
-                        suspects.remove(mbr);
+                        it.remove();
                         continue;
                     }
                     diff=Math.max(diff, timeout - diff);
@@ -314,12 +338,12 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
         }
 
 
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             out.writeShort(type);
             Util.writeAddress(from, out);
         }
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             type=in.readShort();
             from=Util.readAddress(in);
         }

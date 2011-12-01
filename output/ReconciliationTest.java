@@ -173,7 +173,7 @@ public class ReconciliationTest extends ChannelTestBase {
         // now last sends 5 messages:
         System.out.println("\n" + lastsName + " sending 5 messages; " + nextToLastName + " will ignore them, but others will receive them");
         for(int i=1;i <= 5;i++)
-            last.send(null, null, new Integer(i));
+            last.send(null, new Integer(i));
 
         Util.sleep(1000); // until al messages have been received, this is asynchronous so we need to wait a bit
 
@@ -243,7 +243,7 @@ public class ReconciliationTest extends ChannelTestBase {
     private static void printDigests(List<JChannel> channels, String message) {
         System.out.println(message);
         for(JChannel channel:channels) {
-            System.out.println("[" + channel.getAddress() + "] " + channel.downcall(Event.GET_DIGEST_EVT).toString());
+            System.out.println("[" + channel.getAddress() + "] " + channel.down(Event.GET_DIGEST_EVT).toString());
         }
     }
 
@@ -264,7 +264,7 @@ public class ReconciliationTest extends ChannelTestBase {
         void triggerFlush();
     }
 
-    private class MyReceiver extends ExtendedReceiverAdapter {
+    private class MyReceiver extends ReceiverAdapter {
         Map<Address,List<Integer>> msgs=new HashMap<Address,List<Integer>>(10);
 
         Channel channel;
@@ -313,10 +313,9 @@ public class ReconciliationTest extends ChannelTestBase {
         Assert.assertEquals(c2.getView().size(), 2, "view: " + c1.getView());
 
         // start adding messages
-        flush(c1, 5000); // flush all pending message out of the system so
-        // everyone receives them
+        flush(c1, 5000); // flush all pending message out of the system so everyone receives them
 
-        for(int i = 1;i <= 20;i++) {
+        for(int i = 1; i <= 20;i++) {
             if(i % 2 == 0)
                 cache_1.put(i, true); // even numbers
             else
@@ -347,7 +346,7 @@ public class ReconciliationTest extends ChannelTestBase {
             Util.sleep(timeout);
     }
 
-    private class Cache extends ExtendedReceiverAdapter {
+    private class Cache extends ReceiverAdapter {
         protected final Map<Object,Object> data;
 
         Channel ch;
@@ -386,108 +385,23 @@ public class ReconciliationTest extends ChannelTestBase {
             Object key=modification[0];
             Object val=modification[1];
             synchronized(data) {
-                // System.out.println("****** [" + name + "] received PUT(" +
-                // key + ", " + val + ") " + " from " + msg.getSrc() + "
-                // *******");
                 data.put(key, val);
             }
         }
 
-        public byte[] getState() {
-            byte[] state=null;
+
+        public void getState(OutputStream ostream) throws Exception {
             synchronized(data) {
-                try {
-                    state=Util.objectToByteBuffer(data);
-                }
-                catch(Exception e) {
-                    e.printStackTrace();
-                    return null;
-                }
+                Util.objectToStream(data, new DataOutputStream(ostream));
             }
-            return state;
-        }
-
-        public byte[] getState(String state_id) {
-            return getState();
         }
 
         @SuppressWarnings("unchecked")
-        public void setState(byte[] state) {
-            Map<Object,Object> m;
-            try {
-                m=(Map<Object,Object>)Util.objectFromByteBuffer(state);
-                synchronized(data) {
-                    data.clear();
-                    data.putAll(m);
-                }
-            }
-            catch(Exception e) {
-                e.printStackTrace();
-            }
-        }
-
-        public void setState(String state_id, byte[] state) {
-            setState(state);
-        }
-
-        public void getState(OutputStream ostream) {
-            ObjectOutputStream oos=null;
-            try {
-                oos=new ObjectOutputStream(ostream);
-                synchronized(data) {
-                    oos.writeObject(data);
-                }
-                oos.flush();
-            }
-            catch(IOException e) {
-            }
-            finally {
-                try {
-                    if(oos != null)
-                        oos.close();
-                }
-                catch(IOException e) {
-                    System.err.println(e);
-                }
-            }
-        }
-
-        public void getState(String state_id, OutputStream ostream) {
-            getState(ostream);
-        }
-
-        @SuppressWarnings("unchecked")
-        public void setState(InputStream istream) {
-            ObjectInputStream ois=null;
-            try {
-                ois=new ObjectInputStream(istream);
-                Map<Object,Object> m=(Map<Object,Object>)ois.readObject();
-                synchronized(data) {
-                    data.clear();
-                    data.putAll(m);
-                }
-
-            }
-            catch(Exception e) {
-            }
-            finally {
-                try {
-                    if(ois != null)
-                        ois.close();
-                }
-                catch(IOException e) {
-                    System.err.println(e);
-                }
-            }
-        }
-
-        public void setState(String state_id, InputStream istream) {
-            setState(istream);
-        }
-
-        public void clear() {
+        public void setState(InputStream istream) throws Exception {
+            Map<Object,Object> m=(Map<Object,Object>)Util.objectFromStream(new DataInputStream(istream));
             synchronized(data) {
                 data.clear();
+                data.putAll(m);
             }
         }
 

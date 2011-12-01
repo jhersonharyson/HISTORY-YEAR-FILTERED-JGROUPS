@@ -9,7 +9,9 @@ import org.jgroups.util.MutableDigest;
 import org.jgroups.util.TimeScheduler;
 import org.jgroups.util.Util;
 
-import java.io.*;
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.lang.management.ManagementFactory;
 import java.util.*;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -37,7 +39,6 @@ import java.util.concurrent.locks.ReentrantLock;
  * @author Bela Ban
  */
 @MBean(description="Computes the broadcast messages that are stable")
-@DeprecatedProperty(names={"digest_timeout","max_gossip_runs","max_suspend_time"})
 public class STABLE extends Protocol {
     private static final long MAX_SUSPEND_TIME=200000;
 
@@ -63,8 +64,15 @@ public class STABLE extends Protocol {
      * ideally <code>stability_delay</code> should be set to a low number as
      * well
      */
-    @Property(description="Maximum number of bytes received in all messages before sending a STABLE message is triggered. Default is 0 (disabled)")
-    private long max_bytes=500000;
+    @Property(description="Maximum number of bytes received in all messages before sending a STABLE message is triggered ." +
+      "If ergonomics is enabled, this value is computed as max(MAX_HEAP * cap, N * max_bytes) where N = number of members")
+    protected long max_bytes=2000000;
+
+    protected long original_max_bytes=max_bytes;
+
+    @Property(description="Max percentage of the max heap (-Xmx) to be used for max_bytes. " +
+      "Only used if ergonomics is enabled. 0 disables setting max_bytes dynamically.")
+    protected double cap=0.10; // 10% of the max heap by default
 
     
     /* --------------------------------------------- JMX  ---------------------------------------------- */
@@ -112,16 +120,17 @@ public class STABLE extends Protocol {
     private final Lock received=new ReentrantLock();
 
     /**
-     * When true, don't take part in garbage collection protocol: neither send
-     * STABLE messages nor handle STABILITY messages
+     * When true, don't take part in garbage collection: neither send STABLE messages nor handle STABILITY messages
      */
-    private boolean suspended=false;
+    @ManagedAttribute
+    protected volatile boolean suspended=false;
 
     private boolean initialized=false;
 
     private Future<?> resume_task_future=null;
     private final Object resume_task_mutex=new Object();
-       
+
+
     
     
     public STABLE() {             
@@ -141,6 +150,7 @@ public class STABLE extends Protocol {
 
     public void setMaxBytes(long max_bytes) {
         this.max_bytes=max_bytes;
+        this.original_max_bytes=max_bytes;
     }
 
     @ManagedAttribute(name="BytesReceived")
@@ -171,9 +181,9 @@ public class STABLE extends Protocol {
     }
 
 
-    public Vector<Integer> requiredDownServices() {
-        Vector<Integer> retval=new Vector<Integer>();
-        retval.addElement(Event.GET_DIGEST);  // NAKACK layer
+    public List<Integer> requiredDownServices() {
+        List<Integer> retval=new ArrayList<Integer>();
+        retval.add(Event.GET_DIGEST);  // from the NAKACK layer
         return retval;
     }
 
@@ -203,6 +213,7 @@ public class STABLE extends Protocol {
     
     public void init() throws Exception {
         super.init();
+        original_max_bytes=max_bytes;
     }
 
     public void start() throws Exception {
@@ -262,7 +273,7 @@ public class STABLE extends Protocol {
         if(max_bytes <= 0)
             return;
         Address dest=msg.getDest();
-        if(dest == null || dest.isMulticastAddress()) {
+        if(dest == null) {
             boolean send_stable_msg=false;
             received.lock();
             try {
@@ -299,7 +310,7 @@ public class STABLE extends Protocol {
                 return retval;
 
             case Event.SUSPEND_STABLE:
-                long timeout=0;
+                long timeout=MAX_SUSPEND_TIME;
                 Object t=evt.getArg();
                 if(t != null && t instanceof Long)
                     timeout=(Long)t;
@@ -324,13 +335,17 @@ public class STABLE extends Protocol {
         sendStableMessage(copy);
     }
 
+    @ManagedOperation(description="Sends a STABLE message; when every member has received a STABLE message from everybody else, " +
+      "a STABILITY message will be sent")
+    public void gc() {runMessageGarbageCollection();}
+
 
 
     /* --------------------------------------- Private Methods ---------------------------------------- */
 
 
     private void handleViewChange(View v) {
-        Vector<Address> tmp=v.getMembers();
+        List<Address> tmp=v.getMembers();
         synchronized(mbrs) {
             mbrs.clear();
             mbrs.addAll(tmp);
@@ -340,6 +355,14 @@ public class STABLE extends Protocol {
             resetDigest();
             if(!initialized)
                 initialized=true;
+
+            if(ergonomics && cap > 0) {
+                long max_heap=(long)(ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getMax() * cap);
+                long new_size=tmp.size() * original_max_bytes;
+                max_bytes=Math.min(max_heap, new_size);
+                if(log.isDebugEnabled())
+                    log.debug("[ergonomics] setting max_bytes to " + Util.printBytes(max_bytes) + " (" + tmp.size() + " members)");
+            }
         }
         finally {
             lock.unlock();
@@ -374,30 +397,25 @@ public class STABLE extends Protocol {
                     append(votes.size()).append(" votes):\nmine:   ").append(digest.printHighestDeliveredSeqnos())
                     .append("\nother:  ").append(d.printHighestDeliveredSeqnos());
         }
-        Address mbr;
-        long highest_seqno, my_highest_seqno, new_highest_seqno, my_low, low, new_low;
-        long highest_seen_seqno, my_highest_seen_seqno, new_highest_seen_seqno;
-        Digest.Entry val;
-        for(Map.Entry<Address, Digest.Entry> entry: d.getSenders().entrySet()) {
-            mbr=entry.getKey();
-            val=entry.getValue();
-            low=val.getLow();
-            highest_seqno=val.getHighestDeliveredSeqno();      // highest *delivered* seqno
-            highest_seen_seqno=val.getHighestReceivedSeqno();  // highest *received* seqno
 
-            my_low=digest.lowSeqnoAt(mbr);
-            new_low=Math.min(my_low, low);
+        for(Digest.DigestEntry entry: d) {
+            Address mbr=entry.getMember();
+            long highest_delivered=entry.getHighestDeliveredSeqno();
+            long highest_received=entry.getHighestReceivedSeqno();
 
             // compute the minimum of the highest seqnos deliverable (for garbage collection)
-            my_highest_seqno=digest.highestDeliveredSeqnoAt(mbr);
+            long[] seqnos=digest.get(mbr);
+            if(seqnos == null)
+                continue;
+            long my_highest_delivered=seqnos[0];
             // compute the maximum of the highest seqnos seen (for retransmission of last missing message)
-            my_highest_seen_seqno=digest.highestReceivedSeqnoAt(mbr);
+            long my_highest_received=seqnos[1];
 
-            new_highest_seqno=Math.min(my_highest_seqno, highest_seqno);
-            new_highest_seen_seqno=Math.max(my_highest_seen_seqno, highest_seen_seqno);
-            digest.setHighestDeliveredAndSeenSeqnos(mbr, new_low, new_highest_seqno, new_highest_seen_seqno);
+            long new_highest_delivered=Math.min(my_highest_delivered, highest_delivered);
+            long new_highest_received=Math.max(my_highest_received, highest_received);
+            digest.setHighestDeliveredAndSeenSeqnos(mbr, new_highest_delivered, new_highest_received);
         }
-        if(log.isTraceEnabled()) {
+        if(sb != null) { // implies log.isTraceEnabled() == true
             sb.append("\nresult: ").append(digest.printHighestDeliveredSeqnos()).append("\n");
             log.trace(sb);
         }
@@ -470,7 +488,7 @@ public class STABLE extends Protocol {
         synchronized(resume_task_mutex) {
             if(resume_task_future == null || resume_task_future.isDone()) {
                 ResumeTask resume_task=new ResumeTask();
-                resume_task_future=timer.schedule(resume_task, max_suspend_time, TimeUnit.MILLISECONDS); // fixed-rate scheduling
+                resume_task_future=timer.schedule(resume_task, max_suspend_time, TimeUnit.MILLISECONDS);
                 if(log.isDebugEnabled())
                     log.debug("resume task started, max_suspend_time=" + max_suspend_time);
             }
@@ -740,12 +758,12 @@ public class STABLE extends Protocol {
             return retval;
         }
 
-        public void writeTo(DataOutputStream out) throws IOException {
+        public void writeTo(DataOutput out) throws Exception {
             out.writeInt(type);
             Util.writeStreamable(stableDigest, out);
         }
 
-        public void readFrom(DataInputStream in) throws IOException, IllegalAccessException, InstantiationException {
+        public void readFrom(DataInput in) throws Exception {
             type=in.readInt();
             stableDigest=(Digest)Util.readStreamable(Digest.class, in);
         }

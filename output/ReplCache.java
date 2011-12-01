@@ -10,10 +10,7 @@ import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Unsupported;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
-import org.jgroups.util.Rsp;
-import org.jgroups.util.RspList;
-import org.jgroups.util.TimeScheduler;
-import org.jgroups.util.Util;
+import org.jgroups.util.*;
 
 import java.io.*;
 import java.lang.reflect.Method;
@@ -78,7 +75,7 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
     private static final short REMOVE      = 4;
     private static final short REMOVE_MANY = 5;
 
-    protected static Map<Short, Method> methods=Util.createConcurrentMap(8);
+    protected static final Map<Short, Method> methods=Util.createConcurrentMap(8);
     private TimeScheduler timer;
 
 
@@ -426,10 +423,9 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
         // 3. Execute a cluster wide GET
         try {
-            RspList rsps=disp.callRemoteMethods(null,
-                                                new MethodCall(GET, new Object[]{key}),
-                                                GroupRequest.GET_ALL,
-                                                call_timeout);
+            RspList<Object> rsps=disp.callRemoteMethods(null,
+                                                new MethodCall(GET, key),
+                                                new RequestOptions(ResponseMode.GET_ALL, call_timeout));
             for(Rsp rsp: rsps.values()) {
                 Object obj=rsp.getValue();
                 if(obj == null || obj instanceof Throwable)
@@ -471,8 +467,8 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
     @ManagedOperation
     public void remove(K key, boolean synchronous) {
         try {
-            disp.callRemoteMethods(null, new MethodCall(REMOVE, new Object[]{key}),
-                                   synchronous? GroupRequest.GET_ALL : GroupRequest.GET_NONE, call_timeout);
+            disp.callRemoteMethods(null, new MethodCall(REMOVE, key),
+                                   new RequestOptions(synchronous? ResponseMode.GET_ALL : ResponseMode.GET_NONE, call_timeout));
             if(l1_cache != null)
                 l1_cache.remove(key);
         }
@@ -580,8 +576,8 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
         final List<Address> old_nodes=this.view != null? new ArrayList<Address>(this.view.getMembers()) : null;
 
         this.view=new_view;
-        if(log.isInfoEnabled())
-            log.info("new view: " + new_view);
+        if(log.isDebugEnabled())
+            log.debug("new view: " + new_view);
 
         if(hash_function != null)
             hash_function.installNodes(new_view.getMembers());
@@ -604,6 +600,9 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
     }
 
     public void block() {
+    }
+
+    public void unblock() {
     }
 
     public void changed() {
@@ -737,8 +736,9 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
     private void mcastPut(K key, V val, short repl_count, long caching_time, boolean synchronous) {
         try {
-            int mode=synchronous? GroupRequest.GET_ALL : GroupRequest.GET_NONE;
-            disp.callRemoteMethods(null, new MethodCall(PUT, new Object[]{key, val, repl_count, caching_time}), mode, call_timeout);
+            ResponseMode mode=synchronous? ResponseMode.GET_ALL : ResponseMode.GET_NONE;
+            disp.callRemoteMethods(null, new MethodCall(PUT, key, val, repl_count, caching_time),
+                                   new RequestOptions(mode, call_timeout));
         }
         catch(Throwable t) {
             if(log.isWarnEnabled())
@@ -748,8 +748,8 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
     private void mcastClear(Set<K> keys, boolean synchronous) {
         try {
-            int mode=synchronous? GroupRequest.GET_ALL : GroupRequest.GET_NONE;
-            disp.callRemoteMethods(null, new MethodCall(REMOVE_MANY, new Object[]{keys}), mode, call_timeout);
+            ResponseMode mode=synchronous? ResponseMode.GET_ALL : ResponseMode.GET_NONE;
+            disp.callRemoteMethods(null, new MethodCall(REMOVE_MANY, keys), new RequestOptions(mode, call_timeout));
         }
         catch(Throwable t) {
             if(log.isWarnEnabled())
@@ -760,9 +760,9 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
     private void move(Address dest, K key, V val, short repl_count, long caching_time, boolean synchronous) {
         try {
-            int mode=synchronous? GroupRequest.GET_ALL : GroupRequest.GET_NONE;
-            disp.callRemoteMethod(dest, new MethodCall(PUT_FORCE, new Object[]{key, val, repl_count, caching_time, true}),
-                                  mode, call_timeout);
+            ResponseMode mode=synchronous? ResponseMode.GET_ALL : ResponseMode.GET_NONE;
+            disp.callRemoteMethod(dest, new MethodCall(PUT_FORCE, key, val, repl_count, caching_time, true),
+                                  new RequestOptions(mode, call_timeout));
         }
         catch(Throwable t) {
             if(log.isWarnEnabled())
@@ -781,8 +781,7 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
         private final static int FACTOR=3737; // to better spread the node out across the space
 
         public List<Address> hash(K key, short replication_count) {
-            int hash=Math.abs(key.hashCode());
-            int index=hash % HASH_SPACE;
+            int index=Math.abs(key.hashCode() % HASH_SPACE);
             
             Set<Address> results=new LinkedHashSet<Address>();
             List<Address> retval=new ArrayList<Address>();
@@ -813,7 +812,7 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
         public void installNodes(List<Address> new_nodes) {
             nodes.clear();
             for(Address node: new_nodes) {
-                int hash=Math.abs(node.hashCode() * FACTOR) % HASH_SPACE;
+                int hash=Math.abs((node.hashCode() * FACTOR) % HASH_SPACE);
                 for(int i=hash; i < hash + HASH_SPACE; i++) {
                     short new_index=(short)(i % HASH_SPACE);
                     if(!nodes.containsKey(new_index)) {
@@ -834,71 +833,6 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
     }
 
-
-    /**
-     * Uses arrays to store hash values of addresses, plus addresses.
-     */
-/*    public static class ArrayBasedConsistentHashFunction<K> extends MembershipListenerAdapter implements HashFunction<K> {
-        Object[] nodes=null;
-        private final static int HASH_SPACE=2000; // must be > max number of nodes in a cluster
-
-        public Address hash(K key, List<Address> members) {
-            int hash=Math.abs(key.hashCode());
-            int index=hash % HASH_SPACE;
-
-            if(members != null && !members.isEmpty()) {
-                Object[] tmp=new Object[nodes.length];
-                System.arraycopy(nodes, 0, tmp, 0, nodes.length);
-                for(int i=0; i < tmp.length; i+=2) {
-                    if(!members.contains(tmp[i+1])) {
-                        tmp[i]=tmp[i+1]=null;
-                    }
-                }
-                return findFirst(tmp, index);
-            }
-            return findFirst(nodes, index);
-        }
-
-        public void viewAccepted(View new_view) {
-            nodes=new Object[new_view.size() * 2];
-            int index=0;
-            for(Address node: new_view.getMembers()) {
-                int hash=Math.abs(node.hashCode()) % HASH_SPACE;
-                nodes[index++]=hash;
-                nodes[index++]=node;
-            }
-
-            if(log.isTraceEnabled()) {
-                StringBuilder sb=new StringBuilder("node mappings:\n");
-                for(int i=0; i < nodes.length; i+=2) {
-                    sb.append(nodes[i] + ": " + nodes[i+1]).append("\n");
-                }
-                log.trace(sb);
-            }
-        }
-
-        public void suspect(Address suspected_mbr) {
-        }
-
-        public void block() {
-        }
-
-        private static Address findFirst(Object[] array, int index) {
-            Address retval=null;
-            if(array == null)
-                return null;
-
-            for(int i=0; i < array.length; i+=2) {
-                if(array[i] == null)
-                    continue;
-                if(array[i+1] != null)
-                    retval=(Address)array[i+1];
-                if(((Integer)array[i]) >= index)
-                    return (Address)array[i+1];
-            }
-            return retval;
-        }
-    }*/
 
 
 
@@ -935,14 +869,14 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
         static final byte VALUE       = 3;
         
 
-        public byte[] objectToByteBuffer(Object obj) throws Exception {
+        public Buffer objectToBuffer(Object obj) throws Exception {
             ByteArrayOutputStream out_stream=new ByteArrayOutputStream(35);
             DataOutputStream out=new DataOutputStream(out_stream);
             try {
                 if(obj == null) {
                     out_stream.write(NULL);
                     out_stream.flush();
-                    return out_stream.toByteArray();
+                    return new Buffer(out_stream.toByteArray());
                 }
 
                 if(obj instanceof MethodCall) {
@@ -971,25 +905,25 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
                     Util.objectToStream(obj, out);
                 }
                 out.flush();
-                return out_stream.toByteArray();
+                return new Buffer(out_stream.toByteArray());
             }
             finally {
                 Util.close(out);
             }
         }
 
-        public Object objectFromByteBuffer(byte[] buf) throws Exception {
+        public Object objectFromBuffer(byte[] buf, int offset, int length) throws Exception {
             if(buf == null)
                 return null;
 
-            DataInputStream in=new DataInputStream(new ByteArrayInputStream(buf));
+            DataInputStream in=new DataInputStream(new ByteArrayInputStream(buf, offset, length));
             byte type=in.readByte();
             if(type == NULL)
                 return null;
             if(type == METHOD_CALL) {
                 short id=in.readShort();
-                short length=in.readShort();
-                Object[] args=length > 0? new Object[length] : null;
+                short len=in.readShort();
+                Object[] args=len > 0? new Object[len] : null;
                 if(args != null) {
                     for(int i=0; i < args.length; i++)
                         args[i]=Util.objectFromStream(in);

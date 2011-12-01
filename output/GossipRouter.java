@@ -169,23 +169,6 @@ public class GossipRouter {
         return expiryTime;
     }
 
-    @Deprecated
-    public void setGossipRequestTimeout(long gossipRequestTimeout) {
-    }
-
-    @Deprecated
-    public static long getGossipRequestTimeout() {
-        return 0;
-    }
-
-    @Deprecated
-    public void setRoutingClientReplyTimeout(long routingClientReplyTimeout) {
-    }
-
-    @Deprecated
-    public static long getRoutingClientReplyTimeout() {
-        return 0;
-    }
 
     @ManagedAttribute(description="status")
     public boolean isStarted() {
@@ -526,9 +509,7 @@ public class GossipRouter {
         }
 
         address_mappings.remove(addr);
-
-        if(addr instanceof UUID)
-            UUID.remove((UUID)addr);
+        UUID.remove(addr);
     }
 
     /**
@@ -569,7 +550,7 @@ public class GossipRouter {
         }
     }
 
-    private static void sendToMember(Address dest, final DataOutputStream out, byte[] msg) throws IOException {
+    private static void sendToMember(Address dest, final DataOutputStream out, byte[] msg) throws Exception {
         if(out == null)
             return;
         synchronized(out) {
@@ -794,7 +775,7 @@ public class GossipRouter {
                 
                 String logical_name = request.getLogicalName();
                 if (logical_name != null && addr instanceof org.jgroups.util.UUID)
-                    org.jgroups.util.UUID.add((org.jgroups.util.UUID) addr, logical_name);
+                    org.jgroups.util.UUID.add(addr, logical_name);
 
                 // group name, logical address, logical name, physical addresses (could be null)
                 logical_addrs.add(addr); // allows us to remove the entries for this connection on
@@ -876,7 +857,7 @@ public class GossipRouter {
             try {                
                 data.writeTo(output);
                 output.flush();                
-            } catch (IOException e1) {
+            } catch (Exception e1) {
                 //ignored
             }
         }
@@ -900,7 +881,7 @@ public class GossipRouter {
 
         GossipRouter router=null;
         String bind_addr=null;
-        boolean jmx=false;
+        boolean jmx=true;
 
         for(int i=0; i < args.length; i++) {
             String arg=args[i];
@@ -921,7 +902,7 @@ public class GossipRouter {
                 continue;
             }
             if("-jmx".equals(arg)) {
-                jmx=true;
+                jmx=Boolean.valueOf(args[++i]);
                 continue;
             }
             // this option is not used and should be deprecated/removed in a future release
@@ -982,7 +963,7 @@ public class GossipRouter {
         System.out.println("                            greater than zero or the default of 1000 will be");
         System.out.println("                            used.");
         System.out.println();
-        System.out.println("    -jmx                  - Expose attributes and operations via JMX.");
+        System.out.println("    -jmx <true|false>     - Expose attributes and operations via JMX.");
         System.out.println();
         System.out.println("    -solinger <msecs>     - Time for setting SO_LINGER on connections. 0");
         System.out.println("                            means do not set SO_LINGER. Must be greater than");

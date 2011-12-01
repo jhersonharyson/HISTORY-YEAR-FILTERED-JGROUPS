@@ -1,11 +1,11 @@
 package org.jgroups.tests;
 
 import org.jgroups.*;
-import org.jgroups.protocols.FD;
-import org.jgroups.protocols.FD_ALL;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Util;
-import org.testng.annotations.*;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -25,13 +25,13 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
     @BeforeMethod
     void start() throws Exception {
         ra=new MyReceiver("A"); rb=new MyReceiver("B"); rc=new MyReceiver("C");
-        a=createChannel(true, 3);
+        a=createChannel(true, 3, "A");
         a.setReceiver(ra);
 
-        b=createChannel(a);
+        b=createChannel(a, "B");
         b.setReceiver(rb);
 
-        c=createChannel(a); 
+        c=createChannel(a, "C");
         c.setReceiver(rc);
 
         modifyConfigs(a, b, c);
@@ -74,7 +74,7 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
         System.out.println("A's view: " + a.getView());
 
         // Inject view {B,C} into B and C:
-        View new_view=Util.createView(b.getLocalAddress(), 10, b.getLocalAddress(), c.getLocalAddress());
+        View new_view=Util.createView(b.getAddress(), 10, b.getAddress(), c.getAddress());
         injectView(new_view, b, c);
         assertEquals("A's view is " + a.getView(), 3, a.getView().size());
         assertEquals("B's view is " + b.getView(), 2, b.getView().size());
@@ -84,23 +84,23 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
 
     public void testWithViewA() throws Exception {
         // Inject view {A} into A, B and C:
-        View new_view=Util.createView(a.getLocalAddress(), 10, a.getLocalAddress());
+        View new_view=Util.createView(a.getAddress(), 10, a.getAddress());
         injectView(new_view, a, b, c);
         sendAndCheckMessages(5, a, b, c);
     }
 
     public void testWithViewC() throws Exception {
         // Inject view {A} into A, B and C:
-        View new_view=Util.createView(c.getLocalAddress(), 10, c.getLocalAddress());
+        View new_view=Util.createView(c.getAddress(), 10, c.getAddress());
         injectView(new_view, a, b, c);
         sendAndCheckMessages(5, a, b, c);
     }
 
     public void testWithEveryoneHavingASingletonView() throws Exception {
         // Inject view {A} into A, B and C:
-        injectView(Util.createView(a.getLocalAddress(), 10, a.getLocalAddress()), a);
-        injectView(Util.createView(b.getLocalAddress(), 10, b.getLocalAddress()), b);
-        injectView(Util.createView(c.getLocalAddress(), 10, c.getLocalAddress()), c);
+        injectView(Util.createView(a.getAddress(), 10, a.getAddress()), a);
+        injectView(Util.createView(b.getAddress(), 10, b.getAddress()), b);
+        injectView(Util.createView(c.getAddress(), 10, c.getAddress()), c);
         sendAndCheckMessages(5, a, b, c);
     }
 
@@ -122,13 +122,13 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
         // 1. send unicast messages
         Set<Address> mbrs=new HashSet<Address>(channels.length);
         for(JChannel ch: channels)
-            mbrs.add(ch.getLocalAddress());
+            mbrs.add(ch.getAddress());
 
         for(JChannel ch: channels) {
-            Address addr=ch.getLocalAddress();
+            Address addr=ch.getAddress();
             for(Address dest: mbrs) {
                 for(int i=1; i <= num_msgs; i++) {
-                    ch.send(dest, null, "unicast msg #" + i + " from " + addr);
+                    ch.send(dest, "unicast msg #" + i + " from " + addr);
                 }
             }
         }
