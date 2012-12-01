@@ -56,15 +56,15 @@ public class MERGE3 extends Protocol {
 
     /* --------------------------------------------- Fields ------------------------------------------------------ */
 
-    protected Address       local_addr=null;
+    protected Address        local_addr=null;
 
-    protected View          view;
+    protected View           view;
 
-    protected TimeScheduler timer;
+    protected TimeScheduler  timer;
 
-    protected Future<?>     info_sender;
+    protected Future<?>      info_sender;
 
-    protected Future<?>     view_consistency_checker;
+    protected Future<?>      view_consistency_checker;
 
     // hashmap to keep track of view-id sent in INFO messages
     protected final ConcurrentMap<ViewId,SortedSet<Address>> views=new ConcurrentHashMap<ViewId,SortedSet<Address>>(view != null? view.size() : 16);
@@ -167,7 +167,7 @@ public class MERGE3 extends Protocol {
 
     protected boolean isMergeRunning() {
         Object retval=up_prot.up(new Event(Event.IS_MERGE_IN_PROGRESS));
-        return retval instanceof Boolean && ((Boolean)retval).booleanValue();
+        return retval instanceof Boolean && (Boolean)retval;
     }
 
     protected synchronized void startInfoSender() {
@@ -351,6 +351,10 @@ public class MERGE3 extends Protocol {
         public long nextInterval() {
             return Math.max(min_interval, Util.random(max_interval) + max_interval/2);
         }
+
+        public String toString() {
+            return MERGE3.class.getSimpleName() + ": " + getClass().getSimpleName();
+        }
     }
 
 
@@ -373,8 +377,15 @@ public class MERGE3 extends Protocol {
         protected void _run() {
             SortedSet<Address> coords=new TreeSet<Address>();
 
-            for(ViewId view_id: views.keySet())
-                coords.add(view_id.getCreator());
+            // Only add view creators which *are* actually in the set as well, e.g.
+            // A|4: {A,B,C} and
+            // B|4: {D} would only add A to the coords list. A is a real coordinator
+            for(Map.Entry<ViewId,SortedSet<Address>> entry: views.entrySet()) {
+                Address coord=entry.getKey().getCreator();
+                SortedSet<Address> members=entry.getValue();
+                if(members != null && members.contains(coord))
+                    coords.add(coord);
+            }
 
             Address merge_leader=coords.isEmpty() ? null : coords.first();
             if(merge_leader == null || local_addr == null || !merge_leader.equals(local_addr)) {
@@ -441,6 +452,10 @@ public class MERGE3 extends Protocol {
 
         public long nextInterval() {
             return check_interval;
+        }
+
+        public String toString() {
+            return MERGE3.class.getSimpleName() + ": " + getClass().getSimpleName();
         }
 
     }

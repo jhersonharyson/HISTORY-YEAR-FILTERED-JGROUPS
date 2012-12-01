@@ -7,10 +7,11 @@ import org.jgroups.blocks.Connection;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.logging.Log;
-import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.FLUSH;
 import org.jgroups.protocols.pbcast.GMS;
+import org.jgroups.protocols.relay.SiteMaster;
+import org.jgroups.protocols.relay.SiteUUID;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
@@ -29,6 +30,8 @@ import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.text.MessageFormat;
 import java.text.NumberFormat;
 import java.util.*;
 import java.util.concurrent.*;
@@ -78,31 +81,21 @@ public class Util {
      * reduces the amount of log data */
     public static int MAX_LIST_PRINT_SIZE=20;
 
-    /**
-     * Global thread group to which all (most!) JGroups threads belong
-     */
-    private static ThreadGroup GLOBAL_GROUP=new ThreadGroup("JGroups") {
-        public void uncaughtException(Thread t, Throwable e) {
-            LogFactory.getLog("org.jgroups").error("uncaught exception in " + t + " (thread group=" + GLOBAL_GROUP + " )", e);
-            final ThreadGroup tgParent = getParent();
-            if(tgParent != null) {
-                tgParent.uncaughtException(t,e);
-            }
-        }
-    };
-
-    public static ThreadGroup getGlobalThreadGroup() {
-        return GLOBAL_GROUP;
-    }
+    
 
     public static enum AddressScope {GLOBAL, SITE_LOCAL, LINK_LOCAL, LOOPBACK, NON_LOOPBACK};
 
     private static StackType ip_stack_type=_getIpStackType();
 
 
+    protected static ResourceBundle resource_bundle;
+
+
     static {
+        resource_bundle=ResourceBundle.getBundle("jg-messages",Locale.getDefault(),Util.class.getClassLoader());
+
         /* Trying to get value of resolve_dns. PropertyPermission not granted if
-        * running in an untrusted environment  with JNLP */
+        * running in an untrusted environment with JNLP */
         try {
             resolve_dns=Boolean.valueOf(System.getProperty("resolve.dns","false"));
         }
@@ -212,6 +205,20 @@ public class Util {
     }
 
 
+    public static String bold(String msg) {
+        StringBuilder sb=new StringBuilder("\033[1m");
+        sb.append(msg).append("\033[0m");
+        return sb.toString();
+    }
+
+    public static String getMessage(String key) {
+        return key != null? resource_bundle.getString(key) : null;
+    }
+
+    public static String getMessage(String key, Object ... args) {
+        String msg=getMessage(key);
+        return msg != null? MessageFormat.format(msg, args) : null;
+    }
 
 
     /**
@@ -270,8 +277,30 @@ public class Util {
         SCOPE.ScopeHeader hdr=(SCOPE.ScopeHeader)msg.getHeader(Global.SCOPE_ID);
         return hdr != null? hdr.getScope() : 0;
     }
-
-
+    
+   public static byte[] createAuthenticationDigest(String passcode, long t1, double q1) throws IOException,
+            NoSuchAlgorithmException {
+      ByteArrayOutputStream baos = new ByteArrayOutputStream(128);
+      DataOutputStream out = new DataOutputStream(baos);
+      byte[] digest = createDigest(passcode, t1, q1);
+      out.writeLong(t1);
+      out.writeDouble(q1);      
+      out.writeInt(digest.length);
+      out.write(digest);
+      out.flush();
+      return baos.toByteArray();
+   }
+   
+   public static byte[] createDigest(String passcode, long t1, double q1)
+            throws IOException, NoSuchAlgorithmException {
+      MessageDigest md = MessageDigest.getInstance("SHA");
+      md.update(passcode.getBytes());
+      ByteBuffer bb = ByteBuffer.allocate(16); //8 bytes for long and double each
+      bb.putLong(t1);
+      bb.putDouble(q1);
+      md.update(bb);
+      return md.digest();      
+   }
 
     /**
      * Utility method. If the dest address is IPv6, convert scoped link-local addrs into unscoped ones
@@ -779,17 +808,21 @@ public class Util {
             return;
         }
 
-        Class<? extends Address> clazz=addr.getClass();
-        if(clazz.equals(UUID.class)) {
-            flags=Util.setFlag(flags, Address.UUID_ADDR);
+        if(addr instanceof UUID) {
+            Class<? extends Address> clazz=addr.getClass();
+            if(clazz.equals(UUID.class))
+                flags=Util.setFlag(flags, Address.UUID_ADDR);
+            else if(clazz.equals(SiteUUID.class))
+                flags=Util.setFlag(flags, Address.SITE_UUID);
+            else if(clazz.equals(SiteMaster.class))
+                flags=Util.setFlag(flags,Address.SITE_MASTER);
+            else
+                streamable_addr=false;
         }
-        else if(clazz.equals(IpAddress.class)) {
+        else if(addr instanceof IpAddress)
             flags=Util.setFlag(flags, Address.IP_ADDR);
-        }
-        else {
+        else
             streamable_addr=false;
-        }
-
         out.writeByte(flags);
         if(streamable_addr)
             addr.writeTo(out);
@@ -805,6 +838,14 @@ public class Util {
         Address addr;
         if(Util.isFlagSet(flags, Address.UUID_ADDR)) {
             addr=new UUID();
+            addr.readFrom(in);
+        }
+        else if(Util.isFlagSet(flags, Address.SITE_UUID)) {
+            addr=new SiteUUID();
+            addr.readFrom(in);
+        }
+        else if(Util.isFlagSet(flags, Address.SITE_MASTER)) {
+            addr=new SiteMaster();
             addr.readFrom(in);
         }
         else if(Util.isFlagSet(flags, Address.IP_ADDR)) {
@@ -860,10 +901,10 @@ public class Util {
 
     private static Address readOtherAddress(DataInput in) throws Exception {
         short magic_number=in.readShort();
-        Class<Address> cl=ClassConfigurator.get(magic_number);
+        Class<?> cl=ClassConfigurator.get(magic_number);
         if(cl == null)
             throw new RuntimeException("class for magic number " + magic_number + " not found");
-        Address addr=cl.newInstance();
+        Address addr=(Address)cl.newInstance();
         addr.readFrom(in);
         return addr;
     }
@@ -1301,7 +1342,7 @@ public class Util {
 
 
 
-    public static boolean match(Object obj1, Object obj2) {
+    public static <T> boolean match(T obj1, T obj2) {
         if(obj1 == null && obj2 == null)
             return true;
         if(obj1 != null)
@@ -1331,6 +1372,12 @@ public class Util {
         }
         return true;
     }
+
+
+    public static <T> boolean different(T one, T two) {
+        return !match(one, two);
+    }
+
 
     /** Sleep for timeout msecs. Returns when timeout has elapsed or thread was interrupted */
     public static void sleep(long timeout) {
@@ -2250,6 +2297,14 @@ public class Util {
     }
 
 
+    public static <T> boolean contains(T key, T[] list) {
+        if(list == null) return false;
+        for(T tmp: list)
+            if(tmp == key || tmp.equals(key))
+                return true;
+        return false;
+    }
+
 
     public static boolean containsViewId(Collection<View> views, ViewId vid) {
         for(View view: views) {
@@ -2324,6 +2379,27 @@ public class Util {
         }
         return retval;
     }
+
+    /**
+     * Similar to {@link #determineMergeCoords(java.util.Map)} but only actual coordinators are counted: an actual
+     * coord is when the sender of a view is the first member of that view
+     * @param map
+     * @return
+     */
+    public static Collection<Address> determineActualMergeCoords(Map<Address,View> map) {
+        Set<Address> retval=new HashSet<Address>();
+        if(map != null) {
+            for(Map.Entry<Address,View> entry: map.entrySet()) {
+                Address sender=entry.getKey();
+                List<Address> members=entry.getValue().getMembers();
+                Address actual_coord=members.isEmpty() ? null : members.get(0);
+                if(sender.equals(actual_coord))
+                    retval.add(sender);
+            }
+        }
+        return retval;
+    }
+
 
     /**
      * Returns the rank of a member in a given view
@@ -2438,9 +2514,10 @@ public class Util {
 
     public static Object[][] createTimer() {
         return new Object[][] {
-                {new DefaultTimeScheduler(5)},
-                {new TimeScheduler2()},
-                {new HashedTimingWheel(5)}
+          {new DefaultTimeScheduler(5)},
+          {new TimeScheduler2()},
+          {new TimeScheduler3()},
+          {new HashedTimingWheel(5)}
         };
     }
 
@@ -2524,38 +2601,6 @@ public class Util {
     }
 
 
-    /**
-     Makes sure that we detect when a peer connection is in the closed state (not closed while we send data,
-     but before we send data). Two writes ensure that, if the peer closed the connection, the first write
-     will send the peer from FIN to RST state, and the second will cause a signal (Exception).
-     */
-    public static void doubleWrite(byte[] buf, OutputStream out) throws Exception {
-        if(buf.length > 1) {
-            out.write(buf, 0, 1);
-            out.write(buf, 1, buf.length - 1);
-        }
-        else {
-            out.write(buf, 0, 0);
-            out.write(buf);
-        }
-    }
-
-
-    /**
-     Makes sure that we detect when a peer connection is in the closed state (not closed while we send data,
-     but before we send data). Two writes ensure that, if the peer closed the connection, the first write
-     will send the peer from FIN to RST state, and the second will cause a signal (Exception).
-     */
-    public static void doubleWrite(byte[] buf, int offset, int length, OutputStream out) throws Exception {
-        if(length > 1) {
-            out.write(buf, offset, 1);
-            out.write(buf, offset+1, length - 1);
-        }
-        else {
-            out.write(buf, offset, 0);
-            out.write(buf, offset, length);
-        }
-    }
 
     /**
     * if we were to register for OP_WRITE and send the remaining data on
@@ -2967,7 +3012,7 @@ public class Util {
                 retval.add(addr);
             }
         }
-        return Collections.unmodifiableList(new LinkedList<IpAddress>(retval));
+        return new LinkedList<IpAddress>(retval);
     }
 
 
@@ -2992,7 +3037,7 @@ public class Util {
                 retval.add(addr);
             }
         }
-        return Collections.unmodifiableList(new LinkedList<InetSocketAddress>(retval));
+        return new LinkedList<InetSocketAddress>(retval);
    }
 
     public static List<String> parseStringList(String l, String separator) {
@@ -3244,8 +3289,15 @@ public class Util {
         try {
             retval=shortName(InetAddress.getLocalHost().getHostName());
         }
-        catch(UnknownHostException e) {
-            retval="localhost";
+        catch(Throwable e) {
+        }
+        if(retval == null) {
+            try {
+                retval=shortName(InetAddress.getByName(null).getHostName());
+            }
+            catch(Throwable e) {
+                retval="localhost";
+            }
         }
 
         long counter=Util.random(Short.MAX_VALUE *2);
@@ -3915,6 +3967,13 @@ public class Util {
         return !(mbrs == null || mbrs.isEmpty()) && local_addr.equals(mbrs.iterator().next());
     }
 
+    public static Address getCoordinator(View view) {
+        if(view == null)
+            return null;
+        List<Address> mbrs=view.getMembers();
+        return !mbrs.isEmpty()? mbrs.get(0) : null;
+    }
+
     public static MBeanServer getMBeanServer() {
 		ArrayList servers = MBeanServerFactory.findMBeanServer(null);
 		if (servers != null && !servers.isEmpty()) {
@@ -4368,8 +4427,8 @@ public class Util {
      * @param group
      * @param thread_name
      */
-    public static void runAsync(Runnable task, ThreadFactory factory, ThreadGroup group, String thread_name) {
-        Thread thread=factory.newThread(group, task, thread_name);
+    public static void runAsync(Runnable task, ThreadFactory factory, String thread_name) {
+        Thread thread=factory.newThread(task, thread_name);
         thread.start();
     }
 

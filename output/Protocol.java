@@ -5,6 +5,7 @@ package org.jgroups.stack;
 
 import org.jgroups.Event;
 import org.jgroups.annotations.ManagedAttribute;
+import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.jmx.ResourceDMBean;
@@ -39,8 +40,8 @@ import java.util.*;
  * @author Bela Ban
  */
 public abstract class Protocol {
-    protected Protocol         up_prot=null, down_prot=null;
-    protected ProtocolStack    stack=null;
+    protected Protocol         up_prot, down_prot;
+    protected ProtocolStack    stack;
     
     @Property(description="Determines whether to collect statistics (and expose them via JMX). Default is true",writable=true)
     protected boolean          stats=true;
@@ -69,21 +70,21 @@ public abstract class Protocol {
      * (capitalization not relevant)
      */
     @Property(name="level", description="Sets the logger level (see javadocs)")
-    public void setLevel(String level) {
-        log.setLevel(level);
-    }
-
-    public String getLevel() {
-        return log.getLevel();
-    }
-
-    public boolean isErgonomics() {
-        return ergonomics;
-    }
-
-    public void setErgonomics(boolean ergonomics) {
-        this.ergonomics=ergonomics;
-    }
+    public void          setLevel(String level)            {log.setLevel(level);}
+    public String        getLevel()                        {return log.getLevel();}
+    public boolean       isErgonomics()                    {return ergonomics;}
+    public void          setErgonomics(boolean ergonomics) {this.ergonomics=ergonomics;}
+    public ProtocolStack getProtocolStack()                {return stack;}
+    public boolean       statsEnabled()                    {return stats;}
+    public void          enableStats(boolean flag)         {stats=flag;}
+    public String        getName()                         {return name;}
+    public short         getId()                           {return id;}
+    public void          setId(short id)                   {this.id=id;}
+    public Protocol      getUpProtocol()                   {return up_prot;}
+    public Protocol      getDownProtocol()                 {return down_prot;}
+    public void          setUpProtocol(Protocol prot)      {this.up_prot=prot;}
+    public void          setDownProtocol(Protocol prot)    {this.down_prot=prot;}
+    public void          setProtocolStack(ProtocolStack s) {this.stack=s;}
 
 
     public Object getValue(String name) {
@@ -121,10 +122,6 @@ public abstract class Protocol {
 
 
 
-    public ProtocolStack getProtocolStack(){
-        return stack;
-    }
-
     /**
      * After configuring the protocol itself from the properties defined in the XML config, a protocol might have
      * additional objects which need to be configured. This callback allows a protocol developer to configure those
@@ -132,9 +129,23 @@ public abstract class Protocol {
      * been configured. See AUTH for an example.
      * @return
      */
-    protected List<Object> getConfigurableObjects() {
-        return null;
+    protected List<Object> getConfigurableObjects() {return null;}
+
+    /** Returns the protocol IDs of all protocols above this one (excluding the current protocol) */
+    public short[] getIdsAbove() {
+        short[]     retval;
+        List<Short> ids=new ArrayList<Short>();
+        Protocol    current=up_prot;
+        while(current != null) {
+            ids.add(current.getId());
+            current=current.up_prot;
+        }
+        retval=new short[ids.size()];
+        for(int i=0; i < ids.size(); i++)
+            retval[i]=ids.get(i);
+        return retval;
     }
+
 
     protected TP getTransport() {
         Protocol retval=this;
@@ -160,6 +171,7 @@ public abstract class Protocol {
         return down_prot != null? down_prot.getSocketFactory() : null;
     }
 
+
     /**
      * Sets a SocketFactory. Socket factories are typically provided by the transport ({@link org.jgroups.protocols.TP})
      * or {@link org.jgroups.protocols.TP.ProtocolAdapter}
@@ -171,13 +183,9 @@ public abstract class Protocol {
     }
 
 
-    public boolean statsEnabled() {
-        return stats;
-    }
+    @ManagedOperation(description="Resets all stats")
+    public void resetStatistics() {resetStats();}
 
-    public void enableStats(boolean flag) {
-        stats=flag;
-    }
 
     public void resetStats() {
         ;
@@ -284,65 +292,52 @@ public abstract class Protocol {
     }
 
 
-    /** List of events that are required to be answered by some layer above.
-     @return Vector (of Integers) */
+    /** List of events that are required to be answered by some layer above */
     public List<Integer> requiredUpServices() {
         return null;
     }
 
-    /** List of events that are required to be answered by some layer below.
-     @return Vector (of Integers) */
+    /** List of events that are required to be answered by some layer below */
     public List<Integer> requiredDownServices() {
         return null;
     }
 
-    /** List of events that are provided to layers above (they will be handled when sent down from
-     above).
-     @return Vector (of Integers) */
+    /** List of events that are provided to layers above (they will be handled when sent down from above) */
     public List<Integer> providedUpServices() {
         return null;
     }
 
-    /** List of events that are provided to layers below (they will be handled when sent down from
-     below).
-     @return Vector<Integer (of Integers) */
+    /** List of events that are provided to layers below (they will be handled when sent down below) */
     public List<Integer> providedDownServices() {
         return null;
     }
 
-
-    /** All protocol names have to be unique ! */
-    public String getName() {
-        return name;
+    /** Returns all services provided by protocols below the current protocol */
+    public final List<Integer> getDownServices() {
+        List<Integer> retval=new ArrayList<Integer>();
+        Protocol prot=down_prot;
+        while(prot != null) {
+            List<Integer> tmp=prot.providedUpServices();
+            if(tmp != null && !tmp.isEmpty())
+                retval.addAll(tmp);
+            prot=prot.down_prot;
+        }
+        return retval;
     }
 
-    public short getId() {
-        return id;
+    /** Returns all services provided by the protocols above the current protocol */
+    public final List<Integer> getUpServices() {
+        List<Integer> retval=new ArrayList<Integer>();
+        Protocol prot=up_prot;
+        while(prot != null) {
+            List<Integer> tmp=prot.providedDownServices();
+            if(tmp != null && !tmp.isEmpty())
+                retval.addAll(tmp);
+            prot=prot.up_prot;
+        }
+        return retval;
     }
 
-    public void setId(short id) {
-        this.id=id;
-    }
-
-    public Protocol getUpProtocol() {
-        return up_prot;
-    }
-
-    public Protocol getDownProtocol() {
-        return down_prot;
-    }
-
-    public void setUpProtocol(Protocol up_prot) {
-        this.up_prot=up_prot;
-    }
-
-    public void setDownProtocol(Protocol down_prot) {
-        this.down_prot=down_prot;
-    }
-
-    public void setProtocolStack(ProtocolStack stack) {
-        this.stack=stack;
-    }
 
 
     /**

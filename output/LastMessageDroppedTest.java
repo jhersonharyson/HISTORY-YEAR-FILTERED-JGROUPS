@@ -2,7 +2,7 @@ package org.jgroups.tests;
 
 import org.jgroups.*;
 import org.jgroups.protocols.DISCARD;
-import org.jgroups.protocols.pbcast.NAKACK;
+import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Util;
@@ -26,11 +26,10 @@ public class LastMessageDroppedTest extends ChannelTestBase {
         c1=createChannel(true, 2);
         c2=createChannel(c1);
         // c1.setOpt(Channel.LOCAL, false);
-        modifyStack(c1, c2);
         c1.connect("LastMessageDroppedTest");
         c2.connect("LastMessageDroppedTest");
         View view=c2.getView();
-        log.info("view = " + view);
+        System.out.println("view = " + view);
         assert view.size() == 2 : "view is " + view;
     }
 
@@ -43,7 +42,7 @@ public class LastMessageDroppedTest extends ChannelTestBase {
     public void testLastMessageDropped() throws Exception {
         DISCARD discard=new DISCARD();
         ProtocolStack stack=c1.getProtocolStack();
-        stack.insertProtocol(discard, ProtocolStack.BELOW, NAKACK.class);
+        stack.insertProtocol(discard, ProtocolStack.BELOW, NAKACK2.class);
         c1.setDiscardOwnMessages(true);
 
         Message m1=new Message(null, null, 1);
@@ -59,24 +58,26 @@ public class LastMessageDroppedTest extends ChannelTestBase {
         Util.sleep(100);
 
         List<Integer> list=receiver.getMsgs();
-        for(int i=0; i < 10; i++)  {
+        for(int i=0; i < 20; i++)  {
             System.out.println("list=" + list);
             if(list.size() == 3)
                 break;
+            stable(c1, c2);
             Util.sleep(1000);
         }
+        System.out.println("list=" + list);
 
         assert list.size() == 3 : "list=" + list;
     }
 
 
-    private static void modifyStack(JChannel ... channels) {
+    private static void stable(JChannel ... channels) {
         for(JChannel ch: channels) {
             ProtocolStack stack=ch.getProtocolStack();
             STABLE stable=(STABLE)stack.findProtocol(STABLE.class);
             if(stable == null)
                 throw new IllegalStateException("STABLE protocol was not found");
-            stable.setDesiredAverageGossip(2000);
+            stable.gc();
         }
     }
 

@@ -6,6 +6,8 @@ import org.jgroups.blocks.mux.Muxer;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.TP;
+import org.jgroups.protocols.relay.SiteAddress;
+import org.jgroups.stack.DiagnosticsHandler;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.StateTransferInfo;
 import org.jgroups.util.*;
@@ -13,6 +15,7 @@ import org.jgroups.util.*;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicInteger;
 
 
 /**
@@ -41,12 +44,18 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
     protected MembershipListener membership_listener=null;
     protected RequestHandler req_handler=null;
     protected ProtocolAdapter prot_adapter=null;
-    protected final Collection<Address> members=new TreeSet<Address>();
+    protected volatile Collection<Address> members=new HashSet<Address>();
     protected Address local_addr=null;
     protected final Log log=LogFactory.getLog(getClass());
     protected boolean hardware_multicast_supported=false;
-
+    protected final AtomicInteger sync_unicasts=new AtomicInteger(0);
+    protected final AtomicInteger async_unicasts=new AtomicInteger(0);
+    protected final AtomicInteger sync_multicasts=new AtomicInteger(0);
+    protected final AtomicInteger async_multicasts=new AtomicInteger(0);
+    protected final AtomicInteger sync_anycasts=new AtomicInteger(0);
+    protected final AtomicInteger async_anycasts=new AtomicInteger(0);
     protected final Set<ChannelListener> channel_listeners=new CopyOnWriteArraySet<ChannelListener>();
+    protected final DiagnosticsHandler.ProbeHandler probe_handler=new MyProbeHandler();
 
 
     public MessageDispatcher() {
@@ -57,6 +66,7 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
         prot_adapter=new ProtocolAdapter();
         if(channel != null) {
             local_addr=channel.getAddress();
+            channel.addChannelListener(this);
         }
         setMessageListener(l);
         setMembershipListener(l2);
@@ -82,25 +92,14 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
     }
 
 
-    /** Returns a copy of members */
-    protected Collection<Address> getMembers() {
-        synchronized(members) {
-            return new ArrayList<Address>(members);
-        }
-    }
-
 
     /**
      * If this dispatcher is using a user-provided PullPushAdapter, then need to set the members from the adapter
      * initially since viewChange has most likely already been called in PullPushAdapter.
      */
-    private void setMembers(List<Address> new_mbrs) {
-        if(new_mbrs != null) {
-            synchronized(members) {
-                members.clear();
-                members.addAll(new_mbrs);
-            }
-        }
+    protected void setMembers(List<Address> new_mbrs) {
+        if(new_mbrs != null)
+            members=new HashSet<Address>(new_mbrs); // volatile write - seen by a subsequent read
     }
 
 
@@ -121,9 +120,8 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
 
 
     public void start() {
-        if(corr == null) {
+        if(corr == null)
             corr=createRequestCorrelator(prot_adapter, this, local_addr);
-        }
         correlatorStarted();
         corr.start();
 
@@ -136,6 +134,7 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
             }
             TP transport=channel.getProtocolStack().getTransport();
             hardware_multicast_supported=transport.supportsMulticasting();
+            transport.registerProbeHandler(probe_handler);
         }
     }
 
@@ -154,6 +153,7 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
 
         if(channel instanceof JChannel) {
             TP transport=channel.getProtocolStack().getTransport();
+            transport.unregisterProbeHandler(probe_handler);
             corr.unregisterProbeHandler(transport);
         }
     }
@@ -234,10 +234,8 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
 
 
     /**
-     * Sends a message to the members listed in dests. If dests is null, the message is sent to all current group
-     * members.
-     * @param dests A list of group members to send the message to. The message is sent to all members of the current
-     *        group if null
+     * Sends a message to all members and expects responses from members in dests (if non-null).
+     * @param dests A list of group members from which to expect responses (if the call is blocking).
      * @param msg The message to be sent
      * @param options A set of options that govern the call. See {@link org.jgroups.blocks.RequestOptions} for details
      * @return RspList A list of Rsp elements
@@ -247,15 +245,13 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
     public <T> RspList<T> castMessage(final Collection<Address> dests,
                                       Message msg, RequestOptions options) throws Exception {
         GroupRequest<T> req=cast(dests, msg, options, true);
-        return req != null? req.getResults() : RspList.EMPTY_RSP_LIST;
+        return req != null? req.getResults() : new RspList();
     }
 
 
     /**
-     * Sends a message to the members listed in dests. If dests is null, the message is sent to all current group
-     * members.
-     * @param dests A list of group members to send the message to. The message is sent to all members of the current
-     *        group if null
+     * Sends a message to all members and expects responses from members in dests (if non-null).
+     * @param dests A list of group members from which to expect responses (if the call is blocking).
      * @param msg The message to be sent
      * @param options A set of options that govern the call. See {@link org.jgroups.blocks.RequestOptions} for details
      * @return NotifyingFuture<T> A future from which the results (RspList) can be retrieved
@@ -265,7 +261,7 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
                                                                  Message msg,
                                                                  RequestOptions options) throws Exception {
         GroupRequest<T> req=cast(dests, msg, options, false);
-        return req != null? req : new NullFuture<RspList>(RspList.EMPTY_RSP_LIST);
+        return req != null? req : new NullFuture<RspList>(new RspList());
     }
 
     protected <T> GroupRequest<T> cast(final Collection<Address> dests, Message msg,
@@ -275,14 +271,16 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
 
         // we need to clone because we don't want to modify the original
         if(dests != null) {
-            real_dests=new ArrayList<Address>(dests);
-            real_dests.retainAll(this.members);
-        }
-        else {
-            synchronized(members) {
-                real_dests=new ArrayList<Address>(members);
+            real_dests=new ArrayList<Address>();
+            for(Address dest: dests) {
+                if(dest instanceof SiteAddress || this.members.contains(dest)) {
+                    if(!real_dests.contains(dest))
+                        real_dests.add(dest);
+                }
             }
         }
+        else
+            real_dests=new ArrayList<Address>(members);
 
         // if local delivery is off, then we should not wait for the message from the local member.
         // therefore remove it from the membership
@@ -307,6 +305,18 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
             if(log.isTraceEnabled())
                 log.trace("destination list is empty, won't send message");
             return null;
+        }
+
+        if(options != null) {
+            boolean async=options.getMode() == ResponseMode.GET_NONE;
+            if(options.getAnycasting()) {
+                if(async) async_anycasts.incrementAndGet();
+                else sync_anycasts.incrementAndGet();
+            }
+            else {
+                if(async) async_multicasts.incrementAndGet();
+                else sync_multicasts.incrementAndGet();
+            }
         }
 
         GroupRequest<T> req=new GroupRequest<T>(msg, corr, real_dests, options);
@@ -339,16 +349,17 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
      */
     public <T> T sendMessage(Message msg, RequestOptions opts) throws Exception {
         Address dest=msg.getDest();
-        if(dest == null) {
-            if(log.isErrorEnabled())
-                log.error("the message's destination is null, cannot send message");
-            return null;
-        }
+        if(dest == null)
+            throw new IllegalArgumentException("message destination is null, cannot send message");
 
         if(opts != null) {
             msg.setFlag(opts.getFlags());
             if(opts.getScope() > 0)
                 msg.setScope(opts.getScope());
+            if(opts.getMode() == ResponseMode.GET_NONE)
+                async_unicasts.incrementAndGet();
+            else
+                sync_unicasts.incrementAndGet();
         }
 
         UnicastRequest<T> req=new UnicastRequest<T>(msg, corr, dest, opts);
@@ -369,6 +380,8 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
             else throw new RuntimeException(exception);
         }
 
+        if(rsp.wasUnreachable())
+            throw new UnreachableException(dest);
         if(!rsp.wasReceived() && !req.responseReceived())
             throw new TimeoutException("timeout sending message to " + dest);
         return rsp.getValue();
@@ -386,16 +399,17 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
      */
     public <T> NotifyingFuture<T> sendMessageWithFuture(Message msg, RequestOptions options) throws Exception {
         Address dest=msg.getDest();
-        if(dest == null) {
-            if(log.isErrorEnabled())
-                log.error("the message's destination is null, cannot send message");
-            return null;
-        }
+        if(dest == null)
+            throw new IllegalArgumentException("message destination is null, cannot send message");
 
         if(options != null) {
             msg.setFlag(options.getFlags());
             if(options.getScope() > 0)
                 msg.setScope(options.getScope());
+            if(options.getMode() == ResponseMode.GET_NONE)
+                async_unicasts.incrementAndGet();
+            else
+                sync_unicasts.incrementAndGet();
         }
 
         UnicastRequest<T> req=new UnicastRequest<T>(msg, corr, dest, options);
@@ -460,6 +474,106 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
     /* ----------------------------------------------------------------------- */
 
 
+    protected Object handleUpEvent(Event evt) throws Exception {
+        switch(evt.getType()) {
+            case Event.MSG:
+                if(msg_listener != null)
+                    msg_listener.receive((Message) evt.getArg());
+                break;
+
+            case Event.GET_APPLSTATE: // reply with GET_APPLSTATE_OK
+                byte[] tmp_state=null;
+                if(msg_listener != null) {
+                    ByteArrayOutputStream output=new ByteArrayOutputStream(1024);
+                    msg_listener.getState(output);
+                    tmp_state=output.toByteArray();
+                }
+                return new StateTransferInfo(null, 0L, tmp_state);
+
+            case Event.GET_STATE_OK:
+                if(msg_listener != null) {
+                    StateTransferResult result=(StateTransferResult)evt.getArg();
+                    ByteArrayInputStream input=new ByteArrayInputStream(result.getBuffer());
+                    msg_listener.setState(input);
+                }
+                break;
+
+            case Event.STATE_TRANSFER_OUTPUTSTREAM:
+                OutputStream os=(OutputStream)evt.getArg();
+                if(msg_listener != null && os != null) {
+                    msg_listener.getState(os);
+                }
+                break;
+
+            case Event.STATE_TRANSFER_INPUTSTREAM:
+                InputStream is=(InputStream)evt.getArg();
+                if(msg_listener != null && is!=null)
+                    msg_listener.setState(is);
+                break;
+
+            case Event.VIEW_CHANGE:
+                View v=(View) evt.getArg();
+                List<Address> new_mbrs=v.getMembers();
+                setMembers(new_mbrs);
+                if(membership_listener != null)
+                    membership_listener.viewAccepted(v);
+                break;
+
+            case Event.SET_LOCAL_ADDRESS:
+                if(log.isTraceEnabled())
+                    log.trace("setting local_addr (" + local_addr + ") to " + evt.getArg());
+                local_addr=(Address)evt.getArg();
+                break;
+
+            case Event.SUSPECT:
+                if(membership_listener != null)
+                    membership_listener.suspect((Address) evt.getArg());
+                break;
+
+            case Event.BLOCK:
+                if(membership_listener != null)
+                    membership_listener.block();
+                break;
+            case Event.UNBLOCK:
+                if(membership_listener != null)
+                    membership_listener.unblock();
+                break;
+        }
+
+        return null;
+    }
+
+
+    class MyProbeHandler implements DiagnosticsHandler.ProbeHandler {
+
+        public Map<String,String> handleProbe(String... keys) {
+            Map<String,String> retval=new HashMap<String,String>();
+            for(String key: keys) {
+                if("rpcs".equals(key)) {
+                    String channel_name = channel != null ? channel.getClusterName() : "";
+                    retval.put(channel_name + ": sync  unicast   RPCs", sync_unicasts.toString());
+                    retval.put(channel_name + ": sync  multicast RPCs", sync_multicasts.toString());
+                    retval.put(channel_name + ": async unicast   RPCs", async_unicasts.toString());
+                    retval.put(channel_name + ": async multicast RPCs", async_multicasts.toString());
+                    retval.put(channel_name + ": sync  anycast   RPCs", sync_anycasts.toString());
+                    retval.put(channel_name + ": async anycast   RPCs", async_anycasts.toString());
+                }
+                if("rpcs-reset".equals(key)) {
+                    sync_unicasts.set(0);
+                    sync_multicasts.set(0);
+                    async_unicasts.set(0);
+                    async_multicasts.set(0);
+                    sync_anycasts.set(0);
+                    async_anycasts.set(0);
+                }
+            }
+            return retval;
+        }
+
+        public String[] supportedKeys() {
+            return new String[]{"rpcs", "rpcs-reset"};
+        }
+    }
 
 
     class ProtocolAdapter extends Protocol implements UpHandler {
@@ -470,82 +584,6 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
         public String getName() {
             return "MessageDispatcher";
         }
-
-
-
-        protected Object handleUpEvent(Event evt) throws Exception {
-            switch(evt.getType()) {
-                case Event.MSG:
-                    if(msg_listener != null) {
-                        msg_listener.receive((Message) evt.getArg());
-                    }
-                    break;
-
-                case Event.GET_APPLSTATE: // reply with GET_APPLSTATE_OK
-                    byte[] tmp_state=null;
-                    if(msg_listener != null) {
-                        ByteArrayOutputStream output=new ByteArrayOutputStream(1024);
-                        msg_listener.getState(output);
-                        tmp_state=output.toByteArray();
-                    }
-                    return new StateTransferInfo(null, 0L, tmp_state);
-
-                case Event.GET_STATE_OK:
-                    if(msg_listener != null) {
-                        StateTransferResult result=(StateTransferResult)evt.getArg();
-                        ByteArrayInputStream input=new ByteArrayInputStream(result.getBuffer());
-                        msg_listener.setState(input);
-                    }
-                    break;
-
-                case Event.STATE_TRANSFER_OUTPUTSTREAM:
-                    OutputStream os=(OutputStream)evt.getArg();
-                    if(msg_listener != null && os != null) {
-                        msg_listener.getState(os);
-                    }
-                    break;
-
-                case Event.STATE_TRANSFER_INPUTSTREAM:
-                    InputStream is=(InputStream)evt.getArg();
-                    if(msg_listener != null && is!=null)
-                        msg_listener.setState(is);
-                    break;
-
-                case Event.VIEW_CHANGE:
-                    View v=(View) evt.getArg();
-                    List<Address> new_mbrs=v.getMembers();
-                    setMembers(new_mbrs);
-                    if(membership_listener != null)
-                        membership_listener.viewAccepted(v);
-                    break;
-
-                case Event.SET_LOCAL_ADDRESS:
-                    if(log.isTraceEnabled())
-                        log.trace("setting local_addr (" + local_addr + ") to " + evt.getArg());
-                    local_addr=(Address)evt.getArg();
-                    break;
-
-                case Event.SUSPECT:
-                    if(membership_listener != null)
-                        membership_listener.suspect((Address) evt.getArg());
-                    break;
-
-                case Event.BLOCK:
-                    if(membership_listener != null)
-                        membership_listener.block();
-                    break;
-                case Event.UNBLOCK:
-                    if(membership_listener != null)
-                        membership_listener.unblock();
-                    break;
-            }
-
-            return null;
-        }
-
-
-
-
 
 
         /**
@@ -568,8 +606,11 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
 
 
         public Object down(Event evt) {
-            if(channel != null)
+            if(channel != null) {
+                if(evt.getType() == Event.MSG && !(channel.isConnected() || channel.isConnecting()))
+                    throw new IllegalStateException("channel is not connected");
                 return channel.down(evt);
+            }
             return null;
         }
 

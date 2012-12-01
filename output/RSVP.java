@@ -13,6 +13,7 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.util.*;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Protocol which implements synchronous messages (https://issues.jboss.org/browse/JGRP-1389). A send of a message M
@@ -46,7 +47,7 @@ public class RSVP extends Protocol {
 
     protected TimeScheduler timer;
 
-    protected final List<Address> members=new ArrayList<Address>();
+    protected volatile List<Address> members=new ArrayList<Address>();
 
     protected Address local_addr;
 
@@ -70,6 +71,17 @@ public class RSVP extends Protocol {
         }
     }
 
+
+    public void stop() {
+        synchronized(ids) {
+            for(Entry entry: ids.values())
+                entry.destroy();
+            ids.clear();
+        }
+        super.destroy();
+    }
+
+
     public Object down(Event evt) {
         switch(evt.getType()) {
             case Event.MSG:
@@ -77,31 +89,29 @@ public class RSVP extends Protocol {
                 if(!msg.isFlagSet(Message.Flag.RSVP))
                     break;
 
-                Object retval=null;
                 short next_id=getNextId();
                 RsvpHeader hdr=new RsvpHeader(RsvpHeader.REQ, next_id);
                 msg.putHeader(id, hdr);
 
                 // 1. put into hashmap
                 Address target=msg.getDest();
-                Entry entry;
-                if(target != null)
-                    entry=new Entry(target);
-                else {
-                    synchronized(members) {
-                        entry=new Entry(members);
-                    }
-                }
-
+                Entry entry=target != null? new Entry(target) : new Entry(members); // volatile read of members
+                Object retval=null;
                 try {
                     synchronized(ids) {
                         ids.put(next_id, entry);
                     }
 
+                    // sync members again - if a view was received after reading members intro Entry, but
+                    // before adding Entry to ids (https://issues.jboss.org/browse/JGRP-1503)
+                    entry.retainAll(members);
+
                     // 2. start timer task
                     entry.startTask(next_id);
 
                     // 3. Send the message
+                    if(log.isTraceEnabled())
+                        log.trace(local_addr + ": " + hdr.typeToString() + " --> " + target);
                     retval=down_prot.down(evt);
 
                     // 4. Block on AckCollector
@@ -123,20 +133,7 @@ public class RSVP extends Protocol {
                 return retval;
 
             case Event.VIEW_CHANGE:
-                View view=(View)evt.getArg();
-                synchronized(members) {
-                    members.clear();
-                    members.addAll(view.getMembers());
-                }
-                synchronized(ids) {
-                    for(Iterator<Map.Entry<Short,Entry>> it=ids.entrySet().iterator(); it.hasNext();) {
-                        entry=it.next().getValue();
-                        if(entry != null && entry.retainAll(view.getMembers()) && entry.size() == 0) {
-                            entry.destroy();
-                            it.remove();
-                        }
-                    }
-                }
+                handleView((View)evt.getArg());
                 break;
 
             case Event.SET_LOCAL_ADDRESS:
@@ -157,10 +154,11 @@ public class RSVP extends Protocol {
                         log.error("message with RSVP flag needs to have an RsvpHeader");
                         break;
                     }
-
+                    Address sender=msg.getSrc();
+                    if(log.isTraceEnabled())
+                        log.trace(local_addr + ": " + hdr.typeToString() + " <-- " + sender);
                     switch(hdr.type) {
                         case RsvpHeader.REQ:
-                            Address sender=msg.getSrc();
                             if(this.ack_on_delivery) {
                                 try {
                                     return up_prot.up(evt);
@@ -174,9 +172,7 @@ public class RSVP extends Protocol {
                                 return up_prot.up(evt);
                             }
 
-                        case RsvpHeader.FLUSH:
-                            // single message, doesn't need to be passed up
-                            sendResponse(msg.getSrc(), hdr.id);
+                        case RsvpHeader.REQ_ONLY:
                             return null;
 
                         case RsvpHeader.RSP:
@@ -185,9 +181,28 @@ public class RSVP extends Protocol {
                     }
                 }
                 break;
+            case Event.VIEW_CHANGE:
+                handleView((View)evt.getArg());
+                break;
         }
         return up_prot.up(evt);
     }
+
+
+    protected void handleView(View view) {
+        members=view.getMembers();
+
+        synchronized(ids) {
+            for(Iterator<Map.Entry<Short,Entry>> it=ids.entrySet().iterator(); it.hasNext();) {
+                Entry entry=it.next().getValue();
+                if(entry != null && entry.retainAll(view.getMembers()) && entry.size() == 0) {
+                    entry.destroy();
+                    it.remove();
+                }
+            }
+        }
+    }
+
 
     protected void handleResponse(Address member, short id) {
         synchronized(ids) {
@@ -205,8 +220,11 @@ public class RSVP extends Protocol {
     protected void sendResponse(Address dest, short id) {
         try {
             Message msg=new Message(dest);
-            msg.setFlag(Message.Flag.RSVP);
-            msg.putHeader(this.id, new RsvpHeader(RsvpHeader.RSP, id));
+            msg.setFlag(Message.Flag.RSVP, Message.Flag.OOB);
+            RsvpHeader hdr=new RsvpHeader(RsvpHeader.RSP,id);
+            msg.putHeader(this.id, hdr);
+            if(log.isTraceEnabled())
+                log.trace(local_addr + ": " + hdr.typeToString() + " --> " + dest);
             down_prot.down(new Event(Event.MSG, msg));
         }
         catch(Throwable t) {
@@ -240,8 +258,7 @@ public class RSVP extends Protocol {
             if(resend_task != null && !resend_task.isDone())
                 resend_task.cancel(false);
 
-            resend_task=timer.scheduleWithDynamicInterval(new TimeScheduler.Task() {
-                public long nextInterval() {return resend_interval;}
+            resend_task=timer.scheduleWithFixedDelay(new Runnable() {
                 public void run() {
                     if(ack_collector.size() == 0) {
                         cancelTask();
@@ -249,16 +266,19 @@ public class RSVP extends Protocol {
                     }
                     Message msg=new Message(target);
                     msg.setFlag(Message.Flag.RSVP);
-                    RsvpHeader hdr=new RsvpHeader(RsvpHeader.FLUSH, rsvp_id);
+                    RsvpHeader hdr=new RsvpHeader(RsvpHeader.REQ_ONLY, rsvp_id);
                     msg.putHeader(id, hdr);
+                    if(log.isTraceEnabled())
+                        log.trace(local_addr + ": " + hdr.typeToString() + " --> " + target);
                     down_prot.down(new Event(Event.MSG, msg));
                 }
-            });
+            }, resend_interval, resend_interval, TimeUnit.MILLISECONDS);
         }
 
         protected void cancelTask() {
             if(resend_task != null)
                 resend_task.cancel(false);
+            ack_collector.destroy();
         }
 
         protected void    ack(Address member)                         {ack_collector.ack(member);}
@@ -271,12 +291,12 @@ public class RSVP extends Protocol {
 
     
     protected static class RsvpHeader extends Header {
-        protected static final byte REQ   = 1;
-        protected static final byte RSP   = 2;
-        protected static final byte FLUSH = 3;
+        protected static final byte REQ      = 1;
+        protected static final byte REQ_ONLY = 2;
+        protected static final byte RSP      = 3;
 
-        protected byte  type;
-        protected short id;
+        protected byte    type;
+        protected short   id;
 
 
         public RsvpHeader() {
@@ -302,8 +322,17 @@ public class RSVP extends Protocol {
         }
 
         public String toString() {
-            String tmp=type == REQ ? "REQ" : type == RSP? "RSP" : "FLUSH";
+            String tmp=typeToString();
             return tmp + "(" + id + ")";
+        }
+
+        protected String typeToString() {
+            switch(type) {
+                case REQ :     return "REQ";
+                case REQ_ONLY: return "REQ-ONLY";
+                case RSP:      return "RSP";
+                default:       return "unknown";
+            }
         }
     }
 

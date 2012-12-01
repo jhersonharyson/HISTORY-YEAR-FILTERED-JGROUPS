@@ -26,8 +26,7 @@ public class FlushTest extends ChannelTestBase {
     @Test
     public void testSingleChannel() throws Exception {
         Semaphore s = new Semaphore(1);
-        FlushTestReceiver receivers[] = new FlushTestReceiver[] { new FlushTestReceiver("c1", s, 0,
-                        FlushTestReceiver.CONNECT_ONLY) };
+        FlushTestReceiver receivers[] ={ new FlushTestReceiver("c1", s, 0, FlushTestReceiver.CONNECT_ONLY) };
         receivers[0].start();
         s.release(1);
 
@@ -96,7 +95,7 @@ public class FlushTest extends ChannelTestBase {
             c2.setReceiver(new SimpleReplier(c2, false));
             c2.connect("testStateTransferFollowedByUnicast");
 
-            log.info("\n** Getting the state **");
+            System.out.println("\n** Getting the state **");
             c2.getState(null, 10000);
             // now send unicast, this might block as described in the case
             c2.send(unicast_msg);
@@ -166,8 +165,8 @@ public class FlushTest extends ChannelTestBase {
             // will be started
             Util.shutdown(c2);
 
-            c1.getProtocolStack().findProtocol(FLUSH.class).setLevel("trace");
-            c3.getProtocolStack().findProtocol(FLUSH.class).setLevel("trace");
+            c1.getProtocolStack().findProtocol(FLUSH.class).setLevel("debug");
+            c3.getProtocolStack().findProtocol(FLUSH.class).setLevel("debug");
 
             Util.waitUntilAllChannelsHaveSameSize(10000, 500, c1, c3);
 
@@ -425,7 +424,7 @@ public class FlushTest extends ChannelTestBase {
 
         public void getState(OutputStream ostream) throws Exception {
             super.getState(ostream);
-            byte[] payload = new byte[] { 'b', 'e', 'l', 'a' };
+            byte[] payload ={ 'b', 'e', 'l', 'a' };
             ostream.write(payload);
         }
 
@@ -461,10 +460,10 @@ public class FlushTest extends ChannelTestBase {
         public void receive(Message msg) {
             Message reply = new Message(msg.getSrc());
             try {
-                log.info("-- MySimpleReplier[" + channel.getAddress() + "]: received message from "
+                System.out.println("-- MySimpleReplier[" + channel.getAddress() + "]: received message from "
                                 + msg.getSrc());
                 if (handle_requests) {
-                    log.info(", sending reply");
+                    System.out.println(", sending reply");
                     channel.send(reply);
                 } else
                     System.out.println("\n");
@@ -474,16 +473,16 @@ public class FlushTest extends ChannelTestBase {
         }
 
         public void viewAccepted(View new_view) {
-            log.info("-- MySimpleReplier[" + channel.getAddress() + "]: viewAccepted(" + new_view
+            System.out.println("-- MySimpleReplier[" + channel.getAddress() + "]: viewAccepted(" + new_view
                             + ")");
         }
 
         public void block() {
-            log.info("-- MySimpleReplier[" + channel.getAddress() + "]: block()");
+            System.out.println("-- MySimpleReplier[" + channel.getAddress() + "]: block()");
         }
 
         public void unblock() {
-            log.info("-- MySimpleReplier[" + channel.getAddress() + "]: unblock()");
+            System.out.println("-- MySimpleReplier[" + channel.getAddress() + "]: unblock()");
         }
     }
 

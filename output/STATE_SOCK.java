@@ -57,6 +57,10 @@ public class STATE_SOCK extends StreamingStateTransfer {
               systemProperty=Global.EXTERNAL_ADDR,writable=false)
     protected InetAddress external_addr=null ;
 
+    @Property(description="Used to map the internal port (bind_port) to an external port. Only used if > 0",
+              systemProperty=Global.EXTERNAL_PORT,writable=false)
+    protected int external_port=0;
+    
     @Property(name="bind_interface", converter=PropertyConverters.BindInterface.class,
               description="The interface (NIC) which should be used by this transport", dependsUpon="bind_addr")
     protected String bind_interface_str=null;
@@ -94,7 +98,7 @@ public class STATE_SOCK extends StreamingStateTransfer {
     protected StateProviderAcceptor createAcceptor() {
         StateProviderAcceptor retval=new StateProviderAcceptor(thread_pool,
                                                                Util.createServerSocket(getSocketFactory(),
-                                                                                       Global.STATE_SERVER_SOCK,
+                                                                                       "jgroups.streaming_state_transfer.srv_sock",
                                                                                        bind_addr, bind_port));
         Thread t=getThreadFactory().newThread(retval, "STATE server socket acceptor");
         t.start();
@@ -109,14 +113,14 @@ public class STATE_SOCK extends StreamingStateTransfer {
 
 
     protected void createStreamToRequester(Address requester) {
-        ;
     }
 
     protected void createStreamToProvider(Address provider, StateHeader hdr) {
         IpAddress address=hdr.bind_addr;
         InputStream bis=null;
-        Socket socket=new Socket();
+        Socket socket=null;
         try {
+            socket=getSocketFactory().createSocket("jgroups.state_sock.sock");
             socket.bind(new InetSocketAddress(bind_addr, 0));
             socket.setReceiveBufferSize(buffer_size);
             Util.connect(socket, new InetSocketAddress(address.getIpAddress(), address.getPort()), 0);
@@ -165,6 +169,11 @@ public class STATE_SOCK extends StreamingStateTransfer {
             bind_addr=(InetAddress)config.get("bind_addr");
         if(external_addr == null)
             external_addr=(InetAddress)config.get("external_addr");
+        if(external_port <= 0) {
+            Object val=config.get("external_port");
+            if(val != null)
+                external_port=(Integer)val;
+        }
     }
 
 
@@ -183,7 +192,7 @@ public class STATE_SOCK extends StreamingStateTransfer {
             this.pool=pool;
             this.serverSocket=stateServingSocket;
             if(external_addr != null)
-                this.address=new IpAddress(external_addr, serverSocket.getLocalPort());
+                this.address=new IpAddress(external_addr, external_port > 0? external_port : serverSocket.getLocalPort());
             else
                 this.address=new IpAddress(bind_addr, serverSocket.getLocalPort());
         }

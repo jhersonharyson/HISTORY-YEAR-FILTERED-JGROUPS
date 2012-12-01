@@ -20,7 +20,7 @@ import java.util.*;
 *  Is the equivalent of RpcProtocol on the application rather than protocol level.
  * @author Bela Ban
  */
-public class RpcDispatcher extends MessageDispatcher implements ChannelListener {
+public class RpcDispatcher extends MessageDispatcher {
     protected Object        server_obj=null;
     /** Marshaller to marshall requests at the caller and unmarshal requests at the receiver(s) */
     protected Marshaller    req_marshaller=null;
@@ -37,7 +37,6 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
     public RpcDispatcher(Channel channel, MessageListener l, MembershipListener l2, Object server_obj) {
         super(channel, l, l2);
-        channel.addChannelListener(this);
         this.server_obj=server_obj;
     }
 
@@ -106,8 +105,8 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
 
     /**
-     * Invokes a method in all members contained in dests (or all members if dests is null).
-     * @param dests dests A list of addresses. If null, the method will be invoked on all cluster members
+     * Invokes a method in all members and expects responses from members contained in dests (or all members if dests is null).
+     * @param dests A list of addresses. If null, we'll wait for responses from all cluster members
      * @param method_name The name of the target method
      * @param args The arguments to be passed
      * @param types The types of the arguments
@@ -126,8 +125,8 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
 
     /**
-     * Invokes a method in all members contained in dests (or all members if dests is null).
-     * @param dests A list of addresses. If null, the method will be invoked on all cluster members
+     * Invokes a method in all members and expects responses from members contained in dests (or all members if dests is null).
+     * @param dests A list of addresses. If null, we'll wait for responses from all cluster members
      * @param method_call The method (plus args) to be invoked
      * @param options A collection of call options, e.g. sync versus async, timeout etc
      * @return RspList A list of return values and flags (suspected, not received) per member
@@ -142,7 +141,7 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         if(dests != null && dests.isEmpty()) { // don't send if dest list is empty
             if(log.isTraceEnabled())
                 log.trace("destination list of " + method_call.getName() + "() is empty: no need to send message");
-            return RspList.EMPTY_RSP_LIST;
+            return new RspList();
         }
 
         if(log.isTraceEnabled())
@@ -157,9 +156,11 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
         else
             msg.setBuffer((byte[])buf);
 
-        msg.setFlag(options.getFlags());
-        if(options.getScope() > 0)
-            msg.setScope(options.getScope());
+        if(options != null) {
+            msg.setFlag(options.getFlags());
+            if(options.getScope() > 0)
+                msg.setScope(options.getScope());
+        }
 
         RspList<T> retval=super.castMessage(dests, msg, options);
         if(log.isTraceEnabled()) log.trace("responses: " + retval);
@@ -168,8 +169,8 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
 
 
     /**
-     * Invokes a method in all members contained in dests (or all members if dests is null).
-     * @param dests A list of addresses. If null, the method will be invoked on all cluster members
+     * Invokes a method in all members and expects responses from members contained in dests (or all members if dests is null).
+     * @param dests A list of addresses. If null, we'll wait for responses from all cluster members
      * @param method_call The method (plus args) to be invoked
      * @param options A collection of call options, e.g. sync versus async, timeout etc
      * @return NotifyingFuture A future from which the results can be fetched
@@ -184,7 +185,7 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             if(log.isTraceEnabled())
                 log.trace(new StringBuilder("destination list of ").append(method_call.getName()).
                         append("() is empty: no need to send message"));
-            return new NullFuture<RspList<T>>(RspList.EMPTY_RSP_LIST);
+            return new NullFuture<RspList<T>>(new RspList());
         }
 
         if(log.isTraceEnabled())
@@ -198,9 +199,11 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             msg.setBuffer((Buffer)buf);
         else
             msg.setBuffer((byte[])buf);
-        msg.setFlag(options.getFlags());
-        if(options.getScope() > 0)
-            msg.setScope(options.getScope());
+        if(options != null) {
+            msg.setFlag(options.getFlags());
+            if(options.getScope() > 0)
+                msg.setScope(options.getScope());
+        }
         
         NotifyingFuture<RspList<T>>  retval=super.castMessageWithFuture(dests, msg, options);
         if(log.isTraceEnabled()) log.trace("responses: " + retval);
@@ -243,9 +246,11 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             msg.setBuffer((Buffer)buf);
         else
             msg.setBuffer((byte[])buf);
-        msg.setFlag(options.getFlags());
-        if(options.getScope() > 0)
-            msg.setScope(options.getScope());
+        if(options != null) {
+            msg.setFlag(options.getFlags());
+            if(options.getScope() > 0)
+                msg.setScope(options.getScope());
+        }
 
         T retval=(T)super.sendMessage(msg, options);
         if(log.isTraceEnabled()) log.trace("retval: " + retval);
@@ -272,9 +277,11 @@ public class RpcDispatcher extends MessageDispatcher implements ChannelListener 
             msg.setBuffer((Buffer)buf);
         else
             msg.setBuffer((byte[])buf);
-        msg.setFlag(options.getFlags());
-        if(options.getScope() > 0)
-            msg.setScope(options.getScope());
+        if(options != null) {
+            msg.setFlag(options.getFlags());
+            if(options.getScope() > 0)
+                msg.setScope(options.getScope());
+        }
         return super.sendMessageWithFuture(msg, options);
     }
 

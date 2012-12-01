@@ -3,9 +3,13 @@ package org.jgroups.tests;
 
 
 import org.jgroups.*;
+import org.jgroups.auth.*;
 import org.jgroups.blocks.RequestCorrelator;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.*;
+import org.jgroups.protocols.relay.RELAY2;
+import org.jgroups.protocols.relay.SiteMaster;
+import org.jgroups.protocols.relay.SiteUUID;
 import org.jgroups.stack.GossipData;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.util.*;
@@ -13,7 +17,10 @@ import org.jgroups.util.UUID;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.util.*;
 
 
@@ -89,6 +96,16 @@ public class SizeTest {
 
          data=new PingData(self, Util.createView(self, 1, self), true, "logical-name", null);
         _testSize(data);
+    }
+
+    public static void testAuthHeader() throws Exception {
+        _testSize(new AuthHeader(new SimpleToken("secret")));
+        _testSize(new AuthHeader(new FixedMembershipToken("192.168.1.5[7800],192.168.1.3[7800]")));
+        _testSize(new AuthHeader(new MD5Token("myauthvalue")));
+        _testSize(new AuthHeader(new RegexMembership()));
+
+        X509Token tok=new X509Token().encryptedToken(new byte[]{'b', 'e', 'l', 'a'});
+        _testSize(new AuthHeader(tok));
     }
 
     public static void testGossipData() throws Exception {
@@ -238,7 +255,7 @@ public class SizeTest {
         hdr=UNICAST.UnicastHeader.createAckHeader(322649);
         _testSize(hdr);
 
-        hdr=UNICAST.UnicastHeader.createSendFirstSeqnoHeader();
+        hdr=UNICAST.UnicastHeader.createSendFirstSeqnoHeader(33333);
         _testSize(hdr);
     }
 
@@ -275,15 +292,7 @@ public class SizeTest {
         _testSize(hdr);
         _testMarshalling(hdr);
 
-        hdr=UNICAST2.Unicast2Header.createXmitReqHeader(0, 0);
-        _testSize(hdr);
-        _testMarshalling(hdr);
-
-        hdr=UNICAST2.Unicast2Header.createXmitReqHeader(70000, 100000);
-        _testSize(hdr);
-        _testMarshalling(hdr);
-
-        hdr=UNICAST2.Unicast2Header.createXmitReqHeader(Integer.MAX_VALUE, (long)Integer.MAX_VALUE +100);
+        hdr=UNICAST2.Unicast2Header.createXmitReqHeader();
         _testSize(hdr);
         _testMarshalling(hdr);
 
@@ -322,9 +331,7 @@ public class SizeTest {
 
     public static void testSequencerHeader() throws Exception {
         org.jgroups.protocols.SEQUENCER.SequencerHeader hdr;
-        hdr=new SEQUENCER.SequencerHeader((byte)1, Util.createRandomAddress("A"), 1L);
-        _testSize(hdr);
-        hdr=new SEQUENCER.SequencerHeader((byte)2, Util.createRandomAddress("B"), -1L);
+        hdr=new SEQUENCER.SequencerHeader((byte)1, 1L);
         _testSize(hdr);
     }
 
@@ -612,6 +619,15 @@ public class SizeTest {
     }
 
 
+    public static void testRelay2Header() throws Exception {
+        Address dest=new SiteMaster((short)0);
+        RELAY2.Relay2Header hdr=new RELAY2.Relay2Header(RELAY2.Relay2Header.DATA, dest, null);
+        _testSize(hdr);
+        Address sender=new SiteUUID(UUID.randomUUID(), "dummy", (short)1);
+        hdr=new RELAY2.Relay2Header(RELAY2.Relay2Header.DATA, dest, sender);
+        _testSize(hdr);
+    }
+
 
     public static void testEncryptHeader() throws Exception {
         ENCRYPT.EncryptHeader hdr=new ENCRYPT.EncryptHeader((short)1, null);
@@ -809,8 +825,11 @@ public class SizeTest {
     private static void _testSize(Header hdr) throws Exception {
         long size=hdr.size();
         byte[] serialized_form=Util.streamableToByteBuffer(hdr);
-        System.out.println("size=" + size + ", serialized size=" + serialized_form.length);
+        System.out.println(hdr.getClass().getSimpleName() + ": size=" + size + ", serialized size=" + serialized_form.length);
         Assert.assertEquals(serialized_form.length, size);
+
+        Header hdr2=(Header)Util.streamableFromByteBuffer(hdr.getClass(), serialized_form);
+        assert hdr2.size() == hdr.size();
     }
 
 
@@ -869,15 +888,8 @@ public class SizeTest {
         assert Util.match(rsp.getFailReason(), rsp2.getFailReason());
     }
 
-    private static void _testSize(PingData data) throws Exception {
-        System.out.println("\ndata: " + data);
-        long size=data.size();
-        byte[] serialized_form=Util.streamableToByteBuffer(data);
-        System.out.println("size=" + size + ", serialized size=" + serialized_form.length);
-        assert serialized_form.length == size : "serialized length=" + serialized_form.length + ", size=" + size;
-    }
 
-    private static void _testSize(GossipData data) throws Exception {
+    private static void _testSize(SizeStreamable data) throws Exception {
         System.out.println("\ndata: " + data);
         long size=data.size();
         byte[] serialized_form=Util.streamableToByteBuffer(data);

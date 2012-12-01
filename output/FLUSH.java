@@ -227,9 +227,17 @@ public class FLUSH extends Protocol {
                 if(r.failed())
                     throw new RuntimeException(r.getFailureCause());
             } catch (TimeoutException e) {
+                Set<Address> missingMembers = new HashSet<Address>();
+                synchronized(sharedLock) {
+                    missingMembers.addAll(flushMembers);
+                    missingMembers.removeAll(flushCompletedMap.keySet());
+                }
+
                 rejectFlush(flushParticipants, currentViewId());
                 throw new RuntimeException(localAddress
-                            + " timed out waiting for flush responses after "
+                            + " timed out waiting for flush responses from "
+                            + missingMembers
+                            + " after "
                             + start_flush_timeout
                             + " ms. Rejected flush to participants "
                             + flushParticipants,e);
@@ -563,7 +571,11 @@ public class FLUSH extends Protocol {
     }
 
     private void rejectFlush(Collection<? extends Address> participants, long viewId) {
+        if(participants == null)
+            return;
         for (Address flushMember : participants) {
+            if(flushMember == null)
+                continue;
             Message reject = new Message(flushMember, localAddress, null);   
             reject.setFlag(Message.OOB);
             reject.putHeader(this.id, new FlushHeader(FlushHeader.ABORT_FLUSH, viewId,participants));

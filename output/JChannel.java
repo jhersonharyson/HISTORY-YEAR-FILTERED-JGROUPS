@@ -18,8 +18,6 @@ import org.w3c.dom.Element;
 import java.io.*;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.net.DatagramSocket;
-import java.net.ServerSocket;
 import java.net.URL;
 import java.util.*;
 import java.util.concurrent.Callable;
@@ -39,50 +37,45 @@ import java.util.concurrent.ConcurrentMap;
 public class JChannel extends Channel {
 
     /** The default protocol stack used by the default constructor  */
-    public static final String DEFAULT_PROTOCOL_STACK="udp.xml";
+    public static final String                      DEFAULT_PROTOCOL_STACK="udp.xml";
 
     /*the address of this JChannel instance*/
-    protected Address local_addr=null;
+    protected Address                               local_addr;
 
-    protected AddressGenerator address_generator=null;
+    protected AddressGenerator                      address_generator;
 
-    protected String name=null;
+    protected String                                name;
 
-    /*the channel (also know as group) name*/
-    private String cluster_name=null;
+    /* the channel (also know as group) name */
+    protected String                                cluster_name;
 
-    /*the latest view of the group membership*/
-    private View my_view=null;
+    /* the latest view of the group membership */
+    protected View                                  my_view;
 
     /*the protocol stack, used to send and receive messages from the protocol stack*/
-    private ProtocolStack prot_stack=null;
+    protected ProtocolStack                         prot_stack;
 
-    private final Promise<StateTransferResult> state_promise=new Promise<StateTransferResult>();
-
-    /** channel connected flag */
-    protected volatile boolean connected=false;
-
-    /** channel closed flag*/
-    protected volatile boolean closed=false;      // close() has been called, channel is unusable
-
-    /** True if a state transfer protocol is available, false otherwise */
-    private boolean state_transfer_supported=false; // set by CONFIG event from STATE_TRANSFER protocol
-
-    /** True if a flush protocol is available, false otherwise */
-    private volatile boolean flush_supported=false; // set by CONFIG event from FLUSH protocol
+    protected final Promise<StateTransferResult>    state_promise=new Promise<StateTransferResult>();
 
 
-    protected final ConcurrentMap<String,Object> config=Util.createConcurrentMap(16);
+    /** True if a state transfer protocol is available, false otherwise (set by CONFIG event from STATE_TRANSFER protocol) */
+    protected boolean                               state_transfer_supported=false;
 
-    protected final Log log=LogFactory.getLog(JChannel.class);
+    /** True if a flush protocol is available, false otherwise (set by CONFIG event from FLUSH protocol) */
+    protected volatile boolean                      flush_supported=false;
+
+
+    protected final ConcurrentMap<String,Object>    config=Util.createConcurrentMap(16);
+
+    protected final Log                             log=LogFactory.getLog(JChannel.class);
 
     /** Collect statistics */
     @ManagedAttribute(description="Collect channel statistics",writable=true)
-    protected boolean stats=true;
+    protected boolean                               stats=true;
 
-    protected long sent_msgs=0, received_msgs=0, sent_bytes=0, received_bytes=0;
+    protected long                                  sent_msgs=0, received_msgs=0, sent_bytes=0, received_bytes=0;
 
-    private final DiagnosticsHandler.ProbeHandler probe_handler=new MyProbeHandler();
+    protected final DiagnosticsHandler.ProbeHandler probe_handler=new MyProbeHandler();
 
 
 
@@ -170,6 +163,36 @@ public class JChannel extends Channel {
     }
 
 
+    /**
+     * Creates a channel from an array of protocols. Note that after a {@link org.jgroups.JChannel#close()}, the protocol
+     * list <em>should not</em> be reused, ie. new JChannel(protocols) would reuse the same protocol list, and this
+     * might lead to problems !
+     * @param protocols The list of protocols, from bottom to top, ie. the first protocol in the list is the transport,
+     *                  the last the top protocol
+     * @throws Exception
+     */
+    public JChannel(Protocol ... protocols) throws Exception {
+        this(Arrays.asList(protocols));
+    }
+
+    /**
+     * Creates a channel from an array of protocols. Note that after a {@link org.jgroups.JChannel#close()}, the protocol
+     * list <em>should not</em> be reused, ie. new JChannel(protocols) would reuse the same protocol list, and this
+     * might lead to problems !
+     * @param protocols The list of protocols, from bottom to top, ie. the first protocol in the list is the transport,
+     *                  the last the top protocol
+     * @throws Exception
+     */
+    public JChannel(Collection<Protocol> protocols) throws Exception {
+        prot_stack=new ProtocolStack();
+        setProtocolStack(prot_stack);
+        for(Protocol prot: protocols) {
+            prot_stack.addProtocol(prot);
+            prot.setProtocolStack(prot_stack);
+        }
+        prot_stack.init();
+    }
+
 
     /**
      * Creates a channel with the same configuration as the channel passed to this constructor. This is used by
@@ -197,39 +220,32 @@ public class JChannel extends Channel {
             prot_stack.setChannel(this);
     }
 
-    protected Log getLog() {
-        return log;
-    }
+    protected Log getLog() {return log;}
 
     /**
      * Returns the protocol stack configuration in string format. An example of this property is<br/>
      * "UDP:PING:FD:STABLE:NAKACK:UNICAST:FRAG:FLUSH:GMS:VIEW_ENFORCER:STATE_TRANSFER:QUEUE"
      */
-    public String getProperties() {
-        return prot_stack != null? prot_stack.printProtocolSpec(true) : null;
-    }
+    public String getProperties() {return prot_stack != null? prot_stack.printProtocolSpec(true) : null;}
 
-    public boolean statsEnabled() {
-        return stats;
-    }
+    public boolean statsEnabled() {return stats;}
 
-    public void enableStats(boolean stats) {
-        this.stats=stats;
-    }
+    public void enableStats(boolean stats) {this.stats=stats;}
+
+    @Deprecated @ManagedAttribute public boolean isOpen() {return !(state == State.CLOSED);}
+    @Deprecated @ManagedAttribute public boolean isConnected() {return state == State.CONNECTED;}
 
     @ManagedOperation
-    public void resetStats() {
-        sent_msgs=received_msgs=sent_bytes=received_bytes=0;
-    }
+    public void resetStats()          {sent_msgs=received_msgs=sent_bytes=received_bytes=0;}
 
     @ManagedAttribute
-    public long getSentMessages() {return sent_msgs;}
+    public long getSentMessages()     {return sent_msgs;}
     @ManagedAttribute
-    public long getSentBytes() {return sent_bytes;}
+    public long getSentBytes()        {return sent_bytes;}
     @ManagedAttribute
     public long getReceivedMessages() {return received_msgs;}
     @ManagedAttribute
-    public long getReceivedBytes() {return received_bytes;}
+    public long getReceivedBytes()    {return received_bytes;}
     @ManagedAttribute
     public int getNumberOfTasksInTimer() {
         TimeScheduler timer=getTimer();
@@ -261,7 +277,7 @@ public class JChannel extends Channel {
 
     @ManagedOperation(description="Connects the channel to a group")
     public synchronized void connect(String cluster_name) throws Exception {
-    	connect(cluster_name,true);
+    	connect(cluster_name, true);
     }
 
     /**
@@ -270,35 +286,15 @@ public class JChannel extends Channel {
      */
     @ManagedOperation(description="Connects the channel to a group")
     protected synchronized void connect(String cluster_name, boolean useFlushIfPresent) throws Exception {
-        if(connected) {
-            if(log.isTraceEnabled())
-                log.trace("already connected to " + cluster_name);
+        if(!_preConnect(cluster_name))
             return;
-        }
-
-        setAddress();
-        startStack(cluster_name);
 
         if(cluster_name != null) { // only connect if we are not a unicast channel
-
-            Event connect_event;
-            if(useFlushIfPresent) {
-                connect_event=new Event(Event.CONNECT_USE_FLUSH, cluster_name);
-            }
-            else {
-                connect_event=new Event(Event.CONNECT, cluster_name);
-            }
-
-            // waits forever until connected (or channel is closed)
-            Object res=down(connect_event);
-            if(res != null && res instanceof Exception) {
-                // the JOIN was rejected by the coordinator
-                stopStack(true, false);
-                init();
-                throw new Exception("connect() failed", (Throwable)res);
-            }
+            Event connect_event=useFlushIfPresent? new Event(Event.CONNECT_USE_FLUSH, cluster_name)
+              : new Event(Event.CONNECT, cluster_name);
+            _connect(connect_event);
         }
-        connected=true;
+        state=State.CONNECTED;
         notifyChannelConnected(this);
     }
 
@@ -327,32 +323,20 @@ public class JChannel extends Channel {
      */
     public synchronized void connect(String cluster_name, Address target, long timeout,
                                      boolean useFlushIfPresent) throws Exception {
+        if(!_preConnect(cluster_name))
+            return;
 
-        if(connected) {
-            if(log.isTraceEnabled()) log.trace("already connected to " + this.cluster_name);
+        if(cluster_name == null) { // only connect if we are not a unicast channel
+            state=State.CONNECTED;
             return;
         }
 
-        setAddress();
-        startStack(cluster_name);
-
         boolean canFetchState=false;
-
-        if(cluster_name == null) // only connect if we are not a unicast channel
-            return;
-
         try {
             Event connect_event=useFlushIfPresent? new Event(Event.CONNECT_WITH_STATE_TRANSFER_USE_FLUSH, cluster_name)
-                                                 : new Event(Event.CONNECT_WITH_STATE_TRANSFER, cluster_name);
-
-            Object res=down(connect_event); // waits forever until connected (or channel is closed)
-            if(res instanceof Exception) {
-                stopStack(true, false);
-                init();
-                throw new Exception("connect() failed", (Throwable)res);
-            }
-
-            connected=true;
+              : new Event(Event.CONNECT_WITH_STATE_TRANSFER, cluster_name);
+            _connect(connect_event);
+            state=State.CONNECTED;
             notifyChannelConnected(this);
             canFetchState=getView() != null && getView().size() > 1;
 
@@ -362,7 +346,7 @@ public class JChannel extends Channel {
         }
         finally {
             if(flushSupported() && useFlushIfPresent) {
-                if(canFetchState || !connected) // stopFlush if we fetched the state or failed to connect...
+                if(canFetchState || state != State.CONNECTED) // stopFlush if we fetched the state or failed to connect...
                     stopFlush();
             }
         }
@@ -371,18 +355,28 @@ public class JChannel extends Channel {
 
     @ManagedOperation(description="Disconnects the channel if connected")
     public synchronized void disconnect() {
-        if(closed) return;
-
-        if(connected) {
-            if(cluster_name != null) {
-                // Send down a DISCONNECT event, which travels down to the GMS, where a response is returned
-                Event disconnect_event=new Event(Event.DISCONNECT, local_addr);
-                down(disconnect_event);   // DISCONNECT is handled by each layer
-            }
-            connected=false;
-            stopStack(true, false);            
-            notifyChannelDisconnected(this);
-            init(); // sets local_addr=null; changed March 18 2003 (bela) -- prevented successful rejoining
+        switch(state) {
+            case OPEN:
+            case CLOSED:
+                return;
+            case CONNECTING:
+            case CONNECTED:
+                if(cluster_name != null) {
+                    // Send down a DISCONNECT event, which travels down to the GMS, where a response is returned
+                    try {
+                        down(new Event(Event.DISCONNECT, local_addr));   // DISCONNECT is handled by each layer
+                    }
+                    catch(Throwable t) {
+                        log.error("disconnect failed", t);
+                    }
+                }
+                state=State.OPEN;
+                stopStack(true, false);
+                notifyChannelDisconnected(this);
+                init(); // sets local_addr=null; changed March 18 2003 (bela) -- prevented successful rejoining
+                break;
+            default:
+                throw new IllegalStateException("state " + state + " unknown");
         }
     }
 
@@ -394,15 +388,6 @@ public class JChannel extends Channel {
 
 
 
-
-    @ManagedAttribute public boolean isOpen() {
-        return !closed;
-    }
-
-
-    @ManagedAttribute public boolean isConnected() {
-        return connected;
-    }
 
 
     @ManagedOperation
@@ -462,7 +447,7 @@ public class JChannel extends Channel {
 
 
     public View getView() {
-        return closed || !connected ? null : my_view;
+        return state == State.CONNECTED ? my_view : null;
     }
     
     @ManagedAttribute(name="View")
@@ -472,32 +457,20 @@ public class JChannel extends Channel {
     }
     
     @ManagedAttribute
-    public static String getVersion() {
-        return Version.printDescription();
-    }
+    public static String getVersion() {return Version.printDescription();}
 
 
-    public Address getAddress() {
-        return closed ? null : local_addr;
-    }
+    public Address getAddress() {return state == State.CLOSED ? null : local_addr;}
 
     @ManagedAttribute(name="Address")
-    public String getAddressAsString() {
-        return local_addr != null? local_addr.toString() : "n/a";
-    }
+    public String getAddressAsString() {return local_addr != null? local_addr.toString() : "n/a";}
 
     @ManagedAttribute(name="Address (UUID)")
-    public String getAddressAsUUID() {
-        return local_addr instanceof UUID? ((UUID)local_addr).toStringLong() : null;
-    }
+    public String getAddressAsUUID() {return local_addr instanceof UUID? ((UUID)local_addr).toStringLong() : null;}
 
-    public String getName() {
-        return name;
-    }
+    public String getName() {return name;}
 
-    public String getName(Address member) {
-        return member != null? UUID.get(member) : null;
-    }
+    public String getName(Address member) {return member != null? UUID.get(member) : null;}
 
     @ManagedAttribute(writable=true, description="The logical name of this channel. Stays with the channel until " +
             "the channel is closed")
@@ -512,18 +485,14 @@ public class JChannel extends Channel {
     }
 
     @ManagedAttribute(description="Returns cluster name this channel is connected to")
-    public String getClusterName() {
-        return closed ? null : !connected ? null : cluster_name;
-    }
+    public String getClusterName() {return state == State.CONNECTED? cluster_name : null;}
 
     /**
      * Returns the current {@link AddressGenerator}, or null if none is set
      * @return
      * @since 2.12
      */
-    public AddressGenerator getAddressGenerator() {
-        return address_generator;
-    }
+    public AddressGenerator getAddressGenerator() {return address_generator;}
 
     /**
      * Sets the new {@link AddressGenerator}. New addresses will be generated using the new generator. This
@@ -531,9 +500,7 @@ public class JChannel extends Channel {
      * @param address_generator
      * @since 2.12
      */
-    public void setAddressGenerator(AddressGenerator address_generator) {
-        this.address_generator=address_generator;
-    }
+    public void setAddressGenerator(AddressGenerator address_generator) {this.address_generator=address_generator;}
 
 
     public void getState(Address target, long timeout) throws Exception {
@@ -552,7 +519,38 @@ public class JChannel extends Channel {
 		};
 		getState(target, timeout, useFlushIfPresent?flusher:null);
 	}
-    
+
+    protected boolean _preConnect(String cluster_name) throws Exception {
+        if(state == State.CONNECTED) {
+            if(log.isTraceEnabled()) log.trace("already connected to " + this.cluster_name);
+            return false;
+        }
+        checkClosed();
+        setAddress();
+        State old_state=state;
+        state=State.CONNECTING;
+        try {
+            startStack(cluster_name);
+        }
+        catch(Exception ex) {
+            state=old_state;
+            throw ex;
+        }
+        return true;
+    }
+
+    protected void _connect(Event connect_event) throws Exception {
+        try {
+            down(connect_event);
+        }
+        catch(Throwable t) {
+            stopStack(true, false);
+            state=State.OPEN;
+            init();
+            throw new Exception("connecting to channel \"" + connect_event.getArg() + "\" failed", t);
+        }
+    }
+
 
     protected void getState(Address target, long timeout, Callable<Boolean> flushInvoker) throws Exception {
         checkClosedOrNotConnected();
@@ -628,18 +626,18 @@ public class JChannel extends Channel {
                 // not good: we are only connected when we returned from connect() - bela June 22 2007
                 // Changed: when a channel gets a view of which it is a member then it should be
                 // connected even if connect() hasn't returned yet ! (bela Noc 2010)
-                if(connected == false)
-                    connected=true;
+                if(state != State.CONNECTED)
+                    state=State.CONNECTED;
                 break;
 
             case Event.CONFIG:
                 Map<String,Object> cfg=(Map<String,Object>)evt.getArg();
                 if(cfg != null) {
                     if(cfg.containsKey("state_transfer")) {
-                        state_transfer_supported=((Boolean)cfg.get("state_transfer")).booleanValue();
+                        state_transfer_supported=(Boolean)cfg.get("state_transfer");
                     }
                     if(cfg.containsKey("flush_supported")) {
-                        flush_supported=((Boolean)cfg.get("flush_supported")).booleanValue();
+                        flush_supported=(Boolean)cfg.get("flush_supported");
                     }
                     cfg.putAll(cfg);
                 }
@@ -658,10 +656,10 @@ public class JChannel extends Channel {
                     }
                 }
 
-                byte[] state=result.getBuffer();
+                byte[] tmp_state=result.getBuffer();
                 if(receiver != null) {
                     try {
-                        ByteArrayInputStream input=new ByteArrayInputStream(state);
+                        ByteArrayInputStream input=new ByteArrayInputStream(tmp_state);
                         receiver.setState(input);
                         state_promise.setResult(new StateTransferResult());
                     }
@@ -723,7 +721,8 @@ public class JChannel extends Channel {
 
 
     /**
-     * Sends a message through the protocol stack if the stack is available
+     * Sends an event down the protocol stack. Note that - contrary to {@link #send(Message)}, if the event is a message,
+     * no checks are performed whether the channel is closed or disconnected.
      * @param evt the message to send down, encapsulated in an event
      */
     public Object down(Event evt) {
@@ -740,8 +739,7 @@ public class JChannel extends Channel {
         sb.append("local_addr=").append(local_addr).append('\n');
         sb.append("cluster_name=").append(cluster_name).append('\n');
         sb.append("my_view=").append(my_view).append('\n');
-        sb.append("connected=").append(connected).append('\n');
-        sb.append("closed=").append(closed).append('\n');
+        sb.append("state=").append(state).append('\n');
         if(details) {
             sb.append("discard_own_messages=").append(discard_own_messages).append('\n');
             sb.append("state_transfer_supported=").append(state_transfer_supported).append('\n');
@@ -811,21 +809,16 @@ public class JChannel extends Channel {
      * Initializes all variables. Used after <tt>close()</tt> or <tt>disconnect()</tt>,
      * to be ready for new <tt>connect()</tt>
      */
-    private void init() {
+    protected void init() {
         if(local_addr != null)
             down(new Event(Event.REMOVE_ADDRESS, local_addr));
         local_addr=null;
         cluster_name=null;
         my_view=null;
-
-        // changed by Bela Sept 25 2003
-        //if(mq != null && mq.closed())
-          //  mq.reset();
-        connected=false;
     }
 
 
-    private void startStack(String cluster_name) throws Exception {
+    protected void startStack(String cluster_name) throws Exception {
         /*make sure the channel is not closed*/
         checkClosed();
 
@@ -859,9 +852,9 @@ public class JChannel extends Channel {
         local_addr=address_generator != null? address_generator.generateAddress() : UUID.randomUUID();
         if(old_addr != null)
             down(new Event(Event.REMOVE_ADDRESS, old_addr));
-        if(name == null || name.length() == 0) // generate a logical name if not set
+        if(name == null || name.isEmpty()) // generate a logical name if not set
             name=Util.generateLocalName();
-        if(name != null && name.length() > 0)
+        if(name != null && !name.isEmpty())
             UUID.add(local_addr, name);
 
         Event evt=new Event(Event.SET_LOCAL_ADDRESS, local_addr);
@@ -876,15 +869,16 @@ public class JChannel extends Channel {
      * throws a ChannelClosed exception if the channel is closed
      */
     protected void checkClosed() {
-        if(closed)
+        if(state == State.CLOSED)
             throw new IllegalStateException("channel is closed");
     }
 
 
     protected void checkClosedOrNotConnected() {
-        if(closed)
+        if(state == State.CLOSED)
             throw new IllegalStateException("channel is closed");
-        if(!connected)
+
+        if(!(state == State.CONNECTING || state == State.CONNECTED))
             throw new IllegalStateException("channel is disconnected");
     }
 
@@ -903,14 +897,13 @@ public class JChannel extends Channel {
      */
     protected void _close(boolean disconnect) {
         Address old_addr=local_addr;
-        if(closed)
+        if(state == State.CLOSED)
             return;
 
         if(disconnect)
             disconnect();                     // leave group if connected
         stopStack(true, true);
-        closed=true;
-        connected=false;
+        state=State.CLOSED;
         notifyChannelClosed(this);
         init(); // sets local_addr=null; changed March 18 2003 (bela) -- prevented successful rejoining
         if(old_addr != null)
@@ -997,7 +990,7 @@ public class JChannel extends Channel {
         return null;
     }
 
-    private TimeScheduler getTimer() {
+    protected TimeScheduler getTimer() {
         if(prot_stack != null) {
             TP transport=prot_stack.getTransport();
             if(transport != null)
@@ -1016,9 +1009,6 @@ public class JChannel extends Channel {
                 if(key.startsWith("jmx")) {
                     handleJmx(map, key);
                     continue;
-                }
-                if(key.equals("socks")) {
-                    map.put("socks", getOpenSockets());
                 }
                 if(key.startsWith("invoke") || key.startsWith("op")) {
                     int index=key.indexOf("=");
@@ -1046,7 +1036,7 @@ public class JChannel extends Channel {
         }
 
         public String[] supportedKeys() {
-            return new String[]{"jmx", "invoke=<operation>[<args>]", "\nop=<operation>[<args>]", "socks"};
+            return new String[]{"jmx", "invoke=<operation>[<args>]", "\nop=<operation>[<args>]"};
         }
 
         protected void handleJmx(Map<String, String> map, String input) {
@@ -1070,7 +1060,7 @@ public class JChannel extends Channel {
                             String attrname=tmp.substring(0, index);
                             String attrvalue=tmp.substring(index+1);
                             Protocol prot=prot_stack.findProtocol(protocol_name);
-                            Field field=Util.getField(prot.getClass(), attrname);
+                            Field field=prot != null? Util.getField(prot.getClass(), attrname) : null;
                             if(field != null) {
                                 Object value=MethodCall.convert(attrvalue, field.getType());
                                   if(value != null)
@@ -1097,14 +1087,15 @@ public class JChannel extends Channel {
          * @param map
          * @param operation Protocol.OperationName[args], e.g. STABLE.foo[arg1 arg2 arg3]
          */
-        private void handleOperation(Map<String, String> map, String operation) throws Exception {
+        protected void handleOperation(Map<String, String> map, String operation) throws Exception {
             int index=operation.indexOf(".");
             if(index == -1)
                 throw new IllegalArgumentException("operation " + operation + " is missing the protocol name");
             String prot_name=operation.substring(0, index);
             Protocol prot=prot_stack.findProtocol(prot_name);
             if(prot == null)
-                throw new IllegalArgumentException("protocol " + prot_name + " not found");
+                return; // less drastic than throwing an exception...
+
 
             int args_index=operation.indexOf("[");
             String method_name;
@@ -1126,6 +1117,11 @@ public class JChannel extends Channel {
             }
 
             Method method=MethodCall.findMethod(prot.getClass(), method_name, args);
+            if(method == null) {
+                if(log.isWarnEnabled())
+                    log.warn(local_addr + ": method " + prot.getClass().getSimpleName() + "." + method_name + " not found");
+                return;
+            }
             MethodCall call=new MethodCall(method);
             Object[] converted_args=null;
             if(args != null) {
@@ -1137,38 +1133,6 @@ public class JChannel extends Channel {
             Object retval=call.invoke(prot, converted_args);
             if(retval != null)
                 map.put(prot_name + "." + method_name, retval.toString());
-        }
-
-        String getOpenSockets() {
-            Map<Object, String> socks=getSocketFactory().getSockets();
-            TP transport=getProtocolStack().getTransport();
-            if(transport != null && transport.isSingleton()) {
-                Map<Object,String> tmp=transport.getSocketFactory().getSockets();
-                if(tmp != null)
-                    socks.putAll(tmp);
-            }
-
-            StringBuilder sb=new StringBuilder();
-            if(socks != null) {
-                for(Map.Entry<Object,String> entry: socks.entrySet()) {
-                    Object key=entry.getKey();
-                    if(key instanceof ServerSocket) {
-                        ServerSocket tmp=(ServerSocket)key;
-                        sb.append(tmp.getInetAddress()).append(":").append(tmp.getLocalPort())
-                                .append(" ").append(entry.getValue()).append(" [tcp]");
-                    }
-                    else if(key instanceof DatagramSocket) {
-                        DatagramSocket sock=(DatagramSocket)key;
-                        sb.append(sock.getLocalAddress()).append(":").append(sock.getLocalPort())
-                                .append(" ").append(entry.getValue()).append(" [udp]");
-                    }
-                    else {
-                        sb.append(key).append(" ").append(entry.getValue());
-                    }
-                    sb.append("\n");
-                }
-            }
-            return sb.toString();
         }
     }
 

@@ -33,7 +33,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
     public void join(Address mbr, boolean useFlushIfPresent) {
         wrongMethod("join");
     }
-    
+
     public void joinWithStateTransfer(Address mbr,boolean useFlushIfPresent) {
         wrongMethod("join");
     }
@@ -46,7 +46,6 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
     public void leave(Address mbr) {
         Address coord;
         int max_tries=3;
-        Boolean result;
 
         leave_promise.reset();
 
@@ -61,9 +60,9 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
                 return;
             }
 
-            if(log.isDebugEnabled()) log.debug("sending LEAVE request to " + coord + " (local_addr=" + gms.local_addr + ")");
+            if(log.isDebugEnabled()) log.debug(gms.local_addr + ": sending LEAVE request to " + coord);
             sendLeaveMessage(coord, mbr);
-            result=leave_promise.getResult(gms.leave_timeout);
+            Boolean result=leave_promise.getResult(gms.leave_timeout);
             if(result != null)
                 break;
         }
@@ -81,11 +80,12 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
         ViewId tmp_vid=v != null? v.getVid() : null;
         ViewId my_view=gms.getViewId();
         if(tmp_vid != null && my_view != null && tmp_vid.compareToIDs(my_view) > 0) {
-            gms.installView(v);
+            Digest d=join_rsp.getDigest();
+            gms.installView(v, d);
         }
     }
 
-    public void handleLeaveResponse() {       
+    public void handleLeaveResponse() {
         leave_promise.setResult(true);  // unblocks thread waiting in leave()
     }
 
@@ -110,7 +110,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
             if(req.type == Request.SUSPECT)
                 suspectedMembers.add(req.mbr);
         }
-        
+
         if(suspectedMembers.isEmpty())
             return;
 
@@ -119,19 +119,16 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
                 suspected_mbrs.add(mbr);
         }
 
-        if(log.isDebugEnabled())
-            log.debug("suspected members=" + suspectedMembers + ", suspected_mbrs=" + suspected_mbrs);
-
         if(wouldIBeCoordinator()) {
             if(log.isDebugEnabled())
-                log.debug("members are " + gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
+                log.debug(gms.local_addr + ": members are " + gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
 
-            suspected_mbrs.clear();
             gms.becomeCoordinator();
-            for(Address mbr: suspectedMembers) {
+            for(Address mbr: suspected_mbrs) {
                 gms.getViewHandler().add(new Request(Request.SUSPECT, mbr, true));
                 gms.ack_collector.suspect(mbr);
             }
+            suspected_mbrs.clear();
         }
     }
 

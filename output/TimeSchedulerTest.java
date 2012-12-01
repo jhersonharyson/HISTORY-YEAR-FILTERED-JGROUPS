@@ -5,10 +5,7 @@ import org.jgroups.Global;
 import org.jgroups.TimeoutException;
 import org.jgroups.stack.Interval;
 import org.jgroups.stack.StaticInterval;
-import org.jgroups.util.DefaultTimeScheduler;
-import org.jgroups.util.Promise;
-import org.jgroups.util.TimeScheduler;
-import org.jgroups.util.Util;
+import org.jgroups.util.*;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -18,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 
 /**
@@ -35,6 +33,24 @@ public class TimeSchedulerTest {
     Object[][] createTimer() {
         return Util.createTimer();
     }
+
+
+    @Test(dataProvider="createTimer")
+    public void testExecute(TimeScheduler timer) {
+        try {
+            Promise<Boolean> promise=new Promise<Boolean>();
+            long start=System.currentTimeMillis();
+            timer.execute(new ImmediateTask(promise));
+            promise.getResult(2000);
+            long diff=System.currentTimeMillis() - start;
+            assert diff < 1000 : " took " + diff + " ms to execute";
+            System.out.println("The task took " + diff + " ms to execute");
+        }
+        finally {
+            timer.stop();
+        }
+    }
+
 
 
     @Test(dataProvider="createTimer")
@@ -139,13 +155,50 @@ public class TimeSchedulerTest {
         }
     }
 
+    @Test(dataProvider="createTimer")
+    public void testShutdown(TimeScheduler timer) {
+        for(int i=100; i <= 1000; i+=100) { // delays in ms
+            timer.schedule(new Runnable() {
+                public void run() {
+                    System.out.print(".");
+                }
+            }, i, TimeUnit.MILLISECONDS);
+            timer.scheduleWithFixedDelay(new Runnable() {
+                public void run() {
+                    System.out.print(".");
+                }
+            }, i, i, TimeUnit.MILLISECONDS);
+        }
+
+        Util.sleep(400);
+        timer.stop();
+        int size=timer.size();
+        assert size == 0 : "size=" + size + " (should be 0)";
+    }
+
+
+    /** Adds a task after shut down */
+    @Test(dataProvider="createTimer")
+    public void testShutdown2(TimeScheduler timer) {
+        timer.stop();
+
+        timer.schedule(new Runnable() {
+            public void run() {
+                System.out.print(".");
+            }
+        }, 500, TimeUnit.MILLISECONDS);
+
+        int size=timer.size();
+        assert size == 0;
+    }
+
 
     @Test(dataProvider="createTimer")
     public void testRepeatingTask(TimeScheduler timer) throws InterruptedException {
         Future future;
         RepeatingTask task=new RepeatingTask(300);
         try {
-            future=timer.scheduleAtFixedRate(task, 0, 300, TimeUnit.MILLISECONDS);
+            future=timer.scheduleAtFixedRate(task,0,300,TimeUnit.MILLISECONDS);
             Util.sleep(3200);
 
             System.out.println("<<< cancelling task");
@@ -162,16 +215,35 @@ public class TimeSchedulerTest {
         }
     }
 
-    private static String printExecutionTimes(RepeatingTask task) {
-        StringBuilder sb=new StringBuilder();
-        List<Long> times=task.getExecutionTimes();
-        if(times.isEmpty())
-            return "[]";
-        int cnt=1;
-        for(Long time: times) {
-            sb.append("#" + cnt++ + ": ").append(time).append("\n");
+    /** Tests a repeating tasks which throws exceptions. Verifies that the task doesn't end on an exception */
+    @Test(dataProvider="createTimer")
+    public void testRepeatingTaskWithException(TimeScheduler timer) throws InterruptedException {
+        final AtomicInteger count=new AtomicInteger(0);
+
+        final Runnable task=new Runnable() {
+            public void run() {
+                if(count.get() == 10)
+                    return;
+                System.out.println("run #" + count);
+                count.incrementAndGet();
+                if(count.get() % 2 == 0)
+                    throw new RuntimeException("boooom");
+            }
+        };
+
+        try {
+            Future<?> future=timer.scheduleWithFixedDelay(task, 0, 100, TimeUnit.MILLISECONDS);
+            for(int i=0; i < 10; i++) {
+                if(count.get() == 10)
+                    break;
+                Util.sleep(200);
+            }
+            assert count.get() == 10 : "count is " + count;
+            future.cancel(true);
         }
-        return sb.toString();
+        finally {
+            timer.stop();
+        }
     }
 
 
@@ -257,6 +329,46 @@ public class TimeSchedulerTest {
     }
 
 
+    /**
+     * Tests that a dynamic task continues to execute N times even if every 2nd run throw an exception
+     * @param timer
+     * @throws InterruptedException
+     */
+    @Test(dataProvider="createTimer")
+    public void testDynamicTaskWithException(TimeScheduler timer) throws Exception {
+        final AtomicInteger count=new AtomicInteger(0);
+
+        final TimeScheduler.Task task=new TimeScheduler.Task() {
+            public long nextInterval() {
+                if(count.get() == 10)
+                    return 0; // cancels the dynamic task
+                return 100;
+            }
+
+            public void run() {
+                System.out.println("run #" + count);
+                count.incrementAndGet();
+                if(count.get() % 2 == 0)
+                    throw new RuntimeException("boooom");
+            }
+        };
+
+        try {
+            Future<?> future=timer.scheduleWithDynamicInterval(task);
+            for(int i=0; i < 10; i++) {
+                if(count.get() == 10)
+                    break;
+                Util.sleep(200);
+            }
+            assert count.get() == 10;
+            future.cancel(true);
+        }
+        finally {
+            timer.stop();
+        }
+    }
+
+
     @Test(dataProvider="createTimer")
     public void testIsDone(TimeScheduler timer) throws InterruptedException {
         try {
@@ -289,7 +401,7 @@ public class TimeSchedulerTest {
             assert !future.isCancelled();
             assert !future.isDone();
 
-            Thread.sleep(3500);
+            Thread.sleep(5000);
             assert !future.isCancelled();
             assert future.isDone();
 
@@ -349,8 +461,8 @@ public class TimeSchedulerTest {
     public void test2Tasks(TimeScheduler timer) throws InterruptedException {
         int size;
         try {
-            System.out.println(System.currentTimeMillis() + ": adding task");
-            timer.schedule(new MyTask(), 500, TimeUnit.MILLISECONDS);
+            System.out.println(System.currentTimeMillis() + ": adding task one");
+            timer.schedule(new MyTask("one"), 500, TimeUnit.MILLISECONDS);
             size=timer.size();
             System.out.println("queue size=" + size);
             Assert.assertEquals(1, size);
@@ -360,18 +472,20 @@ public class TimeSchedulerTest {
             Assert.assertEquals(0, size);
 
             Thread.sleep(1500);
-            System.out.println(System.currentTimeMillis() + ": adding task");
-            timer.schedule(new MyTask(), 500, TimeUnit.MILLISECONDS);
+            System.out.println(System.currentTimeMillis() + ": adding task two");
+            timer.schedule(new MyTask("two"), 500, TimeUnit.MILLISECONDS);
 
-            System.out.println(System.currentTimeMillis() + ": adding task");
-            timer.schedule(new MyTask(), 500, TimeUnit.MILLISECONDS);
+            System.out.println(System.currentTimeMillis() + ": adding task three");
+            timer.schedule(new MyTask("three"), 500, TimeUnit.MILLISECONDS);
 
-            System.out.println(System.currentTimeMillis() + ": adding task");
-            timer.schedule(new MyTask(), 500, TimeUnit.MILLISECONDS);
+            System.out.println(System.currentTimeMillis() + ": adding task flour");
+            timer.schedule(new MyTask("four"), 500, TimeUnit.MILLISECONDS);
+
+            System.out.println("timer queue:\n" + timer.dumpTimerTasks());
 
             size=timer.size();
             System.out.println("queue size=" + size);
-            Assert.assertEquals(3, size);
+            assert size == 3: "expected 3 tasks but found " + size + ": " + timer.dumpTimerTasks();
 
             Thread.sleep(1000);
             size=timer.size();
@@ -402,7 +516,7 @@ public class TimeSchedulerTest {
             System.out.println("-- adding " + NUM_MSGS + " messages:");
             for(long i=0; i < NUM_MSGS; i++) {
                 entry=new Entry(i);
-                msgs.put(new Long(i), entry);
+                msgs.put(i, entry);
                 timer.scheduleWithDynamicInterval(entry);
             }
             System.out.println("-- done");
@@ -442,29 +556,35 @@ public class TimeSchedulerTest {
         long execution_time=4000;
         final long base=System.currentTimeMillis();
 
-        for(int num: new Integer[]{1,2,3}) {
-            final int cnt=num;
-            timer.schedule(new Runnable() {
-                public void run() {
-                    results.add(cnt);
-                    System.out.println("[" + (System.currentTimeMillis() - base) + "] " + cnt);
-                }
-            }, execution_time, TimeUnit.MILLISECONDS);
-            execution_time-=1300;
-            Util.sleep(300);
-        }
+        try {
 
-        for(int i=0; i < 10; i++) {
-            if(results.size() == 3)
-                break;
-            Util.sleep(500);
-        }
+            for(int num: new Integer[]{1,2,3}) {
+                final int cnt=num;
+                timer.schedule(new Runnable() {
+                    public void run() {
+                        results.add(cnt);
+                        System.out.println("[" + (System.currentTimeMillis() - base) + "] " + cnt);
+                    }
+                }, execution_time, TimeUnit.MILLISECONDS);
+                execution_time-=1300;
+                Util.sleep(300);
+            }
 
-        System.out.println("results = " + results);
-        assert results.size() == 3: "results = " + results;
-        assert results.get(0) == 3: "results = " + results;
-        assert results.get(1) == 2: "results = " + results;
-        assert results.get(2) == 1: "results = " + results;
+            for(int i=0; i < 10; i++) {
+                if(results.size() == 3)
+                    break;
+                Util.sleep(500);
+            }
+
+            System.out.println("results = " + results);
+            assert results.size() == 3: "results = " + results;
+            assert results.get(0) == 3: "results = " + results;
+            assert results.get(1) == 2: "results = " + results;
+            assert results.get(2) == 1: "results = " + results;
+        }
+        finally {
+            timer.stop();
+        }
     }
 
 
@@ -476,37 +596,55 @@ public class TimeSchedulerTest {
     public void testSchedulerWithFixedDelay(TimeScheduler timer) {
         final AtomicBoolean set=new AtomicBoolean(false);
 
-        Future<?> future=timer.scheduleWithFixedDelay(new Runnable() {
-            public void run() {
-                set.set(true);
-            }
-        }, 0, 3000, TimeUnit.MILLISECONDS);
+        try {
+            Future<?> future=timer.scheduleWithFixedDelay(new Runnable() {
+                public void run() {
+                    set.set(true);
+                }
+            }, 0, 3000, TimeUnit.MILLISECONDS);
 
-        Util.sleep(500);
-        future.cancel(true);
+            Util.sleep(500);
+            future.cancel(true);
 
-        System.out.println("variable was set: " + set);
-        assert set.get();
+            System.out.println("variable was set: " + set);
+            assert set.get();
 
-        future=timer.scheduleWithFixedDelay(new Runnable() {
-            public void run() {
-                set.set(true);
-            }
-        }, 300, 3000, TimeUnit.MILLISECONDS);
+            future=timer.scheduleWithFixedDelay(new Runnable() {
+                public void run() {
+                    set.set(true);
+                }
+            }, 300, 3000, TimeUnit.MILLISECONDS);
 
-        Util.sleep(1000);
-        future.cancel(true);
+            Util.sleep(1000);
+            future.cancel(true);
 
-        System.out.println("variable was set: " + set);
-        assert set.get();
+            System.out.println("variable was set: " + set);
+            assert set.get();
+        }
+        finally {
+            timer.stop();
+        }
     }
 
 
+    protected static String printExecutionTimes(RepeatingTask task) {
+        StringBuilder sb=new StringBuilder();
+        List<Long> times=task.getExecutionTimes();
+        if(times.isEmpty())
+             return "[]";
+         int cnt=1;
+         for(Long time: times) {
+             sb.append("#" + cnt++ + ": ").append(time).append("\n");
+         }
+         return sb.toString();
+     }
 
-    static int check(Map<Long,Entry> msgs, boolean print) {
+
+
+    protected static int check(Map<Long,Entry> msgs, boolean print) {
         int retval=0;
         for(long i=0; i < NUM_MSGS; i++) {
-            Entry entry=msgs.get(new Long(i));
+            Entry entry=msgs.get(i);
             if(!entry.isCorrect(print)) {
                 retval++;
             }
@@ -528,8 +666,18 @@ public class TimeSchedulerTest {
     }
 
     static class MyTask implements Runnable {
+        protected final String name;
+
+        MyTask(String name) {
+            this.name=name;
+        }
+
         public void run() {
-            System.out.println(System.currentTimeMillis() + ": this is MyTask running - done");
+            System.out.println(System.currentTimeMillis() + ": MyTask \"" + name + "\": done");
+        }
+
+        public String toString() {
+            return "MyTask (" + name + ")";
         }
     }
 
@@ -572,8 +720,12 @@ public class TimeSchedulerTest {
         }
 
         public void run() {
-            System.out.println(System.currentTimeMillis() + ": this is MyTask running - done");
+            System.out.println(System.currentTimeMillis() + ": this is OneTimeTask running - done");
             done=true;
+        }
+
+        public String toString() {
+            return OneTimeTask.class.getSimpleName() + ": timeout=" + timeout;
         }
     }
 
@@ -602,6 +754,10 @@ public class TimeSchedulerTest {
             System.out.println((num +1) + ": this is a repeating task (" + time + "ms after start)");
             execution_times.add(time);
             num++;
+        }
+
+        public String toString() {
+            return RepeatingTask.class.getSimpleName() + ": num=" + num;
         }
     }
 

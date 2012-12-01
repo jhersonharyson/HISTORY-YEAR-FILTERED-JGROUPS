@@ -188,9 +188,9 @@ public class MPING extends PING implements Runnable {
 
     public void start() throws Exception {
         if(can_bind_to_mcast_addr) // https://jira.jboss.org/jira/browse/JGRP-836 - prevent cross talking on Linux
-            mcast_sock=Util.createMulticastSocket(getSocketFactory(), Global.MPING_MCAST_SOCK, mcast_addr, mcast_port, log);
+            mcast_sock=Util.createMulticastSocket(getSocketFactory(), "jgroups.mping.mcast_sock", mcast_addr, mcast_port, log);
         else
-            mcast_sock=getSocketFactory().createMulticastSocket(Global.MPING_MCAST_SOCK, mcast_port);
+            mcast_sock=getSocketFactory().createMulticastSocket("jgroups.mping.mcast_sock", mcast_port);
         
         mcast_sock.setTimeToLive(ip_ttl);
 
@@ -255,7 +255,7 @@ public class MPING extends PING implements Runnable {
 
     private void startReceiver() {
         if(receiver == null || !receiver.isAlive()) {
-            receiver=new Thread(Util.getGlobalThreadGroup(), this, "ReceiverThread");
+            receiver=new Thread(this, "MPING");
             receiver.setDaemon(true);
             receiver.start();
             if(log.isTraceEnabled())
@@ -264,9 +264,9 @@ public class MPING extends PING implements Runnable {
     }
 
     public void stop() {
+        receiver=null;
         Util.close(mcast_sock);
         mcast_sock=null;
-        receiver=null;
         super.stop();
     }
 
@@ -334,9 +334,6 @@ public class MPING extends PING implements Runnable {
             }
             catch(Throwable ex) {
                 log.error("failed receiving packet (from " + packet.getSocketAddress() + ")", ex);
-            }
-            finally {
-                Util.close(inp);
             }
         }
         if(log.isTraceEnabled())

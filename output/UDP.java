@@ -94,7 +94,7 @@ public class UDP extends TP {
 
 
     /** The multicast address (mcast address and port) this member uses */
-    protected IpAddress mcast_addr=null;
+    protected IpAddress       mcast_addr;
 
     /**
      * Socket used for
@@ -104,16 +104,16 @@ public class UDP extends TP {
      * </ol>
      * The address of this socket will be our local address (<tt>local_addr</tt>)
      */
-    protected DatagramSocket sock=null;
+    protected DatagramSocket  sock;
 
     /** IP multicast socket for <em>receiving</em> multicast packets */
     protected MulticastSocket mcast_sock=null;
 
     /** Runnable to receive multicast packets */
-    protected PacketReceiver mcast_receiver=null;
+    protected PacketReceiver  mcast_receiver=null;
 
     /** Runnable to receive unicast packets */
-    protected PacketReceiver ucast_receiver=null;
+    protected PacketReceiver  ucast_receiver=null;
 
 
     /**
@@ -221,8 +221,14 @@ public class UDP extends TP {
      * Creates the unicast and multicast sockets and starts the unicast and multicast receiver threads
      */
     public void start() throws Exception {
-        createSockets();
-        super.start();
+        try {
+            createSockets();
+            super.start();
+        }
+        catch(Exception ex) {
+            destroySockets();
+            throw ex;
+        }
         ucast_receiver=new PacketReceiver(sock,
                                           "unicast receiver",
                                           new Runnable() {
@@ -341,9 +347,9 @@ public class UDP extends TP {
             // https://jira.jboss.org/jira/browse/JGRP-777 - this doesn't work on MacOS, and we don't have
             // cross talking on Windows anyway, so we just do it for Linux. (How about Solaris ?)
             if(can_bind_to_mcast_addr)
-                mcast_sock=Util.createMulticastSocket(getSocketFactory(), Global.UDP_MCAST_SOCK, mcast_group_addr, mcast_port, log);
+                mcast_sock=Util.createMulticastSocket(getSocketFactory(), "jgroups.udp.mcast_sock", mcast_group_addr, mcast_port, log);
             else
-                mcast_sock=getSocketFactory().createMulticastSocket(Global.UDP_MCAST_SOCK, mcast_port);
+                mcast_sock=getSocketFactory().createMulticastSocket("jgroups.udp.mcast_sock", mcast_port);
 
             if(disable_loopback)
                 mcast_sock.setLoopbackMode(disable_loopback);
@@ -353,12 +359,9 @@ public class UDP extends TP {
             mcast_addr=new IpAddress(mcast_group_addr, mcast_port);
 
             // check that we're not using the same mcast address and port as the diagnostics socket
-            if(enable_diagnostics) {
-                if(diagnostics_addr != null && diagnostics_addr.equals(mcast_group_addr) ||
-                        diagnostics_port == mcast_port)
-                    throw new IllegalArgumentException("diagnostics_addr / diagnostics_port and mcast_addr / mcast_port " +
-                            "have to be different");
-            }
+            if(enable_diagnostics && diagnostics_addr.equals(mcast_group_addr) && diagnostics_port == mcast_port)
+                throw new IllegalArgumentException("diagnostics_addr:diagnostics_port and mcast_addr:mcast_port " +
+                                                     "have to be different");
 
             if(tos > 0) {
                 try {
@@ -397,7 +400,12 @@ public class UDP extends TP {
     protected IpAddress createLocalAddress() {
         if(sock == null || sock.isClosed())
             return null;
-        return new IpAddress(external_addr != null? external_addr : sock.getLocalAddress(), sock.getLocalPort());
+        if(external_addr != null) {
+            if(external_port > 0)
+                return new IpAddress(external_addr, external_port);
+            return new IpAddress(external_addr, sock.getLocalPort());
+        }
+        return new IpAddress(sock.getLocalAddress(), sock.getLocalPort());
     }
 
 
@@ -440,7 +448,7 @@ public class UDP extends TP {
         int localPort=0;
         while(true) {
             try {
-                tmp=getSocketFactory().createDatagramSocket(Global.UDP_UCAST_SOCK, localPort, bind_addr);
+                tmp=getSocketFactory().createDatagramSocket("jgroups.udp.unicast_sock", localPort, bind_addr);
             }
             catch(SocketException socket_ex) {
                 // Vladimir May 30th 2007
@@ -469,7 +477,7 @@ public class UDP extends TP {
         int rcv_port=bind_port, max_port=bind_port + port_range;
         while(rcv_port <= max_port) {
             try {
-                tmp=getSocketFactory().createDatagramSocket(Global.UDP_UCAST_SOCK, rcv_port, bind_addr);
+                tmp=getSocketFactory().createDatagramSocket("jgroups.udp.unicast_sock", rcv_port, bind_addr);
                 return tmp;
             }
             catch(SocketException bind_ex) {	// Cannot listen on this port
@@ -524,10 +532,8 @@ public class UDP extends TP {
             sock.setSendBufferSize(send_buf_size);
             int actual_size=sock.getSendBufferSize();
             if(actual_size < send_buf_size && log.isWarnEnabled()) {
-                log.warn("send buffer of socket " + sock + " was set to " +
-                        Util.printBytes(send_buf_size) + ", but the OS only allocated " +
-                        Util.printBytes(actual_size) + ". This might lead to performance problems. Please set your " +
-                        "max send buffer in the OS correctly (e.g. net.core.wmem_max on Linux)");
+                log.warn(Util.getMessage("IncorrectBufferSize", "send", sock.getClass().getSimpleName(),
+                                         Util.printBytes(send_buf_size), Util.printBytes(actual_size), "send", "net.core.wmem_max"));
             }
         }
         catch(Throwable ex) {
@@ -538,10 +544,8 @@ public class UDP extends TP {
             sock.setReceiveBufferSize(recv_buf_size);
             int actual_size=sock.getReceiveBufferSize();
             if(actual_size < recv_buf_size && log.isWarnEnabled()) {
-                log.warn("receive buffer of socket " + sock + " was set to " +
-                        Util.printBytes(recv_buf_size) + ", but the OS only allocated " +
-                        Util.printBytes(actual_size) + ". This might lead to performance problems. Please set your " +
-                        "max receive buffer in the OS correctly (e.g. net.core.rmem_max on Linux)");
+                log.warn(Util.getMessage("IncorrectBufferSize", "receive", sock.getClass().getSimpleName(),
+                                         Util.printBytes(recv_buf_size), Util.printBytes(actual_size), "receive", "net.core.rmem_max"));
             }
         }
         catch(Throwable ex) {
@@ -635,8 +639,6 @@ public class UDP extends TP {
             if(thread == null || !thread.isAlive()) {
                 thread=getThreadFactory().newThread(this, name);
                 thread.start();
-                if(log.isDebugEnabled())
-                    log.debug("created " + name + " thread ");
             }
         }
 

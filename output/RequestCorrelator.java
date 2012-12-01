@@ -6,6 +6,8 @@ import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.TP;
+import org.jgroups.AnycastAddress;
+import org.jgroups.protocols.relay.SiteMaster;
 import org.jgroups.stack.DiagnosticsHandler;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.Buffer;
@@ -13,6 +15,7 @@ import org.jgroups.util.Util;
 
 import java.io.DataInput;
 import java.io.DataOutput;
+import java.io.NotSerializableException;
 import java.util.*;
 import java.util.concurrent.ConcurrentMap;
 
@@ -56,6 +59,8 @@ public class RequestCorrelator {
 
     /** The address of this group member */
     protected Address local_addr=null;
+
+    protected volatile View view;
 
     protected boolean started=false;
 
@@ -144,14 +149,25 @@ public class RequestCorrelator {
 
         msg.putHeader(this.id, hdr);
 
-        if(coll != null)
+        if(coll != null) {
             addEntry(hdr.id, coll);
+            // make sure no view is received before we add ourself as a view handler (https://issues.jboss.org/browse/JGRP-1428)
+            coll.viewChange(view);
+        }
 
         if(options.getAnycasting()) {
-            for(Address mbr: dest_mbrs) {
+            if(options.useAnycastAddresses()) {
                 Message copy=msg.copy(true);
-                copy.setDest(mbr);
+                AnycastAddress dest=new AnycastAddress(dest_mbrs);
+                copy.setDest(dest);
                 transport.down(new Event(Event.MSG, copy));
+            }
+            else {
+                for(Address mbr: dest_mbrs) {
+                    Message copy=msg.copy(true);
+                    copy.setDest(mbr);
+                    transport.down(new Event(Event.MSG, copy));
+                }
             }
         }
         else
@@ -179,8 +195,11 @@ public class RequestCorrelator {
         Header hdr=new Header(Header.REQ, id, (coll != null), this.id);
         msg.putHeader(this.id, hdr);
 
-        if(coll != null)
+        if(coll != null) {
             addEntry(hdr.id, coll);
+            // make sure no view is received before we add ourself as a view handler (https://issues.jboss.org/browse/JGRP-1428)
+            coll.viewChange(view);
+        }
 
         transport.down(new Event(Event.MSG, msg));
     }
@@ -214,22 +233,27 @@ public class RequestCorrelator {
     public boolean receive(Event evt) {
         switch(evt.getType()) {
 
-        case Event.SUSPECT:     // don't wait for responses from faulty members
-            receiveSuspect((Address)evt.getArg());
-            break;
+            case Event.SUSPECT:     // don't wait for responses from faulty members
+                receiveSuspect((Address)evt.getArg());
+                break;
 
-        case Event.VIEW_CHANGE: // adjust number of responses to wait for
-            receiveView((View)evt.getArg());
-            break;
+            case Event.VIEW_CHANGE: // adjust number of responses to wait for
+                receiveView((View)evt.getArg());
+                break;
 
-        case Event.SET_LOCAL_ADDRESS:
-            setLocalAddress((Address)evt.getArg());
-            break;
+            case Event.SET_LOCAL_ADDRESS:
+                setLocalAddress((Address)evt.getArg());
+                break;
 
-        case Event.MSG:
-            if(receiveMessage((Message)evt.getArg()))
-                return true; // message was consumed, don't pass it up
-            break;
+            case Event.MSG:
+                if(receiveMessage((Message)evt.getArg()))
+                    return true; // message was consumed, don't pass it up
+                break;
+            case Event.SITE_UNREACHABLE:
+                SiteMaster site_master=(SiteMaster)evt.getArg();
+                short site=site_master.getSite();
+                setSiteUnreachable(site);
+                break; // let others have a stab at this event, too
         }
         return false;
     }
@@ -241,6 +265,9 @@ public class RequestCorrelator {
 
     public void stop() {
         started=false;
+        for(RspCollector coll: requests.values())
+            coll.transportClosed();
+        requests.clear();
     }
 
 
@@ -277,6 +304,15 @@ public class RequestCorrelator {
     }
 
 
+    /** An entire site is down; mark all requests that point to that site as unreachable (used by RELAY2) */
+    public void setSiteUnreachable(short site) {
+        for(RspCollector coll: requests.values()) {
+            if(coll != null)
+                coll.siteUnreachable(site);
+        }
+    }
+
+
     /**
      * <tt>Event.VIEW_CHANGE</tt> event received from a layer below.
      * <p>
@@ -287,7 +323,8 @@ public class RequestCorrelator {
     public void receiveView(View new_view) {
         // ArrayList    copy;
         // copy so we don't run into bug #761804 - Bela June 27 2003
-        // copy=new ArrayList(requests.values());  // removed because ConcurrentReaderHashMap can tolerate concurrent mods (bela May 8 2006)
+        // copy=new ArrayList(requests.values());  // removed because ConcurrentHashMap can tolerate concurrent mods (bela May 8 2006)
+        view=new_view; // move this before the iteration (JGRP-1428)
         for(RspCollector coll: requests.values()) {
             if(coll != null)
                 coll.viewChange(new_view);
@@ -469,8 +506,12 @@ public class RequestCorrelator {
                 rsp_buf=marshaller != null? marshaller.objectToBuffer(t) : Util.objectToByteBuffer(t);
                 threw_exception=true;
             }
+            catch(NotSerializableException not_serializable) {
+                if(log.isErrorEnabled()) log.error("failed marshalling rsp (" + retval + "): not serializable");
+                return;
+            }
             catch(Throwable tt) {
-                if(log.isErrorEnabled()) log.error("failed sending rsp: return value (" + retval + ") is not serializable");
+                if(log.isErrorEnabled()) log.error("failed marshalling rsp (" + retval + "): " + tt);
                 return;
             }
         }
@@ -479,12 +520,16 @@ public class RequestCorrelator {
         prepareResponse(rsp);
         rsp.setFlag(Message.OOB);
         rsp.setFlag(Message.DONT_BUNDLE);
+
+        // why don't we simply copy the flags ?
         if(req.isFlagSet(Message.NO_FC))
             rsp.setFlag(Message.NO_FC);
         if(req.isFlagSet(Message.NO_RELIABILITY))
             rsp.setFlag(Message.NO_RELIABILITY);
         if(req.isFlagSet(Message.NO_TOTAL_ORDER))
             rsp.setFlag(Message.NO_TOTAL_ORDER);
+        if(req.isFlagSet(Message.Flag.NO_RELAY))
+            rsp.setFlag(Message.Flag.NO_RELAY);
 
         if(rsp_buf instanceof Buffer)
             rsp.setBuffer((Buffer)rsp_buf);

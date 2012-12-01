@@ -8,7 +8,7 @@ import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
-import org.jgroups.protocols.pbcast.NAKACK;
+import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.DiagnosticsHandler;
 import org.jgroups.stack.ProtocolStack;
@@ -50,11 +50,10 @@ public class LargeMergeTest {
         handler=new MyDiagnosticsHandler(InetAddress.getByName("224.0.75.75"), 7500,
                                          LogFactory.getLog(DiagnosticsHandler.class),
                                          new DefaultSocketFactory(),
-                                         new DefaultThreadFactory(Util.getGlobalThreadGroup(), "", false));
+                                         new DefaultThreadFactory("", false));
         handler.start();
         
-        ThreadGroup test_group=new ThreadGroup("LargeMergeTest");
-        TimeScheduler timer=new TimeScheduler2(new DefaultThreadFactory(test_group, "Timer", true, true),
+        TimeScheduler timer=new TimeScheduler2(new DefaultThreadFactory("Timer", true, true),
                                                5,20,
                                                3000, 5000, "abort");
 
@@ -88,7 +87,7 @@ public class LargeMergeTest {
                                            new MERGE3().setValue("min_interval",1000)
                                              .setValue("max_interval",10000)
                                              .setValue("max_participants_in_merge", MAX_PARTICIPANTS_IN_MERGE),
-                                           new NAKACK().setValue("use_mcast_xmit",false)
+                                           new NAKACK2().setValue("use_mcast_xmit",false)
                                              .setValue("discard_delivered_msgs",true)
                                              .setValue("log_discard_msgs",false).setValue("log_not_found_msgs",false)
                                              .setValue("xmit_table_num_rows",5)
@@ -166,7 +165,7 @@ public class LargeMergeTest {
             if(i++ > 0) {
                 int num_singleton_views=0;
                 for(Map.Entry<ViewId,Integer> entry: views.entrySet()) {
-                    if(entry.getValue().intValue() == 1)
+                    if(entry.getValue() == 1)
                         num_singleton_views++;
                     else {
                         System.out.println("==> " + entry.getKey() + ": " + entry.getValue() + " members");

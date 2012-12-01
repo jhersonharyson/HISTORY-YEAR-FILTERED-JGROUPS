@@ -9,6 +9,7 @@ import org.jgroups.View;
 import org.jgroups.util.Digest;
 import org.jgroups.util.MergeId;
 import org.jgroups.util.MutableDigest;
+import org.jgroups.util.Tuple;
 
 import java.util.*;
 
@@ -19,7 +20,7 @@ import java.util.*;
  * @author Bela Ban
  */
 public class CoordGmsImpl extends ServerGmsImpl {
-    private final Long  MAX_SUSPEND_TIMEOUT=new Long(30000);
+    private static final Long  MAX_SUSPEND_TIMEOUT=30000L;
 
     public CoordGmsImpl(GMS g) {
         super(g);
@@ -54,7 +55,10 @@ public class CoordGmsImpl extends ServerGmsImpl {
             leaving=true;
         gms.getViewHandler().add(new Request(Request.LEAVE, mbr, false));
         gms.getViewHandler().stop(true); // wait until all requests have been processed, then close the queue and leave
-        gms.getViewHandler().waitUntilCompleted(gms.leave_timeout);
+
+        // If we're the coord leaving, ignore gms.leave_timeout: https://issues.jboss.org/browse/JGRP-1509
+        long timeout=(long)(Math.max(gms.leave_timeout, gms.view_ack_collection_timeout) * 1.10);
+        gms.getViewHandler().waitUntilCompleted(timeout);
     }
 
 
@@ -152,8 +156,11 @@ public class CoordGmsImpl extends ServerGmsImpl {
             if(gms.members.contains(mbr)) { // already joined: return current digest and membership
                 if(log.isWarnEnabled())
                     log.warn(mbr + " already present; returning existing view " + gms.view);
-                JoinRsp join_rsp=new JoinRsp(new View(gms.getViewId(), gms.members.getMembers()), gms.getDigest());
-                gms.sendJoinResponse(join_rsp, mbr);
+                Tuple<View,Digest> tuple=gms.getViewAndDigest();
+                if(tuple != null) {
+                    JoinRsp join_rsp=new JoinRsp(tuple.getVal1(), tuple.getVal2());
+                    gms.sendJoinResponse(join_rsp, mbr);
+                }
                 it.remove();
             }
         }
@@ -175,9 +182,6 @@ public class CoordGmsImpl extends ServerGmsImpl {
             return;
         }
 
-        gms.up(new Event(Event.PREPARE_VIEW,new_view));
-        gms.down(new Event(Event.PREPARE_VIEW,new_view));
-        
         if(log.isTraceEnabled())
             log.trace(gms.local_addr + ": new members=" + new_mbrs + ", suspected=" + suspected_mbrs + ", leaving=" + leaving_mbrs +
                         ", new view: " + new_view);
@@ -256,7 +260,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
 
     
     private void sendLeaveResponses(Collection<Address> leaving_members) {
-        for(Address address:leaving_members){
+        for(Address address: leaving_members){
             Message msg=new Message(address, null, null); // send an ack to the leaving member
             msg.setFlag(Message.OOB);
             GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.LEAVE_RSP);

@@ -6,6 +6,8 @@ import org.jgroups.JChannel;
 import org.jgroups.Message;
 import org.jgroups.ReceiverAdapter;
 import org.jgroups.protocols.DISCARD_PAYLOAD;
+import org.jgroups.protocols.pbcast.NAKACK;
+import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Util;
 import org.testng.annotations.AfterMethod;
@@ -25,14 +27,14 @@ public class NAKACK_Test extends ChannelTestBase {
 
 
     @BeforeMethod
-    public void setUp() throws Exception {
+    void setUp() throws Exception {
         c1=createChannel(true, 3);
         c2=createChannel(c1);
         c3=createChannel(c1);
     }
 
     @AfterMethod
-    public void tearDown() throws Exception {
+    void tearDown() throws Exception {
         Util.close(c3, c2, c1);
     }
 
@@ -53,7 +55,7 @@ public class NAKACK_Test extends ChannelTestBase {
         c2.setReceiver(receiver2);
         c3.setReceiver(receiver3);
 
-        c1.getProtocolStack().insertProtocol(new DISCARD_PAYLOAD(), ProtocolStack.BELOW, "NAKACK");
+        c1.getProtocolStack().insertProtocol(new DISCARD_PAYLOAD(),ProtocolStack.BELOW,NAKACK.class,NAKACK2.class);
 
         c1.connect("NAKACK_OOB_Test");
         c2.connect("NAKACK_OOB_Test");

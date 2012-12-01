@@ -114,6 +114,10 @@ public class Configurator {
         // process default values
         setDefaultValues(protocol_configs, protocols, ip_version);
         ensureValidBindAddresses(protocols);
+
+        // Fixes NPE with concurrent channel creation when using a shared stack (https://issues.jboss.org/browse/JGRP-1488)
+        Protocol top_protocol=protocols.get(protocols.size() - 1);
+        top_protocol.setUpProtocol(st);
         return connectProtocols(protocols);
     }
 
@@ -368,7 +372,7 @@ public class Configurator {
         for(int i=0; i < protocol_configs.size(); i++) {
             protocol_config=protocol_configs.get(i);
             singleton_name=protocol_config.getProperties().get(Global.SINGLETON_NAME);
-            if(singleton_name != null && singleton_name.trim().length() > 0) {
+            if(singleton_name != null && !singleton_name.trim().isEmpty()) {
                Map<String,Tuple<TP, ProtocolStack.RefCounter>> singleton_transports=ProtocolStack.getSingletonTransports();
                 synchronized(singleton_transports) {
                     if(i > 0) { // crude way to check whether protocol is a transport
@@ -422,17 +426,12 @@ public class Configurator {
             }
             catch(ClassNotFoundException e) {
             }
-            if(clazz == null) {
-                throw new Exception("unable to load class for protocol " + protocol_name +
-                        " (either as an absolute - " + protocol_name + " - or relative - " +
-                        defaultProtocolName + " - package name)!");
-            }
+            if(clazz == null)
+                throw new Exception(Util.getMessage("ProtocolLoadError", protocol_name, defaultProtocolName));
         }
 
         try {
             retval=(Protocol)clazz.newInstance();
-            if(retval == null)
-                throw new Exception("creation of instance for protocol " + protocol_name + "failed !");
             retval.setProtocolStack(stack);
 
             removeDeprecatedProperties(retval, properties);
@@ -456,15 +455,11 @@ public class Configurator {
                 }
             }
 
-            if(!properties.isEmpty()) {
-                throw new IllegalArgumentException("the following properties in " + protocol_name
-                        + " are not recognized: " + properties);
-            }
+            if(!properties.isEmpty())
+                throw new IllegalArgumentException(Util.getMessage("ConfigurationError", protocol_name, properties));
         }
         catch(InstantiationException inst_ex) {
-            log.error("an instance of " + protocol_name + " could not be created. Please check that it implements" +
-                    " interface Protocol and that is has a public empty constructor !");
-            throw inst_ex;
+            throw new InstantiationException(Util.getMessage("ProtocolCreateError",protocol_name, inst_ex.getLocalizedMessage()));
         }
         return retval;
     }
@@ -715,8 +710,6 @@ public class Configurator {
 
         // collect InetAddressInfo
         for(Protocol protocol : protocols) {
-            String protocolName=protocol.getName();
-
             //traverse class hierarchy and find all annotated fields and add them to the list if annotated
             for(Class<?> clazz=protocol.getClass(); clazz != null; clazz=clazz.getSuperclass()) {
                 Field[] fields=clazz.getDeclaredFields();
@@ -775,7 +768,7 @@ public class Configurator {
                         String defaultValue=null;
                         if(InetAddressInfo.isInetAddressRelated(methods[j])) {
                             defaultValue=ip_version == StackType.IPv4? annotation.defaultValueIPv4() : annotation.defaultValueIPv6();
-                            if(defaultValue != null && defaultValue.length() > 0) {
+                            if(defaultValue != null && !defaultValue.isEmpty()) {
                                 Object converted=null;
                                 try {
                                     if(defaultValue.equalsIgnoreCase(Global.NON_LOOPBACK_ADDRESS))
@@ -809,7 +802,7 @@ public class Configurator {
                     String defaultValue=null;
                     if(InetAddressInfo.isInetAddressRelated(protocol, fields[j])) {
                         defaultValue=ip_version == StackType.IPv4? annotation.defaultValueIPv4() : annotation.defaultValueIPv6();
-                        if(defaultValue != null && defaultValue.length() > 0) {
+                        if(defaultValue != null && !defaultValue.isEmpty()) {
                             // condition for invoking converter
                             if(defaultValue != null || !PropertyHelper.usesDefaultConverter(fields[j])) {
                                 Object converted=null;
@@ -858,7 +851,7 @@ public class Configurator {
                         Property annotation=fields[j].getAnnotation(Property.class);
 
                         String defaultValue=ip_version == StackType.IPv4? annotation.defaultValueIPv4() : annotation.defaultValueIPv6();
-                        if(defaultValue != null && defaultValue.length() > 0) {
+                        if(defaultValue != null && !defaultValue.isEmpty()) {
                             // condition for invoking converter
                             Object converted=null;
                             try {
@@ -1043,7 +1036,7 @@ public class Configurator {
             }
     		
     		String dependsClause = annotation.dependsUpon() ;
-    		if (dependsClause.trim().length() == 0)
+    		if (dependsClause.trim().isEmpty())
     			continue ;
     		
     		// split dependsUpon specifier into tokens; trim each token; search for token in list
@@ -1090,9 +1083,9 @@ public class Configurator {
 
             if(propertyName != null && propertyValue != null) {
                 String deprecated_msg=annotation.deprecatedMessage();
-                if(deprecated_msg != null && deprecated_msg.length() > 0) {
-                    log.warn(method.getDeclaringClass().getSimpleName() + "." + methodName + " has been deprecated : " +
-                            deprecated_msg);
+                if(deprecated_msg != null && !deprecated_msg.isEmpty()) {
+                    log.warn(Util.getMessage("Deprecated", method.getDeclaringClass().getSimpleName() + "." + methodName,
+                                             deprecated_msg));
                 }
             }
 
@@ -1136,9 +1129,10 @@ public class Configurator {
 
             if(propertyName != null && propertyValue != null) {
                 String deprecated_msg=annotation.deprecatedMessage();
-                if(deprecated_msg != null && deprecated_msg.length() > 0) {
-                    log.warn(field.getDeclaringClass().getSimpleName() + "." + field.getName() + " has been deprecated: " +
-                            deprecated_msg);
+                if(deprecated_msg != null && !deprecated_msg.isEmpty()) {
+
+                    log.warn(Util.getMessage("Deprecated", field.getDeclaringClass().getSimpleName() + "." + field.getName(),
+                                             deprecated_msg));
                 }
             }
             
@@ -1196,7 +1190,7 @@ public class Configurator {
         String retval=null;
 
         for(String system_property_name: system_property_names) {
-            if(system_property_name != null && system_property_name.length() > 0) {
+            if(system_property_name != null && !system_property_name.isEmpty()) {
                 if(system_property_name.equals(Global.BIND_ADDR))
                     if(Util.isBindAddressPropertyIgnored())
                         continue;
@@ -1255,7 +1249,6 @@ public class Configurator {
     		this.convertedValue = convertedValue ;
     		
     		// set the property name
-    		Property annotation=fieldOrMethod.getAnnotation(Property.class);    		
     		if (isField())
         		propertyName=PropertyHelper.getPropertyName((Field)fieldOrMethod, properties) ;
     		else 
@@ -1277,7 +1270,7 @@ public class Configurator {
     		}
     		else if (!isField() && isParameterized) {
     			// the Method has several parameters (and so types)
-    			Type[] types = (Type[])((Method)fieldOrMethod).getGenericParameterTypes();
+    			Type[] types =((Method)fieldOrMethod).getGenericParameterTypes();
     			ParameterizedType mpt = (ParameterizedType) types[0] ;
     			this.baseType = mpt.getActualTypeArguments()[0] ;
     		}

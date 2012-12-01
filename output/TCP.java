@@ -3,7 +3,6 @@ package org.jgroups.protocols;
 
 import org.jgroups.Address;
 import org.jgroups.PhysicalAddress;
-import org.jgroups.Global;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.blocks.TCPConnectionMap;
@@ -53,7 +52,8 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
     }
 
     public void send(Address dest, byte[] data, int offset, int length) throws Exception {
-        ct.send(dest, data, offset, length);
+        if(ct != null)
+            ct.send(dest, data, offset, length);
     }
 
     public void retainAll(Collection<Address> members) {
@@ -65,9 +65,9 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
                               conn_expire_time,
                               bind_addr,
                               external_addr,
+                              external_port,
                               bind_port,
-                              bind_port+port_range
-                              );
+                              bind_port+port_range);
         ct.setReceiveBufferSize(recv_buf_size);      
         ct.setSendQueueSize(send_queue_size);
         ct.setUseSendQueues(use_send_queues);
@@ -122,20 +122,23 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
                                                    long connExpireTime,
                                                    InetAddress bindAddress,
                                                    InetAddress externalAddress,
+                                                   int external_port,
                                                    int startPort,
-                                                   int endPort
-    ) throws Exception {
+                                                   int endPort) throws Exception {
         TCPConnectionMap cTable;
         if(reaperInterval == 0 && connExpireTime == 0) {
-            cTable=new TCPConnectionMap(Global.TCP_SRV_SOCK,
+            cTable=new TCPConnectionMap("jgroups.tcp.srv_sock",
                                         getThreadFactory(),
                                         getSocketFactory(),
                                         this,
                                         bindAddress,
                                         externalAddress,
+                                        external_port,
                                         startPort,
-                                        endPort
-            );
+                                        endPort)
+              .clientBindAddress(client_bind_addr)
+              .clientBindPort(client_bind_port)
+              .deferClientBinding(defer_client_bind_addr);
         }
         else {
             if(reaperInterval == 0) {
@@ -148,17 +151,20 @@ public class TCP extends BasicTCP implements TCPConnectionMap.Receiver {
                 if(log.isWarnEnabled())
                     log.warn("conn_expire_time was 0, set it to " + connExpireTime);
             }
-            cTable=new TCPConnectionMap(Global.TCP_SRV_SOCK, 
+            cTable=new TCPConnectionMap("jgroups.tcp.srv_sock",
                                         getThreadFactory(),
                                         getSocketFactory(),
                                         this,
                                         bindAddress,
                                         externalAddress,
+                                        external_port,
                                         startPort,
                                         endPort,
                                         reaperInterval,
-                                        connExpireTime
-            );
+                                        connExpireTime)
+              .clientBindAddress(client_bind_addr)
+              .clientBindPort(client_bind_port)
+              .deferClientBinding(defer_client_bind_addr);
         }
 
         return cTable;

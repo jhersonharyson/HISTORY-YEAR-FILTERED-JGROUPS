@@ -495,6 +495,7 @@ public class ProtocolStack extends Protocol {
     public ProtocolStack addProtocol(Protocol prot) {
         if(prot == null)
             return this;
+        prot.setProtocolStack(this);
         prot.setUpProtocol(this);
         if(bottom_prot == null) {
             top_prot=bottom_prot=prot;
@@ -504,7 +505,6 @@ public class ProtocolStack extends Protocol {
         prot.setDownProtocol(top_prot);
         prot.getDownProtocol().setUpProtocol(prot);
         top_prot=prot;
-
         return this;
     }
 
@@ -555,7 +555,7 @@ public class ProtocolStack extends Protocol {
 
         Protocol neighbor=findProtocol(neighbor_prot);
         if(neighbor == null)
-            throw new IllegalArgumentException("protocol \"" + neighbor_prot + "\" not found in " + printProtocolSpec(false));
+            throw new IllegalArgumentException("protocol " + neighbor_prot + " not found in " + printProtocolSpec(false));
 
         if(position == ProtocolStack.BELOW && neighbor instanceof TP)
             throw new IllegalArgumentException("Cannot insert protocol " + prot.getName() + " below transport protocol");
@@ -681,8 +681,11 @@ public class ProtocolStack extends Protocol {
         if(protocols != null)
             for(Class cl: protocols) {
                 Protocol tmp=removeProtocol(cl);
-                if(tmp != null)
+                if(tmp != null) {
+                    tmp.stop();
+                    tmp.destroy();
                     retval=tmp;
+                }
             }
 
         return retval;
@@ -830,6 +833,8 @@ public class ProtocolStack extends Protocol {
         List<Protocol> protocols = getProtocols();
         Collections.reverse(protocols);
         for(Protocol prot: protocols) {
+            if(prot.getProtocolStack() == null)
+                prot.setProtocolStack(this);
             if(prot instanceof TP) {
                 TP transport=(TP)prot;
                 if(transport.isSingleton()) {
