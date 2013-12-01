@@ -1,13 +1,13 @@
 package org.jgroups.tests;
 
-import org.jgroups.Address;
 import org.jgroups.Message;
 import org.jgroups.Version;
+import org.jgroups.protocols.TP;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Util;
 
 import java.io.*;
-import java.util.LinkedList;
-import java.util.List;
+import java.util.Arrays;
 
 /**
  * Parses messages out of a captured file and writes them to stdout
@@ -53,16 +53,32 @@ public class ParseMessages {
                 boolean multicast=(flags & MULTICAST) == MULTICAST;
 
                 if(is_message_list) { // used if message bundling is enabled
-                    List<Message> msgs=readMessageList(dis);
-                    System.out.println(msgs.size() + " msgs: ");
+                    final MessageBatch[] batches=TP.readMessageBatch(dis,multicast);
+                    final MessageBatch batch=batches[0], oob_batch=batches[1],
+                      internal_batch_oob=batches[2], internal_batch=batches[3];
+                    int size=batch != null? batch.size() : 0;
+                    if(oob_batch != null)
+                        size+=oob_batch.size();
+                    if(internal_batch_oob != null)
+                        size+=internal_batch_oob.size();
+                    if(internal_batch != null)
+                        size+=internal_batch.size();
+
+                    System.out.println(size + " msgs: ");
+
                     int cnt=1;
-                    for(Message msg: msgs) {
-                        System.out.print("#" + cnt++ + ": ");
-                        print(msg, multicast);
+
+                    for(MessageBatch tmp: Arrays.asList(batch, oob_batch, internal_batch_oob, internal_batch)) {
+                        if(tmp != null) {
+                            for(Message msg: tmp) {
+                                System.out.print("#" + cnt++ + ": ");
+                                print(msg, multicast);
+                            }
+                        }
                     }
                 }
                 else {
-                    Message msg=readMessage(dis);
+                    Message msg=TP.readMessage(dis);
                     print(msg, multicast);
                 }
             }
@@ -79,27 +95,7 @@ public class ParseMessages {
         System.out.println(msg + ", hdrs: " + msg.printHeaders() + ", mcast: " + multicast);
     }
 
-    private static List<Message> readMessageList(DataInputStream in) throws Exception {
-        List<Message> list=new LinkedList<Message>();
-        Address dest=Util.readAddress(in);
-        Address src=Util.readAddress(in);
 
-        while(in.readBoolean()) {
-            Message msg=new Message(false);
-            msg.readFrom(in);
-            msg.setDest(dest);
-            if(msg.getSrc() == null)
-                msg.setSrc(src);
-            list.add(msg);
-        }
-        return list;
-    }
-
-    protected static Message readMessage(DataInputStream instream) throws Exception {
-        Message msg=new Message(false); // don't create headers, readFrom() will do this
-        msg.readFrom(instream);
-        return msg;
-    }
 
 
     public static void main(String[] args) throws FileNotFoundException {

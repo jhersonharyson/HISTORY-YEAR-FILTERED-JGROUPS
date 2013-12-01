@@ -5,12 +5,12 @@ import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.NakAckHeader2;
 import org.jgroups.stack.Protocol;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.MutableDigest;
 import org.jgroups.util.Util;
 import org.testng.annotations.Test;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -76,17 +76,36 @@ public class NAKACK_StressTest {
                 }
                 return null;
             }
+
+            public void up(MessageBatch batch) {
+                for(Message msg: batch) {
+                    delivered_msgs.incrementAndGet();
+                    NakAckHeader2 hdr=(NakAckHeader2)msg.getHeader(NAKACK_ID);
+                    if(hdr != null)
+                        delivered_msg_list.add(hdr.getSeqno());
+
+                    if(delivered_msgs.get() >= num_msgs) {
+                        lock.lock();
+                        try {
+                            all_msgs_delivered.signalAll();
+                        }
+                        finally {
+                            lock.unlock();
+                        }
+                    }
+                }
+            }
         });
 
         nak.setDiscardDeliveredMsgs(true);
         nak.down(new Event(Event.SET_LOCAL_ADDRESS, local_addr));
         nak.down(new Event(Event.BECOME_SERVER));
-        View view=new View(local_addr, 1, Arrays.asList(local_addr, sender));
+        View view=View.create(local_addr, 1, local_addr, sender);
         nak.down(new Event(Event.VIEW_CHANGE, view));
 
-        MutableDigest digest=new MutableDigest(10);
-        digest.add(local_addr, 0, 0);
-        digest.add(sender, 0, 0);
+        MutableDigest digest=new MutableDigest(view.getMembersRaw());
+        digest.set(local_addr,0,0);
+        digest.set(sender,0,0);
         nak.down(new Event(Event.SET_DIGEST, digest));
 
         final CountDownLatch latch=new CountDownLatch(1);
@@ -99,9 +118,10 @@ public class NAKACK_StressTest {
         long start=System.currentTimeMillis();
         latch.countDown(); // starts all adders
 
+        int max_tries=30;
         lock.lock();
         try {
-            while(delivered_msgs.get() < num_msgs) {
+            while(delivered_msgs.get() < num_msgs && max_tries-- > 0) {
                 try {
                     all_msgs_delivered.await(1000, TimeUnit.MILLISECONDS);
                     System.out.println("received " + delivered_msgs.get() + " msgs");
@@ -134,7 +154,7 @@ public class NAKACK_StressTest {
         System.out.println("Checking results consistency");
         int i=1;
         for(Long num: results) {
-            if(num.longValue() != i) {
+            if(num != i) {
                 assert i == num : "expected " + i + " but got " + num;
                 return;
             }
@@ -148,18 +168,18 @@ public class NAKACK_StressTest {
         NakAckHeader2 hdr=NakAckHeader2.createMessageHeader(seqno) ;
         msg.putHeader(NAKACK_ID, hdr);
         if(oob)
-            msg.setFlag(Message.OOB);
+            msg.setFlag(Message.Flag.OOB);
         return msg;
     }
 
 
     static class Sender extends Thread {
-        final NAKACK2 nak;
+        final NAKACK2        nak;
         final CountDownLatch latch;
-        final AtomicInteger num_msgs;
-        final AtomicLong current_seqno;
-        final boolean oob;
-        final Address sender;
+        final AtomicInteger  num_msgs;
+        final AtomicLong     current_seqno;
+        final boolean        oob;
+        final Address        sender;
 
         public Sender(NAKACK2 nak, CountDownLatch latch, AtomicInteger num_msgs, AtomicLong current_seqno,
                       boolean oob, final Address sender) {
@@ -190,29 +210,4 @@ public class NAKACK_StressTest {
         }
     }
 
-
-    /*@Test(enabled=false)
-    public static void main(String[] args) {
-        int num_threads=10;
-        int num_msgs=1000000;
-        boolean oob=false;
-
-        for(int i=0; i < args.length; i++) {
-            if(args[i].equals("-num_threads")) {
-                num_threads=Integer.parseInt(args[++i]);
-                continue;
-            }
-            if(args[i].equals("-num_msgs")) {
-                num_msgs=Integer.parseInt(args[++i]);
-                continue;
-            }
-            if(args[i].equals("-oob")) {
-                oob=Boolean.parseBoolean(args[++i]);
-                continue;
-            }
-            System.out.println("NAKACK_StressTest [-num_msgs msgs] [-num_threads threads] [-oob <true | false>]");
-            return;
-        }
-        start(num_threads, num_msgs, oob);
-    }*/
 }

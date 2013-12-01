@@ -9,10 +9,7 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.ExposedByteArrayOutputStream;
-import org.jgroups.util.ExposedDataOutputStream;
-import org.jgroups.util.Util;
-import org.jgroups.util.ExposedByteArrayInputStream;
+import org.jgroups.util.*;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -86,7 +83,6 @@ public class FRAG extends Protocol {
         super.init();
         Map<String,Object> info=new HashMap<String,Object>(1);
         info.put("frag_size", frag_size);
-        up_prot.up(new Event(Event.CONFIG, info));
         down_prot.down(new Event(Event.CONFIG, info));
     }
 
@@ -121,12 +117,6 @@ public class FRAG extends Protocol {
             case Event.VIEW_CHANGE:
                 handleViewChange((View)evt.getArg());
                 break;
-
-            case Event.CONFIG:
-                Object ret=down_prot.down(evt);
-                if(log.isDebugEnabled()) log.debug("received CONFIG event: " + evt.getArg());
-                handleConfigEvent((Map<String,Object>)evt.getArg());
-                return ret;
         }
 
         return down_prot.down(evt);  // Pass on to the layer below us
@@ -138,12 +128,13 @@ public class FRAG extends Protocol {
      */
     public Object up(Event evt) {
         switch(evt.getType()) {
-
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
                 FragHeader hdr=(FragHeader)msg.getHeader(this.id);
                 if(hdr != null) { // needs to be defragmented
-                    unfragment(msg, hdr); // Unfragment and possibly pass up
+                    Message assembled_msg=unfragment(msg, hdr);
+                    if(assembled_msg != null)
+                        up_prot.up(new Event(Event.MSG, assembled_msg));
                     return null;
                 }
                 else {
@@ -154,15 +145,26 @@ public class FRAG extends Protocol {
             case Event.VIEW_CHANGE:
                 handleViewChange((View)evt.getArg());
                 break;
-
-            case Event.CONFIG:
-                Object ret=up_prot.up(evt);
-                if(log.isDebugEnabled()) log.debug("received CONFIG event: " + evt.getArg());
-                handleConfigEvent((Map<String,Object>)evt.getArg());
-                return ret;
         }
 
         return up_prot.up(evt); // Pass up to the layer above us by default
+    }
+
+    public void up(MessageBatch batch) {
+        for(Message msg: batch) {
+            FragHeader hdr=(FragHeader)msg.getHeader(this.id);
+            if(hdr != null) { // needs to be defragmented
+                Message assembled_msg=unfragment(msg,hdr);
+                if(assembled_msg != null)
+                    // the reassembled msg has to be add in the right place (https://issues.jboss.org/browse/JGRP-1648),
+                    // and canot be added to the tail of the batch !
+                    batch.replace(msg, assembled_msg);
+                else
+                    batch.remove(msg);
+            }
+        }
+        if(!batch.isEmpty())
+            up_prot.up(batch);
     }
 
 
@@ -237,7 +239,7 @@ public class FRAG extends Protocol {
      * 4. Set headers and buffer in msg
      * 5. Pass msg up the stack
      */
-    private void unfragment(Message msg, FragHeader hdr) {
+    private Message unfragment(Message msg, FragHeader hdr) {
         Address            sender=msg.getSrc();
         FragmentationTable frag_table=fragment_list.get(sender);
         if(frag_table == null) {
@@ -251,33 +253,26 @@ public class FRAG extends Protocol {
         }
         num_received_frags++;
         byte[] buf=frag_table.add(hdr.id, hdr.frag_id, hdr.num_frags, msg.getBuffer());
-        if(buf != null) {
-            DataInputStream in=null;
-            try {
-                ByteArrayInputStream bis=new ExposedByteArrayInputStream(buf);
-                in=new DataInputStream(bis);
-                Message assembled_msg=new Message(false);
-                assembled_msg.readFrom(in);
-                assembled_msg.setSrc(sender); // needed ? YES, because fragments have a null src !!
-                if(log.isTraceEnabled()) log.trace("assembled_msg is " + assembled_msg);
-                num_received_msgs++;
-                up_prot.up(new Event(Event.MSG, assembled_msg));
-            }
-            catch(Exception e) {
-                log.error("failed unfragmenting a message", e);
-            }
-            finally {
-                Util.close(in);
-            }
+        if(buf == null)
+            return null;
+
+        DataInputStream in=null;
+        try {
+            ByteArrayInputStream bis=new ExposedByteArrayInputStream(buf);
+            in=new DataInputStream(bis);
+            Message assembled_msg=new Message(false);
+            assembled_msg.readFrom(in);
+            assembled_msg.setSrc(sender); // needed ? YES, because fragments have a null src !!
+            if(log.isTraceEnabled()) log.trace("assembled_msg is " + assembled_msg);
+            num_received_msgs++;
+            return assembled_msg;
         }
-    }
-
-
-    void handleConfigEvent(Map<String,Object> map) {
-        if(map == null) return;
-        if(map.containsKey("frag_size")) {
-            frag_size=((Integer)map.get("frag_size")).intValue();
-            if(log.isDebugEnabled()) log.debug("setting frag_size=" + frag_size);
+        catch(Exception e) {
+            log.error("failed unfragmenting a message", e);
+            return null;
+        }
+        finally {
+            Util.close(in);
         }
     }
 
@@ -400,7 +395,7 @@ public class FRAG extends Protocol {
     static class FragmentationTable {
         private final Address sender;
         /* the hashtable that holds the fragmentation entries for this sender*/
-        private final Hashtable<Long,FragEntry> h=new Hashtable<Long,FragEntry>(11);  // keys: frag_ids, vals: Entrys
+        private final Map<Long,FragEntry> table=new HashMap<Long,FragEntry>(11);  // keys: frag_ids, vals: Entrys
 
 
         FragmentationTable(Address sender) {
@@ -493,10 +488,8 @@ public class FRAG extends Protocol {
 
 
         /**
-         * Creates a new entry if not yet present. Adds the fragment.
-         * If all fragements for a given message have been received,
-         * an entire message is reassembled and returned.
-         * Otherwise null is returned.
+         * Creates a new entry if not yet present. Adds the fragment. If all fragements for a given message have been
+         * received, an entire message is reassembled and returned. Otherwise null is returned.
          *
          * @param id        - the message ID, unique for a sender
          * @param frag_id   the index of this fragmentation (0..tot_frags-1)
@@ -504,39 +497,30 @@ public class FRAG extends Protocol {
          * @param fragment  - the byte buffer for this fragment
          */
         public synchronized byte[] add(long id, int frag_id, int tot_frags, byte[] fragment) {
+            byte[] retval=null; // initialize the return value to default not complete
 
-            /*initialize the return value to default not complete */
-            byte[] retval=null;
-
-            FragEntry e=h.get(new Long(id));
-
+            FragEntry e=table.get(id);
             if(e == null) {   // Create new entry if not yet present
                 e=new FragEntry(id, tot_frags);
-                h.put(new Long(id), e);
+                table.put(id,e);
             }
 
             e.set(frag_id, fragment);
             if(e.isComplete()) {
                 retval=e.assembleBuffer();
-                h.remove(new Long(id));
+                table.remove(id);
             }
-
             return retval;
         }
 
-        public void reset() {
-        }
 
         public String toString() {
             StringBuilder buf=new StringBuilder("Fragmentation Table Sender:").append(sender).append("\n\t");
-            Enumeration<FragEntry> e=this.h.elements();
-            while(e.hasMoreElements()) {
-                FragEntry entry=e.nextElement();
+            for(FragEntry entry: table.values()) {
                 int count=0;
                 for(int i=0; i < entry.fragments.length; i++) {
-                    if(entry.fragments[i] != null) {
+                    if(entry.fragments[i] != null)
                         count++;
-                    }
                 }
                 buf.append("Message ID:").append(entry.msg_id).append("\n\t");
                 buf.append("Total Frags:").append(entry.tot_frags).append("\n\t");

@@ -77,7 +77,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
      */
     public void handleJoinResponse(JoinRsp join_rsp) {
         View v=join_rsp.getView();
-        ViewId tmp_vid=v != null? v.getVid() : null;
+        ViewId tmp_vid=v != null? v.getViewId() : null;
         ViewId my_view=gms.getViewId();
         if(tmp_vid != null && my_view != null && tmp_vid.compareToIDs(my_view) > 0) {
             Digest d=join_rsp.getDigest();
@@ -106,22 +106,19 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
 
     public void handleMembershipChange(Collection<Request> requests) {
         Collection<Address> suspectedMembers=new LinkedHashSet<Address>(requests.size());
-        for(Request req: requests) {
+        for(Request req: requests)
             if(req.type == Request.SUSPECT)
                 suspectedMembers.add(req.mbr);
-        }
 
         if(suspectedMembers.isEmpty())
             return;
 
-        for(Address mbr: suspectedMembers) {
+        for(Address mbr: suspectedMembers)
             if(!suspected_mbrs.contains(mbr))
                 suspected_mbrs.add(mbr);
-        }
 
         if(wouldIBeCoordinator()) {
-            if(log.isDebugEnabled())
-                log.debug(gms.local_addr + ": members are " + gms.members + ", coord=" + gms.local_addr + ": I'm the new coord !");
+            log.debug("%s: members are %s, coord=%s: I'm the new coord !", gms.local_addr, gms.members, gms.local_addr);
 
             gms.becomeCoordinator();
             for(Address mbr: suspected_mbrs) {
@@ -141,11 +138,9 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
      *                 be set by GMS
      */
     public void handleViewChange(View new_view, Digest digest) {
-        List<Address> mbrs=new_view.getMembers();
         suspected_mbrs.clear();
-        if(leaving && !mbrs.contains(gms.local_addr)) { // received a view in which I'm not member: ignore
+        if(leaving && !new_view.containsMember(gms.local_addr)) // received a view in which I'm not member: ignore
             return;
-        }
         gms.installView(new_view, digest);
     }
 
@@ -162,21 +157,16 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
      * local_addr. Therefore, true is returned.
      */
     boolean wouldIBeCoordinator() {
-        Address new_coord;
-        List<Address> mbrs=gms.members.getMembers(); // getMembers() returns a *copy* of the membership vector
-        mbrs.removeAll(suspected_mbrs);
+        List<Address> mbrs=gms.computeNewMembership(gms.members.getMembers(), null, null, suspected_mbrs);
         if(mbrs.size() < 1) return false;
-        new_coord=mbrs.get(0);
+        Address new_coord=mbrs.get(0);
         return gms.local_addr.equals(new_coord);
     }
 
 
     void sendLeaveMessage(Address coord, Address mbr) {
-        Message msg=new Message(coord, null, null);
-        msg.setFlag(Message.OOB);
-        GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.LEAVE_REQ, mbr);
-
-        msg.putHeader(gms.getId(), hdr);
+        Message msg=new Message(coord).setFlag(Message.Flag.OOB)
+          .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.LEAVE_REQ, mbr));
         gms.getDownProtocol().down(new Event(Event.MSG, msg));
     }
 

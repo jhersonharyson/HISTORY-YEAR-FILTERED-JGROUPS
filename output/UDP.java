@@ -9,6 +9,7 @@ import org.jgroups.util.Util;
 
 import java.io.IOException;
 import java.net.*;
+import java.util.Formatter;
 import java.util.List;
 import java.util.Map;
 
@@ -115,6 +116,12 @@ public class UDP extends TP {
     /** Runnable to receive unicast packets */
     protected PacketReceiver  ucast_receiver=null;
 
+    protected static final boolean is_android;
+
+    static  {
+        is_android=Util.checkForAndroid();
+    }
+
 
     /**
      * Usually, src addresses are nulled, and the receiver simply sets them to
@@ -193,7 +200,6 @@ public class UDP extends TP {
                     }
                     // solve reconnection issue with Windows (https://jira.jboss.org/browse/JGRP-1254)
                     catch(NoRouteToHostException e) {
-                        log.warn(e.getMessage() +", reset interface");
                         mcast_sock.setInterface(mcast_sock.getInterface());
                     }
                 }
@@ -335,7 +341,7 @@ public class UDP extends TP {
                 sock.setTrafficClass(tos);
             }
             catch(SocketException e) {
-                log.warn("traffic class of " + tos + " could not be set, will be ignored: " + e);
+                log.warn(Util.getMessage("TrafficClass"), tos, e);
             }
         }
 
@@ -368,7 +374,7 @@ public class UDP extends TP {
                     mcast_sock.setTrafficClass(tos);
                 }
                 catch(SocketException e) {
-                    log.warn("traffic class of " + tos + " could not be set, will be ignored: " + e);
+                    log.warn(Util.getMessage("TrafficClass"), tos, e);
                 }
             }
 
@@ -388,7 +394,8 @@ public class UDP extends TP {
         }
 
         setBufferSizes();
-        if(log.isDebugEnabled()) log.debug("socket information:\n" + dumpSocketInfo());
+        if(log.isDebugEnabled())
+            log.debug("socket information:\n" + dumpSocketInfo());
     }
 
 
@@ -424,17 +431,16 @@ public class UDP extends TP {
                                   MulticastSocket s,
                                   InetAddress mcastAddr) {
         SocketAddress tmp_mcast_addr=new InetSocketAddress(mcastAddr, mcast_port);
-        for(NetworkInterface intf:interfaces) {
+        for(NetworkInterface intf: interfaces) {
 
             //[ JGRP-680] - receive_on_all_interfaces requires every NIC to be configured
             try {
                 s.joinGroup(tmp_mcast_addr, intf);
-                if(log.isTraceEnabled())
-                    log.trace("joined " + tmp_mcast_addr + " on " + intf.getName());
+                log.trace("joined %s on %s", tmp_mcast_addr, intf.getName());
             }
             catch(IOException e) {
                 if(log.isWarnEnabled())
-                    log.warn("Could not join " + tmp_mcast_addr + " on interface " + intf.getName());
+                    log.warn(Util.getMessage("InterfaceJoinFailed"), tmp_mcast_addr, intf.getName());
             }
         }
     }
@@ -498,23 +504,18 @@ public class UDP extends TP {
 
     protected String dumpSocketInfo() throws Exception {
         StringBuilder sb=new StringBuilder(128);
-        sb.append(", mcast_addr=").append(mcast_addr);
-        sb.append(", bind_addr=").append(bind_addr);
-        sb.append(", ttl=").append(ip_ttl);
+        Formatter formatter=new Formatter(sb);
+        formatter.format("mcast_addr=%s, bind_addr=%s, ttl=%d", mcast_addr, bind_addr, ip_ttl);
 
-        if(sock != null) {
-            sb.append("\nsock: bound to ");
-            sb.append(sock.getLocalAddress().getHostAddress()).append(':').append(sock.getLocalPort());
-            sb.append(", receive buffer size=").append(sock.getReceiveBufferSize());
-            sb.append(", send buffer size=").append(sock.getSendBufferSize());
-        }
+        if(sock != null)
+            formatter.format("\nsock: bound to %s:%d, receive buffer size=%d, send buffer size=%d",
+                             sock.getLocalAddress().getHostAddress(), sock.getLocalPort(),
+                             sock.getReceiveBufferSize(), sock.getSendBufferSize());
 
-        if(mcast_sock != null) {
-            sb.append("\nmcast_sock: bound to ");
-            sb.append(mcast_sock.getInterface().getHostAddress()).append(':').append(mcast_sock.getLocalPort());
-            sb.append(", send buffer size=").append(mcast_sock.getSendBufferSize());
-            sb.append(", receive buffer size=").append(mcast_sock.getReceiveBufferSize());
-        }
+        if(mcast_sock != null)
+            formatter.format("\nmcast_sock: bound to %s:%d, send buffer size=%d, receive buffer size=%d",
+                             mcast_sock.getInterface().getHostAddress(), mcast_sock.getLocalPort(),
+                             mcast_sock.getSendBufferSize(), mcast_sock.getReceiveBufferSize());
         return sb.toString();
     }
 
@@ -532,24 +533,24 @@ public class UDP extends TP {
             sock.setSendBufferSize(send_buf_size);
             int actual_size=sock.getSendBufferSize();
             if(actual_size < send_buf_size && log.isWarnEnabled()) {
-                log.warn(Util.getMessage("IncorrectBufferSize", "send", sock.getClass().getSimpleName(),
-                                         Util.printBytes(send_buf_size), Util.printBytes(actual_size), "send", "net.core.wmem_max"));
+                log.warn(Util.getMessage("IncorrectBufferSize"), "send", sock.getClass().getSimpleName(),
+                                         Util.printBytes(send_buf_size), Util.printBytes(actual_size), "send", "net.core.wmem_max");
             }
         }
         catch(Throwable ex) {
-            if(log.isWarnEnabled()) log.warn("failed setting send buffer size of " + send_buf_size + " in " + sock + ": " + ex);
+            log.warn(Util.getMessage("BufferSizeFailed"), "send", send_buf_size, sock, ex);
         }
 
         try {
             sock.setReceiveBufferSize(recv_buf_size);
             int actual_size=sock.getReceiveBufferSize();
             if(actual_size < recv_buf_size && log.isWarnEnabled()) {
-                log.warn(Util.getMessage("IncorrectBufferSize", "receive", sock.getClass().getSimpleName(),
-                                         Util.printBytes(recv_buf_size), Util.printBytes(actual_size), "receive", "net.core.rmem_max"));
+                log.warn(Util.getMessage("IncorrectBufferSize"), "receive", sock.getClass().getSimpleName(),
+                                         Util.printBytes(recv_buf_size), Util.printBytes(actual_size), "receive", "net.core.rmem_max");
             }
         }
         catch(Throwable ex) {
-            if(log.isWarnEnabled()) log.warn("failed setting receive buffer size of " + recv_buf_size + " in " + sock + ": " + ex);
+            log.warn(Util.getMessage("BufferSizeFailed"), "receive", recv_buf_size, sock, ex);
         }
     }
 
@@ -594,7 +595,8 @@ public class UDP extends TP {
     void stopThreads() {
         if(mcast_receiver != null)
             mcast_receiver.stop();
-        ucast_receiver.stop();
+        if(ucast_receiver != null)
+            ucast_receiver.stop();
     }
 
 
@@ -603,12 +605,12 @@ public class UDP extends TP {
         if(map == null) return;
 
         if(map.containsKey("send_buf_size")) {
-            mcast_send_buf_size=((Integer)map.get("send_buf_size")).intValue();
+            mcast_send_buf_size=(Integer)map.get("send_buf_size");
             ucast_send_buf_size=mcast_send_buf_size;
             set_buffers=true;
         }
         if(map.containsKey("recv_buf_size")) {
-            mcast_recv_buf_size=((Integer)map.get("recv_buf_size")).intValue();
+            mcast_recv_buf_size=(Integer)map.get("recv_buf_size");
             ucast_recv_buf_size=mcast_recv_buf_size;
             set_buffers=true;
         }
@@ -673,6 +675,11 @@ public class UDP extends TP {
 
             while(thread != null && Thread.currentThread().equals(thread)) {
                 try {
+
+                    // solves Android ISSUE #24748 - DatagramPacket truncated UDP in ICS
+                    if(is_android)
+                        packet.setLength(receive_buf.length);
+
                     receiver_socket.receive(packet);
                     int len=packet.getLength();
                     if(len > receive_buf.length) {
@@ -688,8 +695,11 @@ public class UDP extends TP {
                             len);
                 }
                 catch(SocketException sock_ex) {
-                    if(log.isDebugEnabled()) log.debug("receiver socket is closed, exception=" + sock_ex);
-                    break;
+                    if(receiver_socket.isClosed()) {
+                        if(log.isDebugEnabled()) log.debug("receiver socket is closed, exception=" + sock_ex);
+                        break;
+                    }
+                    log.error("failed receiving packet", sock_ex);
                 }
                 catch(Throwable ex) {
                     if(log.isErrorEnabled())

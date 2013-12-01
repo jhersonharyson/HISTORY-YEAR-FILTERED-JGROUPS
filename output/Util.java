@@ -10,6 +10,8 @@ import org.jgroups.logging.Log;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.FLUSH;
 import org.jgroups.protocols.pbcast.GMS;
+import org.jgroups.protocols.pbcast.NAKACK2;
+import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.protocols.relay.SiteMaster;
 import org.jgroups.protocols.relay.SiteUUID;
 import org.jgroups.stack.IpAddress;
@@ -31,7 +33,6 @@ import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.text.MessageFormat;
 import java.text.NumberFormat;
 import java.util.*;
 import java.util.concurrent.*;
@@ -81,7 +82,9 @@ public class Util {
      * reduces the amount of log data */
     public static int MAX_LIST_PRINT_SIZE=20;
 
-    
+    public static final Class<?>[] getUnicastProtocols() {
+        return new Class<?>[]{UNICAST.class, UNICAST2.class, UNICAST3.class};
+    }
 
     public static enum AddressScope {GLOBAL, SITE_LOCAL, LINK_LOCAL, LOOPBACK, NON_LOOPBACK};
 
@@ -205,6 +208,13 @@ public class Util {
     }
 
 
+    public static int getNextHigherPowerOfTwo(int num) {
+       if (num <= 0) return 1;
+       int highestBit = Integer.highestOneBit(num);
+       return num <= highestBit ? highestBit : highestBit << 1;
+    }
+
+
     public static String bold(String msg) {
         StringBuilder sb=new StringBuilder("\033[1m");
         sb.append(msg).append("\033[0m");
@@ -215,9 +225,28 @@ public class Util {
         return key != null? resource_bundle.getString(key) : null;
     }
 
-    public static String getMessage(String key, Object ... args) {
-        String msg=getMessage(key);
-        return msg != null? MessageFormat.format(msg, args) : null;
+
+    /**
+     * Returns a default stack for testing with transport = SHARED_LOOPBACK
+     * @param additional_protocols Any number of protocols to add to the top of the returned protocol list
+     * @return
+     */
+    public static Protocol[] getTestStack(Protocol ... additional_protocols) {
+        Protocol[] protocols={
+          new SHARED_LOOPBACK(),
+          new PING().timeout(1000),
+          new NAKACK2(),
+          new UNICAST3(),
+          new STABLE(),
+          new GMS(),
+          new FRAG2().fragSize(8000),
+        };
+
+        if(additional_protocols == null)
+            return protocols;
+        Protocol[] tmp=Arrays.copyOf(protocols, protocols.length + additional_protocols.length);
+        System.arraycopy(additional_protocols, 0, tmp, protocols.length, additional_protocols.length);
+        return tmp;
     }
 
 
@@ -259,6 +288,27 @@ public class Util {
     }
 
 
+    /**
+     * Waits until a list has the expected number of elements. Throws an exception if not met
+     * @param list The list
+     * @param expected_size The expected size
+     * @param timeout The time to wait (in ms)
+     * @param interval The interval at which to get the size of the list (in ms)
+     * @param <T> The type of the list
+     */
+    public static <T> void waitUntilListHasSize(List<T> list, int expected_size, long timeout, long interval) {
+        if(list == null)
+            throw new IllegalStateException("list is null");
+        long target_time=System.currentTimeMillis() + timeout;
+        while(System.currentTimeMillis() < target_time) {
+            if(list.size() == expected_size)
+                break;
+            Util.sleep(interval);
+        }
+        assert list.size() == expected_size : "list doesn't have the expected (" + expected_size + ") elements: " + list;
+    }
+
+
     public static void addFlush(Channel ch, FLUSH flush) {
         if(ch == null || flush == null)
             throw new IllegalArgumentException("ch and flush have to be non-null");
@@ -270,7 +320,7 @@ public class Util {
     public static void setScope(Message msg, short scope) {
         SCOPE.ScopeHeader hdr=SCOPE.ScopeHeader.createMessageHeader(scope);
         msg.putHeader(Global.SCOPE_ID, hdr);
-        msg.setFlag(Message.SCOPED);
+        msg.setFlag(Message.Flag.SCOPED);
     }
 
     public static short getScope(Message msg) {
@@ -291,16 +341,16 @@ public class Util {
       return baos.toByteArray();
    }
    
-   public static byte[] createDigest(String passcode, long t1, double q1)
-            throws IOException, NoSuchAlgorithmException {
-      MessageDigest md = MessageDigest.getInstance("SHA");
-      md.update(passcode.getBytes());
-      ByteBuffer bb = ByteBuffer.allocate(16); //8 bytes for long and double each
-      bb.putLong(t1);
-      bb.putDouble(q1);
-      md.update(bb);
-      return md.digest();      
-   }
+    public static byte[] createDigest(String passcode, long t1, double q1)
+      throws IOException, NoSuchAlgorithmException {
+        MessageDigest md = MessageDigest.getInstance("SHA");
+        md.update(passcode.getBytes());
+        ByteBuffer bb = ByteBuffer.allocate(16); //8 bytes for long and double each
+        bb.putLong(t1);
+        bb.putDouble(q1);
+        md.update(bb);
+        return md.digest();
+    }
 
     /**
      * Utility method. If the dest address is IPv6, convert scoped link-local addrs into unscoped ones
@@ -370,6 +420,11 @@ public class Util {
         }
     }
 
+    public static void close(Connection ... conns) {
+        for(Connection conn: conns)
+            close(conn);
+    }
+
     /** Drops messages to/from other members and then closes the channel. Note that this member won't get excluded from
      * the view until failure detection has kicked in and the new coord installed the new view */
     public static void shutdown(Channel ch) throws Exception {
@@ -381,7 +436,7 @@ public class Util {
         stack.insertProtocol(discard,  ProtocolStack.ABOVE, transport.getClass());
         
         //abruptly shutdown FD_SOCK just as in real life when member gets killed non gracefully
-        FD_SOCK fd = (FD_SOCK) ch.getProtocolStack().findProtocol("FD_SOCK");
+        FD_SOCK fd = (FD_SOCK) ch.getProtocolStack().findProtocol(FD_SOCK.class);
         if(fd != null)
             fd.stopServerSocket(false);
         
@@ -689,8 +744,6 @@ public class Util {
     }
 
 
-
-
     public static Streamable streamableFromByteBuffer(Class<? extends Streamable> cl, byte[] buffer) throws Exception {
         if(buffer == null) return null;
         Streamable retval=null;
@@ -703,16 +756,27 @@ public class Util {
     }
 
 
-    public static Streamable streamableFromByteBuffer(Class<? extends Streamable> cl, byte[] buffer, int offset, int length) throws Exception {
+    public static <T extends Streamable> Streamable streamableFromByteBuffer(Class<T> cl, byte[] buffer, int offset, int length) throws Exception {
         if(buffer == null) return null;
-        Streamable retval=null;
         ByteArrayInputStream in_stream=new ExposedByteArrayInputStream(buffer, offset, length);
         DataInputStream in=new DataInputStream(in_stream); // changed Nov 29 2004 (bela)
-        retval=cl.newInstance();
+        T retval=cl.newInstance();
         retval.readFrom(in);
         in.close();
         return retval;
     }
+
+
+    public static <T extends Streamable> T streamableFromBuffer(Class<T> clazz, byte[] buffer, int offset, int length) throws Exception {
+        ByteArrayInputStream in_stream=new ExposedByteArrayInputStream(buffer, offset, length);
+        DataInputStream in=new DataInputStream(in_stream); // changed Nov 29 2004 (bela)
+        return (T)Util.readStreamable(clazz,in);
+    }
+
+    public static <T extends Streamable> T streamableFromBuffer(Class<T> clazz, byte[] buffer) throws Exception {
+        return streamableFromBuffer(clazz,buffer,0,buffer.length);
+    }
+
 
     public static byte[] streamableToByteBuffer(Streamable obj) throws Exception {
         byte[] result=null;
@@ -722,6 +786,18 @@ public class Util {
         result=out_stream.toByteArray();
         out.close();
         return result;
+    }
+
+    public static Buffer streamableToBuffer(Streamable obj) {
+        final ExposedByteArrayOutputStream out_stream=new ExposedByteArrayOutputStream(512);
+        DataOutputStream out=new ExposedDataOutputStream(out_stream);
+        try {
+            Util.writeStreamable(obj,out);
+            return out_stream.getBuffer();
+        }
+        catch(Exception ex) {
+            return null;
+        }
     }
 
 
@@ -860,16 +936,22 @@ public class Util {
 
     public static int size(Address addr) {
         int retval=Global.BYTE_SIZE; // flags
-        if(addr != null) {
-            if(addr instanceof UUID || addr instanceof IpAddress)
-                retval+=addr.size();
-            else {
-                retval+=Global.SHORT_SIZE; // magic number
-                retval+=addr.size();
-            }
+        if(addr == null)
+            return retval;
+
+        if(addr instanceof UUID) {
+            Class<? extends Address> clazz=addr.getClass();
+            if(clazz.equals(UUID.class) || clazz.equals(SiteUUID.class) || clazz.equals(SiteMaster.class))
+                return retval+addr.size();
         }
+        if(addr instanceof IpAddress)
+            return retval+addr.size();
+
+        retval+=Global.SHORT_SIZE; // magic number
+        retval+=addr.size();
         return retval;
     }
+
 
     public static int size(View view) {
         int retval=Global.BYTE_SIZE; // presence
@@ -921,7 +1003,7 @@ public class Util {
     }
 
     /**
-     * Writes a Vector of Addresses. Can contain 65K addresses at most
+     * Writes a list of Addresses. Can contain 65K addresses at most
      *
      * @param v A Collection<Address>
      * @param out
@@ -936,6 +1018,16 @@ public class Util {
         for(Address addr: v) {
             Util.writeAddress(addr, out);
         }
+    }
+
+    public static void writeAddresses(final Address[] addrs, DataOutput out) throws Exception {
+        if(addrs == null) {
+            out.writeShort(-1);
+            return;
+        }
+        out.writeShort(addrs.length);
+        for(Address addr: addrs)
+            Util.writeAddress(addr, out);
     }
 
     /**
@@ -959,6 +1051,18 @@ public class Util {
     }
 
 
+    public static Address[] readAddresses(DataInput in) throws Exception {
+        short length=in.readShort();
+        if(length < 0) return null;
+        Address[] retval=new Address[length];
+        for(int i=0; i < length; i++) {
+            Address addr=Util.readAddress(in);
+            retval[i]=addr;
+        }
+        return retval;
+    }
+
+
     /**
      * Returns the marshalled size of a Collection of Addresses.
      * <em>Assumes elements are of the same type !</em>
@@ -974,7 +1078,13 @@ public class Util {
         return retval;
     }
 
-
+    public static long size(Address[] addrs) {
+        int retval=Global.SHORT_SIZE; // number of elements
+        if(addrs != null)
+            for(Address addr: addrs)
+                retval+=Util.size(addr);
+        return retval;
+    }
 
 
     public static void writeStreamable(Streamable obj, DataOutput out) throws Exception {
@@ -1044,8 +1154,6 @@ public class Util {
         else {
             classname=in.readUTF();
             clazz=ClassConfigurator.get(classname);
-            if (clazz==null)
-                throw new ClassNotFoundException(classname);
         }
 
         retval=(Streamable)clazz.newInstance();
@@ -1078,8 +1186,6 @@ public class Util {
         else {
             String classname=in.readUTF();
             clazz=ClassConfigurator.get(classname);
-            if(clazz == null)
-                throw new ClassNotFoundException(classname);
         }
 
         return clazz;
@@ -1371,6 +1477,18 @@ public class Util {
                 return false;
         }
         return true;
+    }
+
+
+    public static boolean patternMatch(String pattern, String str) {
+        Pattern pat=Pattern.compile(pattern);
+        Matcher matcher=pat.matcher(str);
+        return matcher.matches();
+    }
+
+    public static void main(String[] args) {
+        boolean result=patternMatch(args[0],args[1]);
+        System.out.println(args[1] + " matches " + args[0] + ": " + result);
     }
 
 
@@ -1996,6 +2114,11 @@ public class Util {
     }
 
 
+    public static short makeShort(byte[] buf, int offset) {
+        byte c1=buf[offset], c2=buf[offset+1];
+        return  (short)((c1 << 8) + (c2 << 0));
+    }
+
     static long makeLong(byte[] buf, int offset, int len) {
         long retval=0;
         for(int i=0; i < len; i++) {
@@ -2051,6 +2174,20 @@ public class Util {
         if(number >>  8 != 0) return 2;
         if(number != 0) return 1;
         return 1;
+    }
+
+    /** Returns true if all elements in the collection are the same */
+    public static <T> boolean allEqual(Collection<T> elements) {
+        if(elements.isEmpty())
+            return false;
+        Iterator<T> it=elements.iterator();
+        T first=it.next();
+        while(it.hasNext()) {
+            T el=it.next();
+            if(!el.equals(first))
+                return false;
+        }
+        return true;
     }
 
     public static byte size(long number) {
@@ -2140,16 +2277,33 @@ public class Util {
         StringBuilder sb=new StringBuilder();
         int count=0, size=list.size();
         for(T el: list) {
-            if(first) {
+            if(first)
                 first=false;
-            }
-            else {
+            else
                 sb.append(delimiter);
-            }
             sb.append(el);
             if(limit > 0 && ++count >= limit) {
                 if(size > count)
-                    sb.append(" ...");
+                    sb.append(" ..."); // .append(list.size()).append("...");
+                break;
+            }
+        }
+        return sb.toString();
+    }
+
+    public static <T> String printListWithDelimiter(T[] list, String delimiter, int limit) {
+        boolean first=true;
+        StringBuilder sb=new StringBuilder();
+        int count=0, size=list.length;
+        for(T el: list) {
+            if(first)
+                first=false;
+            else
+                sb.append(delimiter);
+            sb.append(el);
+            if(limit > 0 && ++count >= limit) {
+                if(size > count)
+                    sb.append(" ..."); // .append(list.length).append("...");
                 break;
             }
         }
@@ -2234,19 +2388,6 @@ public class Util {
         return true;
     }
 
-    /**
-     * Returns a list of members which left from view one to two
-     * @param one
-     * @param two
-     * @return
-     */
-    public static List<Address> leftMembers(View one, View two) {
-        if(one == null || two == null)
-            return null;
-        List<Address> retval=new ArrayList<Address>(one.getMembers());
-        retval.removeAll(two.getMembers());
-        return retval;
-    }
 
     public static List<Address> leftMembers(Collection<Address> old_list, Collection<Address> new_list) {
         if(old_list == null || new_list == null)
@@ -2308,19 +2449,29 @@ public class Util {
 
     public static boolean containsViewId(Collection<View> views, ViewId vid) {
         for(View view: views) {
-            ViewId tmp=view.getVid();
+            ViewId tmp=view.getViewId();
             if(tmp.equals(vid))
                 return true;
         }
         return false;
     }
 
+    public static boolean containsId(short id, short[] ids) {
+        if(ids == null)
+            return false;
+        for(short tmp: ids)
+            if(tmp == id)
+                return true;
+        return false;
+    }
+
+
     public static List<View> detectDifferentViews(Map<Address,View> map) {
         final List<View> ret=new ArrayList<View>();
         for(View view: map.values()) {
             if(view == null)
                 continue;
-            ViewId vid=view.getVid();
+            ViewId vid=view.getViewId();
             if(!Util.containsViewId(ret, vid))
                 ret.add(view);
         }
@@ -2433,12 +2584,13 @@ public class Util {
         return -1;
     }
 
-    public static Object pickRandomElement(List list) {
-        if(list == null) return null;
-        int size=list.size();
-        int index=(int)((Math.random() * size * 10) % size);
-        return list.get(index);
-    }
+
+    public static <T> T pickRandomElement(List<T> list) {
+            if(list == null) return null;
+            int size=list.size();
+            int index=(int)((Math.random() * size * 10) % size);
+            return list.get(index);
+        }
 
     public static Object pickRandomElement(Object[] array) {
         if(array == null) return null;
@@ -2483,11 +2635,6 @@ public class Util {
     }
 
 
-    public static View createView(Address coord, long id, Address ... members) {
-        List<Address> mbrs=new ArrayList<Address>();
-        mbrs.addAll(Arrays.asList(members));
-        return new View(coord, id, mbrs);
-    }
 
     public static JChannel createChannel(Protocol... prots) throws Exception {
         JChannel ch=new JChannel(false);
@@ -2504,6 +2651,20 @@ public class Util {
 
     public static Address createRandomAddress() {
         return createRandomAddress(generateLocalName());
+    }
+
+    /** Returns an array of num random addresses, named A, B, C etc */
+    public static Address[] createRandomAddresses(int num) {
+       return createRandomAddresses(num, false);
+    }
+
+    public static Address[] createRandomAddresses(int num, boolean use_numbers) {
+        Address[] addresses=new Address[num];
+        int number=1;
+        char c='A';
+        for(int i=0; i < addresses.length; i++)
+            addresses[i]=Util.createRandomAddress(use_numbers? String.valueOf(number++) : String.valueOf(c++));
+        return addresses;
     }
 
     public static Address createRandomAddress(String name) {
@@ -2548,7 +2709,7 @@ public class Util {
                 first=false;
             else
                 sb.append(", ");
-            sb.append(view.getVid());
+            sb.append(view.getViewId());
         }
         return sb.toString();
     }
@@ -2562,6 +2723,16 @@ public class Util {
             else
                 sb.append(", ");
             sb.append(obj);
+        }
+        return sb.toString();
+    }
+
+
+    public static String print(byte[] array, int n) {
+        StringBuilder sb=new StringBuilder();
+        if(array != null) {
+            for(int i=0; i < Math.min(n, array.length); i++)
+                sb.append("'").append(array[i]).append("' ");
         }
         return sb.toString();
     }
@@ -2620,48 +2791,6 @@ public class Util {
 
 
 
-    public static long sizeOf(String classname) {
-        Object inst;
-        byte[] data;
-
-        try {
-            inst=Util.loadClass(classname, null).newInstance();
-            data=Util.objectToByteBuffer(inst);
-            return data.length;
-        }
-        catch(Exception ex) {
-            return -1;
-        }
-    }
-
-
-    public static long sizeOf(Object inst) {
-        byte[] data;
-
-        try {
-            data=Util.objectToByteBuffer(inst);
-            return data.length;
-        }
-        catch(Exception ex) {
-            return -1;
-        }
-    }
-
-    public static int  sizeOf(Streamable inst) {
-        try {
-            ByteArrayOutputStream output=new ExposedByteArrayOutputStream();
-            DataOutputStream out=new ExposedDataOutputStream(output);
-            inst.writeTo(out);
-            out.flush();
-            byte[] data=output.toByteArray();
-            return data.length;
-        }
-        catch(Exception ex) {
-            return -1;
-        }
-    }
-
-
 
     /**
      * Tries to load the class from the current thread's context class loader. If
@@ -2674,31 +2803,29 @@ public class Util {
     public static Class loadClass(String classname, Class clazz) throws ClassNotFoundException {
         ClassLoader loader;
 
-        try {
-            loader=Thread.currentThread().getContextClassLoader();
-            if(loader != null) {
-                return loader.loadClass(classname);
-            }
-        }
-        catch(Throwable t) {
-        }
-
+        // https://issues.jboss.org/browse/JGRP-1762: load the classloader from the defining class first
         if(clazz != null) {
             try {
                 loader=clazz.getClassLoader();
-                if(loader != null) {
+                if(loader != null)
                     return loader.loadClass(classname);
-                }
             }
             catch(Throwable t) {
             }
         }
 
         try {
-            loader=ClassLoader.getSystemClassLoader();
-            if(loader != null) {
+            loader=Thread.currentThread().getContextClassLoader();
+            if(loader != null)
                 return loader.loadClass(classname);
-            }
+        }
+        catch(Throwable t) {
+        }
+
+        try {
+            loader=ClassLoader.getSystemClassLoader();
+            if(loader != null)
+                return loader.loadClass(classname);
         }
         catch(Throwable t) {
         }
@@ -2779,28 +2906,61 @@ public class Util {
     }
 
     public static void setField(Field field, Object target, Object value) {
-           if(!Modifier.isPublic(field.getModifiers())) {
-               field.setAccessible(true);
-           }
-           try {
-               field.set(target, value);
-           }
-           catch(IllegalAccessException iae) {
-               throw new IllegalArgumentException("Could not set field " + field, iae);
-           }
-       }
+        if(!Modifier.isPublic(field.getModifiers())) {
+            field.setAccessible(true);
+        }
+        try {
+            field.set(target, value);
+        }
+        catch(IllegalAccessException iae) {
+            throw new IllegalArgumentException("Could not set field " + field, iae);
+        }
+    }
 
-       public static Object getField(Field field, Object target) {
-           if(!Modifier.isPublic(field.getModifiers())) {
-               field.setAccessible(true);
-           }
-           try {
-               return field.get(target);
-           }
-           catch(IllegalAccessException iae) {
-               throw new IllegalArgumentException("Could not get field " + field, iae);
-           }
-       }
+    public static Object getField(Field field, Object target) {
+        if(!Modifier.isPublic(field.getModifiers())) {
+            field.setAccessible(true);
+        }
+        try {
+            return field.get(target);
+        }
+        catch(IllegalAccessException iae) {
+            throw new IllegalArgumentException("Could not get field " + field, iae);
+        }
+    }
+
+
+    public static Field findField(Object target, List<String> possible_names) {
+        if(target == null)
+            return null;
+        for(Class<?> clazz=target.getClass(); clazz != null; clazz=clazz.getSuperclass()) {
+            for(String name: possible_names) {
+                try {
+                    return clazz.getDeclaredField(name);
+                }
+                catch(Exception e) {
+                }
+            }
+        }
+        return null;
+    }
+
+
+    public static Method findMethod(Object target, List<String> possible_names, Class<?> ... parameter_types) {
+        if(target == null)
+            return null;
+        for(Class<?> clazz=target.getClass(); clazz != null; clazz=clazz.getSuperclass()) {
+            for(String name: possible_names) {
+                try {
+                    return clazz.getDeclaredMethod(name, parameter_types);
+                }
+                catch(Exception e) {
+                }
+            }
+        }
+        return null;
+    }
+
 
 
     public static <T> Set<Class<T>> findClassesAssignableFrom(String packageName, Class<T> assignableFrom)
@@ -2858,17 +3018,7 @@ public class Util {
         ClassLoader loader;
         InputStream retval=null;
 
-        try {
-            loader=Thread.currentThread().getContextClassLoader();
-            if(loader != null) {
-                retval=loader.getResourceAsStream(name);
-                if(retval != null)
-                    return retval;
-            }
-        }
-        catch(Throwable t) {
-        }
-
+        // https://issues.jboss.org/browse/JGRP-1762: load the classloader from the defining class first
         if(clazz != null) {
             try {
                 loader=clazz.getClassLoader();
@@ -2880,6 +3030,17 @@ public class Util {
             }
             catch(Throwable t) {
             }
+        }
+
+        try {
+            loader=Thread.currentThread().getContextClassLoader();
+            if(loader != null) {
+                retval=loader.getResourceAsStream(name);
+                if(retval != null)
+                    return retval;
+            }
+        }
+        catch(Throwable t) {
         }
 
         try {
@@ -2938,6 +3099,10 @@ public class Util {
             return new ThreadPoolExecutor.DiscardOldestPolicy();
         if(rejection_policy.equalsIgnoreCase("run"))
             return new ThreadPoolExecutor.CallerRunsPolicy();
+        if(rejection_policy.toLowerCase().startsWith(CustomRejectionPolicy.NAME))
+            return new CustomRejectionPolicy(rejection_policy);
+        if(rejection_policy.toLowerCase().startsWith(ProgressCheckRejectionPolicy.NAME))
+            return new ProgressCheckRejectionPolicy(rejection_policy);
         throw new IllegalArgumentException("rejection policy \"" + rejection_policy + "\" not known");
     }
 
@@ -3460,111 +3625,7 @@ public class Util {
     }
 
 
-    /**
-     * Returns the address of the interface to use defined by bind_addr and bind_interface
-     * @param props
-     * @return
-     * @throws UnknownHostException
-     * @throws SocketException
-     */
-    public static InetAddress getBindAddress(Properties props) throws UnknownHostException, SocketException {
 
-    	// determine the desired values for bind_addr_str and bind_interface_str
-    	boolean ignore_systemprops=Util.isBindAddressPropertyIgnored();
-    	String bind_addr_str =Util.getProperty(new String[]{Global.BIND_ADDR}, props, "bind_addr",
-    			ignore_systemprops, null);
-    	String bind_interface_str =Util.getProperty(new String[]{Global.BIND_INTERFACE, null}, props, "bind_interface",
-    			ignore_systemprops, null);
-    	
-    	InetAddress bind_addr=null;
-    	NetworkInterface bind_intf=null;
-
-        StackType ip_version=Util.getIpStackType();
-
-    	// 1. if bind_addr_str specified, get bind_addr and check version
-    	if(bind_addr_str != null) {
-    		bind_addr=InetAddress.getByName(bind_addr_str);
-
-            // check that bind_addr_host has correct IP version
-            boolean hasCorrectVersion = ((bind_addr instanceof Inet4Address && ip_version == StackType.IPv4) ||
-                    (bind_addr instanceof Inet6Address && ip_version == StackType.IPv6)) ;
-            if (!hasCorrectVersion)
-                throw new IllegalArgumentException("bind_addr " + bind_addr_str + " has incorrect IP version") ;
-        }
-
-    	// 2. if bind_interface_str specified, get interface and check that it has correct version
-    	if(bind_interface_str != null) {
-    		bind_intf=NetworkInterface.getByName(bind_interface_str);
-    		if(bind_intf != null) {
-
-                // check that the interface supports the IP version
-                boolean supportsVersion = interfaceHasIPAddresses(bind_intf, ip_version) ;
-                if (!supportsVersion)
-                    throw new IllegalArgumentException("bind_interface " + bind_interface_str + " has incorrect IP version") ;
-            }
-            else {
-                // (bind_intf == null)
-    			throw new UnknownHostException("network interface " + bind_interface_str + " not found");
-    		}
-    	}
-
-    	// 3. intf and bind_addr are both are specified, bind_addr needs to be on intf
-    	if (bind_intf != null && bind_addr != null) {
-
-    		boolean hasAddress = false ;
-
-    		// get all the InetAddresses defined on the interface
-    		Enumeration addresses = bind_intf.getInetAddresses() ;
-
-    		while (addresses != null && addresses.hasMoreElements()) {
-    			// get the next InetAddress for the current interface
-    			InetAddress address = (InetAddress) addresses.nextElement() ;
-
-    			// check if address is on interface
-    			if (bind_addr.equals(address)) { 
-    				hasAddress = true ;
-    				break ;
-    			}
-    		}
-
-    		if (!hasAddress) {
-    			throw new IllegalArgumentException("network interface " + bind_interface_str + " does not contain address " + bind_addr_str);
-    		}
-
-    	}
-    	// 4. if only interface is specified, get first non-loopback address on that interface, 
-    	else if (bind_intf != null) {
-            bind_addr = getAddress(bind_intf, AddressScope.NON_LOOPBACK) ;
-    	}
-    	// 5. if neither bind address nor bind interface is specified, get the first non-loopback
-    	// address on any interface
-    	else if (bind_addr == null) {
-    		bind_addr = getNonLoopbackAddress() ;
-    	}
-
-    	// if we reach here, if bind_addr == null, we have tried to obtain a bind_addr but were not successful
-    	// in such a case, using a loopback address of the correct version is our only option
-    	boolean localhost = false;
-    	if (bind_addr == null) {
-    		bind_addr = getLocalhost(ip_version);
-    		localhost = true;
-    	}
-
-    	//http://jira.jboss.org/jira/browse/JGRP-739
-    	//check all bind_address against NetworkInterface.getByInetAddress() to see if it exists on the machine
-    	//in some Linux setups NetworkInterface.getByInetAddress(InetAddress.getLocalHost()) returns null, so skip
-    	//the check in that case
-    	if(!localhost && NetworkInterface.getByInetAddress(bind_addr) == null) {
-    		throw new UnknownHostException("Invalid bind address " + bind_addr);
-    	}
-
-    	if(props != null) {
-    		props.remove("bind_addr");
-    		props.remove("bind_interface");
-    	}
-    	return bind_addr;
-    }
-    
     /**
      * Method used by PropertyConverters.BindInterface to check that a bind_address is
      * consistent with a specified interface 
@@ -3670,6 +3731,10 @@ public class Util {
         return checkForPresence("os.name", "mac");
     }
 
+    public static boolean checkForAndroid() {
+        return contains("java.vm.vendor", "android");
+    }
+
     private static boolean checkForPresence(String key, String value) {
         try {
             String tmp=System.getProperty(key);
@@ -3679,6 +3744,18 @@ public class Util {
             return false;
         }
     }
+
+    private static boolean contains(String key, String value) {
+        try {
+            String tmp=System.getProperty(key);
+            return tmp != null && tmp.trim().toLowerCase().contains(value.trim().toLowerCase());
+        }
+        catch(Throwable t) {
+            return false;
+        }
+    }
+
+
 
     public static void prompt(String s) {
         System.out.println(s);
@@ -3736,6 +3813,67 @@ public class Util {
         return null ;
     }
 
+    /**
+     * Returns a valid interface address based on a pattern. Iterates over all interfaces that are up and
+     * returns the first match, based on the address or interface name
+     * @param pattern Can be "match-addr:<pattern></pattern>" or "match-interface:<pattern></pattern>". Example:<p/>
+     *                match-addr:192.168.*
+     * @return InetAddress or null if not found
+     */
+    public static InetAddress getAddressByPatternMatch(String pattern) throws Exception {
+        if(pattern == null) return null;
+        String  real_pattern=null;
+        byte type=0; // 1=match-interface, 2: match-addr, 3: match-host,
+
+        if(pattern.startsWith(Global.MATCH_INTF)) {
+            type=1;
+            real_pattern=pattern.substring(Global.MATCH_INTF.length() +1);
+        }
+        else if(pattern.startsWith(Global.MATCH_ADDR)) {
+            type=2;
+            real_pattern=pattern.substring(Global.MATCH_ADDR.length() +1);
+        }
+        else if(pattern.startsWith(Global.MATCH_HOST)) {
+            type=3;
+            real_pattern=pattern.substring(Global.MATCH_HOST.length() +1);
+        }
+
+        if(real_pattern == null)
+            throw new IllegalArgumentException("expected " + Global.MATCH_ADDR + ":<pattern>, " +
+                                                 Global.MATCH_HOST + ":<pattern> or " + Global.MATCH_INTF + ":<pattern>");
+
+        Pattern pat=Pattern.compile(real_pattern);
+        Enumeration intfs=NetworkInterface.getNetworkInterfaces();
+        while(intfs.hasMoreElements()) {
+            NetworkInterface intf=(NetworkInterface)intfs.nextElement();
+            try {
+                if(!intf.isUp())
+                    continue;
+                switch(type) {
+                    case 1: // match by interface name
+                        String interface_name=intf.getName();
+                        Matcher matcher=pat.matcher(interface_name);
+                        if(matcher.matches())
+                            return getAddress(intf, null);
+                        break;
+                    case 2: // match by host address
+                    case 3: // match by host name
+                        for(Enumeration<InetAddress> en=intf.getInetAddresses(); en.hasMoreElements();) {
+                            InetAddress addr=en.nextElement();
+                            String name=type == 3? addr.getHostName() : addr.getHostAddress();
+                            matcher=pat.matcher(name);
+                            if(matcher.matches())
+                                return addr;
+                        }
+                        break;
+                }
+            }
+            catch (SocketException e) {
+            }
+        }
+        return null;
+    }
+
 
     /**
      * Returns the first address on the given interface on the current host, which satisfies scope
@@ -3746,30 +3884,32 @@ public class Util {
         StackType ip_version=Util.getIpStackType();
         for(Enumeration addresses=intf.getInetAddresses(); addresses.hasMoreElements();) {
             InetAddress addr=(InetAddress)addresses.nextElement();
-            boolean match;
-            switch(scope) {
-                case GLOBAL:
-                    match=!addr.isLoopbackAddress() && !addr.isLinkLocalAddress() && !addr.isSiteLocalAddress();
-                    break;
-                case SITE_LOCAL:
-                    match=addr.isSiteLocalAddress();
-                    break;
-                case LINK_LOCAL:
-                    match=addr.isLinkLocalAddress();
-                    break;
-                case LOOPBACK:
-                    match=addr.isLoopbackAddress();
-                    break;
-                case NON_LOOPBACK:
-                    match=!addr.isLoopbackAddress();
-                    break;
-                default:
-                    throw new IllegalArgumentException("scope " + scope + " is unknown");
+            boolean match=scope == null;
+            if(scope != null) {
+                switch(scope) {
+                    case GLOBAL:
+                        match=!addr.isLoopbackAddress() && !addr.isLinkLocalAddress() && !addr.isSiteLocalAddress();
+                        break;
+                    case SITE_LOCAL:
+                        match=addr.isSiteLocalAddress();
+                        break;
+                    case LINK_LOCAL:
+                        match=addr.isLinkLocalAddress();
+                        break;
+                    case LOOPBACK:
+                        match=addr.isLoopbackAddress();
+                        break;
+                    case NON_LOOPBACK:
+                        match=!addr.isLoopbackAddress();
+                        break;
+                    default:
+                        throw new IllegalArgumentException("scope " + scope + " is unknown");
+                }
             }
 
             if(match) {
                 if((addr instanceof Inet4Address && ip_version == StackType.IPv4) ||
-                        (addr instanceof Inet6Address && ip_version == StackType.IPv6))
+                  (addr instanceof Inet6Address && ip_version == StackType.IPv6))
                     return addr;
             }
         }
@@ -3811,6 +3951,14 @@ public class Util {
         
     public static StackType getIpStackType() {
        return ip_stack_type;
+    }
+
+    /** Returns true if the 2 addresses are of the same type (IPv4 or IPv6) */
+    public static boolean sameAddresses(InetAddress one, InetAddress two) {
+        return one == null
+          || two == null
+          || (one instanceof Inet6Address && two instanceof Inet6Address)
+          || (one instanceof Inet4Address && two instanceof Inet4Address);
     }
 
     /**
@@ -3904,55 +4052,35 @@ public class Util {
      * @param system_props
      * @param props List of properties read from the configuration file
      * @param prop_name The name of the property, will be removed from props if found
-     * @param ignore_sysprops If true, system properties are not used and the values will only be retrieved from
-     * props (not system_props)
      * @param default_value Used to return a default value if the properties or system properties didn't have the value
      * @return The value, or null if not found
      */
-    public static String getProperty(String[] system_props, Properties props, String prop_name,
-                                     boolean ignore_sysprops, String default_value) {
+    public static String getProperty(String[] system_props, Properties props, String prop_name, String default_value) {
         String retval=null;
         if(props != null && prop_name != null) {
             retval=props.getProperty(prop_name);
             props.remove(prop_name);
         }
 
-        if(!ignore_sysprops) {
-            String tmp, prop;
-            if(system_props != null) {
-                for(int i=0; i < system_props.length; i++) {
-                    prop=system_props[i];
-                    if(prop != null) {
-                        try {
-                            tmp=System.getProperty(prop);
-                            if(tmp != null)
-                                return tmp; // system properties override config file definitions
-                        }
-                        catch(SecurityException ex) {}
+        String tmp, prop;
+        if(retval == null && system_props != null) {
+            for(int i=0; i < system_props.length; i++) {
+                prop=system_props[i];
+                if(prop != null) {
+                    try {
+                        tmp=System.getProperty(prop);
+                        if(tmp != null)
+                            return tmp;
                     }
+                    catch(SecurityException ex) {}
                 }
             }
         }
+
         if(retval == null)
             return default_value;
         return retval;
     }
-
-
-
-    public static boolean isBindAddressPropertyIgnored() {
-        try {
-            String tmp=System.getProperty(Global.IGNORE_BIND_ADDRESS_PROPERTY);
-            if(tmp == null)
-                return false;
-            tmp=tmp.trim().toLowerCase();
-            return !(tmp.equals("false") || tmp.equals("no") || tmp.equals("off")) && (tmp.equals("true") || tmp.equals("yes") || tmp.equals("on"));
-        }
-        catch(SecurityException ex) {
-            return false;
-        }
-    }
-
 
 
     public static boolean isCoordinator(JChannel ch) {
@@ -4279,7 +4407,7 @@ public class Util {
         if(index >= 0) {
             var=s.substring(0, index);
             default_val=s.substring(index+1);
-            if(default_val != null && default_val.length() > 0)
+            if(default_val != null && !default_val.isEmpty())
                 default_val=default_val.trim();
             // retval=System.getProperty(var, default_val);
             retval=_getProperty(var, default_val);
@@ -4369,16 +4497,24 @@ public class Util {
         }
     }
 
+    /**
+     * Converts a method name to an attribute name, e.g. getFooBar() --> foo_bar, isFlag --> flag.
+     * @param methodName
+     * @return
+     */
+    public static String methodNameToAttributeName(final String methodName) {
+        String name=methodName;
+        if((methodName.startsWith("get") || methodName.startsWith("set")) && methodName.length() > 3)
+            name=methodName.substring(3);
+        else if(methodName.startsWith("is") && methodName.length() > 2)
+            name=methodName.substring(2);
 
-    public static String methodNameToAttributeName(String methodName) {
-        methodName=methodName.startsWith("get") || methodName.startsWith("set")? methodName.substring(3): methodName;
-        methodName=methodName.startsWith("is")? methodName.substring(2) : methodName;
         // Pattern p=Pattern.compile("[A-Z]+");
-        Matcher m=METHOD_NAME_TO_ATTR_NAME_PATTERN.matcher(methodName);
+        Matcher m=METHOD_NAME_TO_ATTR_NAME_PATTERN.matcher(name);
         StringBuffer sb=new StringBuffer();
         while(m.find()) {
             int start=m.start(), end=m.end();
-            String str=methodName.substring(start, end).toLowerCase();
+            String str=name.substring(start, end).toLowerCase();
             if(str.length() > 1) {
                 String tmp1=str.substring(0, str.length() -1);
                 String tmp2=str.substring(str.length() -1);
@@ -4391,8 +4527,25 @@ public class Util {
                 m.appendReplacement(sb, "_" + str);
         }
         m.appendTail(sb);
-        return sb.toString();
+        return sb.length() > 0? sb.toString() : methodName;
     }
+
+    /**
+     * Converts a method name to a Java attribute name, e.g. getFooBar() --> fooBar, isFlag --> flag.
+     * @param methodName
+     * @return
+     */
+    public static String methodNameToJavaAttributeName(final String methodName) {
+          String name=methodName;
+          if((methodName.startsWith("get") || methodName.startsWith("set")) && methodName.length() > 3)
+              name=methodName.substring(3);
+          else if(methodName.startsWith("is") && methodName.length() > 2)
+              name=methodName.substring(2);
+
+        if(Character.isUpperCase(name.charAt(0)))
+            return name.substring(0, 1).toLowerCase() + name.substring(1);
+        return name;
+      }
 
 
     public static String attributeNameToMethodName(String attr_name) {
@@ -4419,6 +4572,15 @@ public class Util {
             }
         }
     }
+
+    public static String attributeNameToJavaMethodName(String attr_name) {
+        String retval=attributeNameToMethodName(attr_name);
+        if(Character.isUpperCase(retval.charAt(0)))
+            return retval.substring(0, 1).toLowerCase() + retval.substring(1);
+        return retval;
+    }
+
+
 
     /**
      * Runs a task on a separate thread

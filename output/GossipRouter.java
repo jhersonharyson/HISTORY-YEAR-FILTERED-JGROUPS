@@ -70,7 +70,7 @@ public class GossipRouter {
     @ManagedAttribute(description="server port on which the GossipRouter accepts client connections", writable=true)
     private int port;
 
-    @ManagedAttribute(description="address to which the GossipRouter should bind", writable=true, name="bindAddress")
+    @ManagedAttribute(description="address to which the GossipRouter should bind", writable=true, name="bind_address")
     private String bindAddressString;
     
     @ManagedAttribute(description="time (in msecs) until gossip entry expires", writable=true)
@@ -897,7 +897,7 @@ public class GossipRouter {
         int backlog=0;
         long soLinger=-1;
         long soTimeout=-1;
-        long expiry_time=0;
+        long expiry_time=60000;
 
         GossipRouter router=null;
         String bind_addr=null;

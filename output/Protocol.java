@@ -4,6 +4,7 @@ package org.jgroups.stack;
 
 
 import org.jgroups.Event;
+import org.jgroups.Message;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
@@ -12,6 +13,7 @@ import org.jgroups.jmx.ResourceDMBean;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.TP;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.SocketFactory;
 import org.jgroups.util.ThreadFactory;
 import org.jgroups.util.Util;
@@ -63,6 +65,7 @@ public abstract class Protocol {
 
 
 
+
     /**
      * Sets the level of a logger. This method is used to dynamically change the logging level of a
      * running system, e.g. via JMX. The appender of a level needs to exist.
@@ -72,6 +75,7 @@ public abstract class Protocol {
     @Property(name="level", description="Sets the logger level (see javadocs)")
     public void          setLevel(String level)            {log.setLevel(level);}
     public String        getLevel()                        {return log.getLevel();}
+    public Protocol      level(String level)               {this.log.setLevel(level); return this;}
     public boolean       isErgonomics()                    {return ergonomics;}
     public void          setErgonomics(boolean ergonomics) {this.ergonomics=ergonomics;}
     public ProtocolStack getProtocolStack()                {return stack;}
@@ -201,15 +205,23 @@ public abstract class Protocol {
             Field[] fields=clazz.getDeclaredFields();
             for(Field field: fields) {
                 if(field.isAnnotationPresent(ManagedAttribute.class) ||
-                        (field.isAnnotationPresent(Property.class) && field.getAnnotation(Property.class).exposeAsManagedAttribute())) {
-                    String attributeName=field.getName();
+                  (field.isAnnotationPresent(Property.class) && field.getAnnotation(Property.class).exposeAsManagedAttribute())) {
+
+                    ManagedAttribute attr_annotation=field.getAnnotation(ManagedAttribute.class);
+                    Property         prop=field.getAnnotation(Property.class);
+                    String attr_name=attr_annotation != null? attr_annotation.name() : prop != null? prop.name() : null;
+                    if(attr_name != null && !attr_name.trim().isEmpty())
+                        attr_name=attr_name.trim();
+                    else
+                        attr_name=field.getName();
+
                     try {
                         field.setAccessible(true);
                         Object value=field.get(this);
-                        map.put(attributeName, value != null? value.toString() : null);
+                        map.put(attr_name, value != null? value.toString() : null);
                     }
                     catch(Exception e) {
-                        log.warn("Could not retrieve value of attribute (field) " + attributeName,e);
+                        log.warn("Could not retrieve value of attribute (field) " + attr_name, e);
                     }
                 }
             }
@@ -219,8 +231,17 @@ public abstract class Protocol {
                 if(method.isAnnotationPresent(ManagedAttribute.class) ||
                         (method.isAnnotationPresent(Property.class) && method.getAnnotation(Property.class).exposeAsManagedAttribute())) {
 
-                    String method_name=method.getName();
-                    if(method_name.startsWith("is") || method_name.startsWith("get")) {
+                    ManagedAttribute attr_annotation=method.getAnnotation(ManagedAttribute.class);
+                    Property         prop=method.getAnnotation(Property.class);
+                    String method_name=attr_annotation != null? attr_annotation.name() : prop != null? prop.name() : null;
+                    if(method_name != null && !method_name.trim().isEmpty())
+                        method_name=method_name.trim();
+                    else {
+                        String field_name=Util.methodNameToAttributeName(method.getName());
+                        method_name=Util.attributeNameToMethodName(field_name);
+                    }
+
+                    if(ResourceDMBean.isGetMethod(method)) {
                         try {
                             Object value=method.invoke(this);
                             String attributeName=Util.methodNameToAttributeName(method_name);
@@ -228,20 +249,6 @@ public abstract class Protocol {
                         }
                         catch(Exception e) {
                             log.warn("Could not retrieve value of attribute (method) " + method_name,e);
-                        }
-                    }
-                    else if(method_name.startsWith("set")) {
-                        String stem=method_name.substring(3);
-                        Method getter=ResourceDMBean.findGetter(getClass(), stem);
-                        if(getter != null) {
-                            try {
-                                Object value=getter.invoke(this);
-                                String attributeName=Util.methodNameToAttributeName(method_name);
-                                map.put(attributeName, value != null? value.toString() : null);
-                            }
-                            catch(Exception e) {
-                                log.warn("Could not retrieve value of attribute (method) " + method_name, e);
-                            }
                         }
                     }
                 }
@@ -260,6 +267,9 @@ public abstract class Protocol {
      *                      ProtocolStack to fail, so the channel constructor will throw an exception
      */
     public void init() throws Exception {
+        short real_id=ClassConfigurator.getProtocolId(getClass());
+        if(real_id > 0 && id != real_id)
+            name=name+"-"+id;
     }
 
     /**
@@ -351,6 +361,52 @@ public abstract class Protocol {
      */
     public Object up(Event evt) {
         return up_prot.up(evt);
+    }
+
+    /**
+     * Called by the default implementation of {@link #up(org.jgroups.util.MessageBatch)} for each message to determine
+     * if the message should be removed from the message batch (and handled by the current protocol) or not.
+     * @param msg The message. Guaranteed to be non-null
+     * @return True if the message should be handled by this protocol (will be removed from the batch), false if the
+     * message should remain in the batch and be passed up.<p/>
+     * The default implementation tries to find a header matching the current protocol's ID and returns true if there
+     * is a match, or false otherwise
+     */
+    protected boolean accept(Message msg) {
+        short tmp_id=getId();
+        return tmp_id > 0 && msg.getHeader(tmp_id) != null;
+    }
+
+
+    /**
+     * Sends up a multiple messages in a {@link MessageBatch}. The sender of the batch is always the same, and so is the
+     * destination (null == multicast messages). Messages in a batch can be OOB messages, regular messages, or mixed
+     * messages, although the transport itself will create initial MessageBatches that contain only either OOB or
+     * regular messages.<p/>
+     * The default processing below sends messages up the stack individually, based on a matching criteria
+     * (calling {@link #accept(org.jgroups.Message)}), and - if true - calls {@link #up(org.jgroups.Event)}
+     * for that message and removes the message. If the batch is not empty, it is passed up, or else it is dropped.<p/>
+     * Subclasses should check if there are any messages destined for them (e.g. using
+     * {@link MessageBatch#getMatchingMessages(short,boolean)}), then possibly remove and process them and finally pass
+     * the batch up to the next protocol. Protocols can also modify messages in place, e.g. ENCRYPT could decrypt all
+     * encrypted messages in the batch, not remove them, and pass the batch up when done.
+     * @param batch The message batch
+     */
+    public void up(MessageBatch batch) {
+        for(Iterator<Message> it=batch.iterator(); it.hasNext();) {
+            Message msg=it.next();
+            if(msg != null && accept(msg)) {
+                it.remove();
+                try {
+                    up(new Event(Event.MSG, msg));
+                }
+                catch(Throwable t) {
+                    log.error(Util.getMessage("PassUpFailure"), t);
+                }
+            }
+        }
+        if(!batch.isEmpty())
+            up_prot.up(batch);
     }
 
 

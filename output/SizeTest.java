@@ -38,16 +38,10 @@ public class SizeTest {
 
 
     public static void testPingHeader() throws Exception {
-        _testSize(new PingHeader(PingHeader.GET_MBRS_REQ, "bla"));
-        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP, new PingData()));
-        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP, (PingData)null));
-        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP, (String)null));
-        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP, new PingData(Util.createRandomAddress(), null, true)));
+        _testSize(new PingHeader(PingHeader.GET_MBRS_REQ).clusterName("bla"));
+        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP));
+        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP).clusterName(null));
         Address self=Util.createRandomAddress();
-        PingData rsp=new PingData(self, Util.createView(self, 1, self), true);
-        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP, rsp));
-        rsp=new PingData(self, Util.createView(self, 1, self, Util.createRandomAddress(), Util.createRandomAddress()), true);
-        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP, rsp));
     }
  
 
@@ -63,16 +57,16 @@ public class SizeTest {
         data=new PingData(null, null, false);
         _testSize(data);
 
-        data=new PingData(own, Util.createView(coord, 22, coord, Util.createRandomAddress()), false);
+        data=new PingData(own, View.create(coord, 22, coord, Util.createRandomAddress()), false);
         _testSize(data);
 
         data=new PingData(null, null, false, "node-1", null);
         _testSize(data);
 
-        data=new PingData(own, Util.createView(coord, 22, coord), false, "node-1", null);
+        data=new PingData(own, View.create(coord, 22, coord), false, "node-1", null);
         _testSize(data);
 
-        data=new PingData(own, Util.createView(coord, 22, coord), false, "node-1", new ArrayList<PhysicalAddress>(7));
+        data=new PingData(own, View.create(coord, 22, coord), false, "node-1", new ArrayList<PhysicalAddress>(7));
         _testSize(data);
 
         data=new PingData(null, null, false, "node-1", new ArrayList<PhysicalAddress>(7));
@@ -90,11 +84,11 @@ public class SizeTest {
         data=new PingData(null, null, false, "node-1", list);
         _testSize(data);
 
-        View view=Util.createView(coord, 322649, coord, own, UUID.randomUUID());
+        View view=View.create(coord, 322649, coord, own, UUID.randomUUID());
         data.setView(view);
         _testSize(data);
 
-         data=new PingData(self, Util.createView(self, 1, self), true, "logical-name", null);
+         data=new PingData(self, View.create(self, 1, self), true, "logical-name", null);
         _testSize(data);
     }
 
@@ -159,15 +153,14 @@ public class SizeTest {
 
     public static void testDigest() throws Exception {
         Address addr=Util.createRandomAddress();
-        MutableDigest mutableDigest=new MutableDigest(2);
-        mutableDigest.add(addr, 200, 205);
-        mutableDigest.add(Util.createRandomAddress(), 104, 105);
+        Address addr2=Util.createRandomAddress();
+        View view=View.create(addr, 1, addr, addr2);
+        MutableDigest mutableDigest=new MutableDigest(view.getMembersRaw());
+        mutableDigest.set(addr, 200, 205);
+        mutableDigest.set(addr2, 104, 105);
         _testSize(mutableDigest);
 
-        Digest digest=new MutableDigest(10);
-        _testSize(digest);
-
-        digest=new Digest(Util.createRandomAddress(), 45, 50);
+        Digest digest=new MutableDigest(view.getMembersRaw());
         _testSize(digest);
     }
 
@@ -206,7 +199,7 @@ public class SizeTest {
         Map<Address,IpAddress> cache=new HashMap<Address,IpAddress>();
         cache.put(a1, a2);
         cache.put(a2, a1);
-        sockhdr=new FD_SOCK.FdHeader(FD_SOCK.FdHeader.SUSPECT, cache);
+        sockhdr=new FD_SOCK.FdHeader(FD_SOCK.FdHeader.SUSPECT);
         _testSize(sockhdr);
     }
 
@@ -226,13 +219,6 @@ public class SizeTest {
         hdr=new FD_SOCK.FdHeader(FD_SOCK.FdHeader.GET_CACHE, set);
         _testSize(hdr);
 
-        Map<Address,IpAddress> map=new HashMap<Address,IpAddress>();
-        map.put(new IpAddress("127.0.0.1", 5000), new IpAddress(4553));
-        map.put(new IpAddress("127.0.0.1", 6000), new IpAddress(4523));
-        map.put(new IpAddress(7000), new IpAddress(4553));
-         hdr=new FD_SOCK.FdHeader(FD_SOCK.FdHeader.GET_CACHE, map);
-        _testSize(hdr);
-        
         // check that IpAddress is correctly sized in FD_SOCK.FdHeader
         hdr = new FD_SOCK.FdHeader(FD_SOCK.FdHeader.I_HAVE_SOCK, new IpAddress("127.0.0.1", 4567), 
 				   new IpAddress("127.0.0.1", 4567));
@@ -252,7 +238,7 @@ public class SizeTest {
         hdr=UNICAST.UnicastHeader.createDataHeader(322649, (short)(Short.MAX_VALUE -10), true);
         _testSize(hdr);
 
-        hdr=UNICAST.UnicastHeader.createAckHeader(322649);
+        hdr=UNICAST.UnicastHeader.createAckHeader(322649,(short)2);
         _testSize(hdr);
 
         hdr=UNICAST.UnicastHeader.createSendFirstSeqnoHeader(33333);
@@ -305,23 +291,10 @@ public class SizeTest {
     public static void testStableHeader() throws Exception {
         org.jgroups.protocols.pbcast.STABLE.StableHeader hdr;
         Address addr=UUID.randomUUID();
-        Map<Address,long[]> map=new HashMap<Address,long[]>();
-        map.put(addr, new long[]{200, 205});
-        Digest digest=new Digest(map);
-        hdr=new STABLE.StableHeader(STABLE.StableHeader.STABLE_GOSSIP, digest);
-        _testSize(hdr);
+        View view=View.create(addr, 1, addr);
+        Digest digest=new Digest(view.getMembersRaw(), new long[]{200, 205});
 
-        hdr=new STABLE.StableHeader(STABLE.StableHeader.STABILITY, null);
-        _testSize(hdr);
-    }
-
-
-    public static void testStableHeader2() throws Exception {
-        org.jgroups.protocols.pbcast.STABLE.StableHeader hdr;
-        IpAddress addr=new IpAddress("127.0.0.1", 5555);
-        MutableDigest digest=new MutableDigest(2);
-        digest.add(addr, 200, 205);
-        hdr=new STABLE.StableHeader(STABLE.StableHeader.STABLE_GOSSIP, digest);
+        hdr=new STABLE.StableHeader(STABLE.StableHeader.STABLE_GOSSIP, view.getViewId());
         _testSize(hdr);
 
         hdr=new STABLE.StableHeader(STABLE.StableHeader.STABILITY, null);
@@ -399,54 +372,82 @@ public class SizeTest {
         mbrs.add(Util.createRandomAddress("C"));
         v=new View(vid, mbrs);
         _testSize(v);
+
+        // tests a view with different address types
+        mbrs.add(AdditionalDataUUID.randomUUID("additional", new byte[]{'b', 'e', 'l', 'a'}));
+        v=new View(vid, mbrs);
+        _testSize(v);
+
+        mbrs.add(TopologyUUID.randomUUID("LON", "rack-223", "linux"));
+        v=new View(vid, mbrs);
+        _testSize(v);
+    }
+
+    public void testDeltaView() throws Exception {
+        Address[] prev_mbrs=Util.createRandomAddresses(4); // A,B,C,D
+        Address[] new_mbrs=Arrays.copyOf(prev_mbrs, prev_mbrs.length); // A,B,E,F (-CD +EF)
+        new_mbrs[2]=Util.createRandomAddress("E");
+        new_mbrs[3]=Util.createRandomAddress("F");
+
+        View v1=View.create(prev_mbrs[0], 1, prev_mbrs);
+        View v2=View.create(new_mbrs[0], 2, new_mbrs);
+
+        Address[][] diff=View.diff(v1,v2);
+
+        Address[] joined=diff[0], left=diff[1];
+        DeltaView dv=new DeltaView(v2.getViewId(), v1.getViewId(), left, joined);
+        System.out.println("dv = " + dv);
+        _testSize(dv);
+    }
+
+
+    public static void testLargeView() throws Exception {
+        Address[] members=Util.createRandomAddresses(1000);
+        View view=View.create(members[0], 1, members);
+        _testSize(view);
+
+
+        ViewId new_view_id=new ViewId(members[0], 2);
+        view=new DeltaView(new_view_id, view.getViewId(),
+                           new Address[]{members[4],members[5]},
+                           new Address[]{Util.createRandomAddress("new-1"), Util.createRandomAddress("new-2")});
+        _testSize(view);
     }
 
 
     public static void testMergeView() throws Exception {
-        ViewId vid=new ViewId(UUID.randomUUID(), 322649);
+        ViewId vid=new ViewId(Util.createRandomAddress("A"), 322649);
         List<Address> mbrs=new ArrayList<Address>();
         View v=new MergeView(vid, mbrs, null);
         _testSize(v);
-        mbrs.add(UUID.randomUUID());
+
+        mbrs.add(Util.createRandomAddress("A"));
+        v=new MergeView(vid, mbrs, null);
         _testSize(v);
-        mbrs.add(UUID.randomUUID());
+
+        mbrs.add(Util.createRandomAddress("B"));
+        v=new MergeView(vid, mbrs, null);
         _testSize(v);
     }
 
 
-
     public static void testMergeView2() throws Exception {
-        List<Address> m1, m2 , m3, all;
-        List<View> subgroups;
-        Address a,b,c,d,e,f;
-        View v1, v2, v3, view_all;
+        Address a=Util.createRandomAddress("A"), b=Util.createRandomAddress("B"), c=Util.createRandomAddress("C"),
+          d=Util.createRandomAddress("D"), e=Util.createRandomAddress("E"), f=Util.createRandomAddress("F");
+        List<Address> all=Arrays.asList(a,b,c,d,e,f);
+        View v1=View.create(a, 1, a,b,c);
+        View v2=View.create(d, 2, d);
+        View v3=View.create(e, 3, e,f);
 
-        a=Util.createRandomAddress();
-        b=Util.createRandomAddress();
-        c=Util.createRandomAddress();
-        d=Util.createRandomAddress();
-        e=Util.createRandomAddress();
-        f=Util.createRandomAddress();
-
-        m1=new ArrayList<Address>(); m2=new ArrayList<Address>(); m3=new ArrayList<Address>(); all=new ArrayList<Address>();
-        subgroups=new ArrayList<View>();
-        m1.add(a); m1.add(b); m1.add(c);
-        m2.add(d);
-        m3.add(e); m3.add(f);
-        all.add(a); all.add(b); all.add(c); all.add(d); all.add(e); all.add(f);
-
-        v1=new View(a, 1, m1);
-        v2=new View(d, 2, m2);
-        v3=new View(e, 3, m3);
+        ArrayList<View> subgroups=new ArrayList<View>();
         subgroups.add(v1);
         subgroups.add(v2);
         subgroups.add(v3);
 
-        view_all=new MergeView(a, 5, all, subgroups);
+        MergeView view_all=new MergeView(a, 5, all, subgroups);
         System.out.println("MergeView: " + view_all);
         _testSize(view_all);
     }
-
 
 
     public static void testMergeView3() throws Exception {
@@ -484,6 +485,63 @@ public class SizeTest {
     }
 
 
+
+    public static void testMergeViewWithMergeViewsAsSubgroups() throws Exception {
+        Address[] mbrs=Util.createRandomAddresses(4);
+        Address a=mbrs[0], b=mbrs[1], c=mbrs[2], d=mbrs[3];
+        View ab=new MergeView(a, 2, Arrays.asList(a,b), Arrays.asList(View.create(a, 1, a), View.create(b, 1, b)));
+        View cd=new MergeView(c, 2, Arrays.asList(c,d), Arrays.asList(View.create(c, 1, c), View.create(d, 1, d)));
+        MergeView abcd=new MergeView(a, 3, Arrays.asList(mbrs), Arrays.asList(ab, cd));
+        _testSize(abcd);
+    }
+
+
+    /** Tests a MergeView whose subgroups are *not* a subset of the members (https://issues.jboss.org/browse/JGRP-1707) */
+    public static void testMergeViewWithNonMatchingSubgroups() throws Exception {
+        Address[] mbrs=Util.createRandomAddresses(6);
+
+        /*Address[] mbrs=new Address[6];
+        mbrs[0]=Util.createRandomAddress("A");
+        mbrs[1]=Util.createRandomAddress("B");
+        mbrs[2]=Util.createRandomAddress("C");
+        mbrs[3]=PayloadUUID.randomUUID("D", "**");
+        mbrs[4]=Util.createRandomAddress("E");
+        mbrs[5]=Util.createRandomAddress("F");*/
+
+
+        Address a=mbrs[0],b=mbrs[1],c=mbrs[2],d=mbrs[3],e=mbrs[4],f=mbrs[5];
+        List<Address> abc=Arrays.asList(a,b,c);     // A,B,C
+        List<Address> def=Arrays.asList(d,e,f);  // D,E,F
+        List<Address> full=Arrays.asList(a,b,c,d,f); // E is missing
+        List<View> subviews=Arrays.asList(new View(a, 4, abc), new View(d, 4, def));
+        MergeView mv=new MergeView(a, 5, full, subviews);
+        MergeView tmp_view=(MergeView)_testSize(mv);
+        assert mv.deepEquals(tmp_view) : "views don't match: original=" + mv + ", new=" + tmp_view;
+
+        full=Arrays.asList(a,b,c,e,f); // D (creator!) is missing
+        subviews=Arrays.asList(new View(a, 4, abc), new View(d, 4, def));
+        mv=new MergeView(a, 5, full, subviews);
+        tmp_view=(MergeView)_testSize(mv);
+        assert mv.deepEquals(tmp_view) : "views don't match: original=" + mv + ", new=" + tmp_view;
+
+    }
+
+
+
+
+    public static void testLargeMergeView() throws Exception {
+        int NUM=100;
+        Address[] members=Util.createRandomAddresses(NUM, true);
+        Address[] first=Arrays.copyOf(members,NUM / 2);
+        Address[] second=new Address[NUM/2];
+        System.arraycopy(members, NUM/2, second, 0, second.length);
+
+        View v1=View.create(first[0], 5, first), v2=View.create(second[0], 5, second);
+        MergeView mv=new MergeView(new ViewId(first[0], 6), members, Arrays.asList(v1, v2));
+        _testSize(mv);
+    }
+
+
     public static void testMergeHeader() throws Exception {
         MERGE3.MergeHeader hdr=new MERGE3.MergeHeader();
         _testSize(hdr);
@@ -498,10 +556,10 @@ public class SizeTest {
         hdr=MERGE3.MergeHeader.createInfo(view_id, logical_name, physical_addr);
         _testSize(hdr);
         Address a=Util.createRandomAddress("A"), b=Util.createRandomAddress("B"), c=Util.createRandomAddress("C");
-        View view=Util.createView(a, 22, a,b,c);
+        View view=View.create(a, 22, a,b,c);
         hdr=MERGE3.MergeHeader.createViewRequest();
         _testSize(hdr);
-        hdr=MERGE3.MergeHeader.createViewResponse(view);
+        hdr=MERGE3.MergeHeader.createViewResponse();
         _testSize(hdr);
     }
 
@@ -509,12 +567,12 @@ public class SizeTest {
     public static void testJoinRsp() throws Exception {
         JoinRsp rsp;
         Address a=Util.createRandomAddress("A"), b=Util.createRandomAddress("B"), c=Util.createRandomAddress("C");
-        View v=Util.createView(a, 55, a, b, c);
+        View v=View.create(a, 55, a, b, c);
 
-        MutableDigest digest=new MutableDigest(3);
-        digest.add(a, 1000, 1050);
-        digest.add(b, 700, 700);
-        digest.add(c, 0, 0);
+        MutableDigest digest=new MutableDigest(v.getMembersRaw());
+        digest.set(a, 1000, 1050);
+        digest.set(b, 700, 700);
+        digest.set(c, 0, 0);
         rsp=new JoinRsp(v, digest);
         _testSize(rsp);
 
@@ -531,10 +589,10 @@ public class SizeTest {
         for(int i=0; i < members.length; i++)
             members[i]=Util.createRandomAddress("m" + i);
 
-        View view=Util.createView(members[0], 53, members);
-        MutableDigest digest=new MutableDigest(NUM);
+        View view=View.create(members[0], 53, members);
+        MutableDigest digest=new MutableDigest(view.getMembersRaw());
         for(Address member: members)
-            digest.add(member, 70000, 100000, false);
+            digest.set(member, 70000, 100000);
 
         JoinRsp rsp=new JoinRsp(view, digest);
         _testSize(rsp);
@@ -553,12 +611,32 @@ public class SizeTest {
         members.add(addr);
         members.add(addr);
         View v=new View(addr, 33, members);
-        hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP, v);
+        hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP);
         _testSize(hdr);
 
         Collection<Address> mbrs=new ArrayList<Address>();
         Collections.addAll(mbrs, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
-        hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_REQ, mbrs);
+        hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_REQ);
+        _testSize(hdr);
+
+        Address[]     addresses=Util.createRandomAddresses(20);
+        View          view=View.create(addresses[0], 1, addresses);
+        MutableDigest digest=new MutableDigest(view.getMembersRaw());
+        for(int i=0; i < addresses.length; i++) {
+            long hd=i + 10000;
+            digest.set(addresses[i], hd, hd + 500);
+        }
+        hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP);
+        _testSize(hdr);
+
+        view=View.create(addresses[0],1,addresses);
+        digest=new MutableDigest(addresses); // no ref to view.members
+        for(int i=0; i < addresses.length; i++) {
+            long hd=i + 10000;
+            digest.set(addresses[i], hd, hd + 500);
+        }
+        hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP);
+        _testSize(hdr);
     }
 
 
@@ -610,20 +688,14 @@ public class SizeTest {
         STATE_TRANSFER.StateHeader hdr;
         hdr=new STATE_TRANSFER.StateHeader(STATE_TRANSFER.StateHeader.STATE_REQ, null);
         _testSize(hdr);
-
-        MutableDigest digest=new MutableDigest(2);
-        digest.add(addr, 200, 205);
-        digest.add(new IpAddress(2314), 104, 105);
-        hdr=new STATE_TRANSFER.StateHeader(STATE_TRANSFER.StateHeader.STATE_RSP, digest);
-        _testSize(hdr);
     }
 
 
     public static void testRelay2Header() throws Exception {
-        Address dest=new SiteMaster((short)0);
+        Address dest=new SiteMaster("sfo");
         RELAY2.Relay2Header hdr=new RELAY2.Relay2Header(RELAY2.Relay2Header.DATA, dest, null);
         _testSize(hdr);
-        Address sender=new SiteUUID(UUID.randomUUID(), "dummy", (short)1);
+        Address sender=new SiteUUID(UUID.randomUUID(), "dummy", "sfo");
         hdr=new RELAY2.Relay2Header(RELAY2.Relay2Header.DATA, dest, sender);
         _testSize(hdr);
     }
@@ -678,6 +750,15 @@ public class SizeTest {
         _testWriteAddress(addr);
 
         addr=new IpAddress("127.0.0.1", 5678);
+        _testWriteAddress(addr);
+
+        addr=AdditionalDataUUID.randomUUID("A", new byte[]{'b', 'e', 'l', 'a'});
+        _testWriteAddress(addr);
+
+        addr=PayloadUUID.randomUUID("A", "hello");
+        _testWriteAddress(addr);
+
+        addr=new SiteMaster("sfo");
         _testWriteAddress(addr);
     }
 
@@ -738,6 +819,25 @@ public class SizeTest {
         _testSize(uuid);
 
         uuid=org.jgroups.util.UUID.randomUUID();
+        byte[] buf=Util.streamableToByteBuffer(uuid);
+        org.jgroups.util.UUID uuid2=(org.jgroups.util.UUID)Util.streamableFromByteBuffer(org.jgroups.util.UUID.class, buf);
+        System.out.println("uuid:  " + uuid);
+        System.out.println("uuid2: " + uuid2);
+        assert uuid.equals(uuid2);
+
+        int hash1=uuid.hashCode(), hash2=uuid2.hashCode();
+        System.out.println("hash 1: " + hash1);
+        System.out.println("hash 2: " + hash2);
+        assert hash1 == hash2;
+    }
+
+
+    public static void testAdditionalDataUUID() throws Exception {
+        Address uuid=AdditionalDataUUID.randomUUID("A", new byte[]{'b', 'e', 'l', 'a'});
+        System.out.println("uuid = " + uuid);
+        _testSize(uuid);
+
+        uuid=AdditionalDataUUID.randomUUID("A", new byte[]{'b', 'e', 'l', 'a'});
         byte[] buf=Util.streamableToByteBuffer(uuid);
         org.jgroups.util.UUID uuid2=(org.jgroups.util.UUID)Util.streamableFromByteBuffer(org.jgroups.util.UUID.class, buf);
         System.out.println("uuid:  " + uuid);
@@ -815,7 +915,7 @@ public class SizeTest {
     }
 
     private static void _testSize(Digest digest) throws Exception {
-        long len=digest.serializedSize();
+        long len=digest.serializedSize(true);
         byte[] serialized_form=Util.streamableToByteBuffer(digest);
         System.out.println("digest = " + digest);
         System.out.println("size=" + len + ", serialized size=" + serialized_form.length);
@@ -855,11 +955,17 @@ public class SizeTest {
         assert serialized_form.length == size;
     }
 
-    private static void _testSize(View v) throws Exception {
+
+    private static View _testSize(View v) throws Exception {
         long size=v.serializedSize();
         byte[] serialized_form=Util.streamableToByteBuffer(v);
         System.out.println("size=" + size + ", serialized size=" + serialized_form.length);
         Assert.assertEquals(serialized_form.length, size);
+
+        View view=(View)Util.streamableFromByteBuffer(v.getClass(),serialized_form);
+        System.out.println("old view: " + v + "\nnew view: " + view);
+        assert view.equals(v);
+        return view;
     }
 
     private static void _testSize(Collection<Address> coll) throws Exception {

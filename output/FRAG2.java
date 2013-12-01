@@ -6,6 +6,7 @@ import org.jgroups.Message;
 import org.jgroups.View;
 import org.jgroups.annotations.*;
 import org.jgroups.stack.Protocol;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Range;
 import org.jgroups.util.Util;
 
@@ -44,7 +45,7 @@ public class FRAG2 extends Protocol {
     /* -----------------------------------------    Properties     -------------------------------------------------- */
     
     @Property(description="The max number of bytes in a message. Larger messages will be fragmented")
-    int frag_size=60000;
+    protected int                 frag_size=60000;
   
     /* --------------------------------------------- Fields ------------------------------------------------------ */
     
@@ -52,28 +53,26 @@ public class FRAG2 extends Protocol {
     /*the fragmentation list contains a fragmentation table per sender
      *this way it becomes easier to clean up if a sender (member) leaves or crashes
      */
-    private final ConcurrentMap<Address,ConcurrentMap<Long,FragEntry>> fragment_list=Util.createConcurrentMap(11);
+    protected final ConcurrentMap<Address,ConcurrentMap<Long,FragEntry>> fragment_list=Util.createConcurrentMap(11);
 
     /** Used to assign fragmentation-specific sequence IDs (monotonically increasing) */
-    private int curr_id=1;
+    protected int                 curr_id=1;
 
-    private final List<Address> members=new ArrayList<Address>(11);
+    protected final List<Address> members=new ArrayList<Address>(11);
 
-    @ManagedAttribute(description="Number of sent messages")
-    AtomicLong num_sent_msgs=new AtomicLong(0);
-    @ManagedAttribute(description="Number of received messages")
-    AtomicLong num_received_msgs=new AtomicLong(0);
+    protected Address             local_addr;
+
     @ManagedAttribute(description="Number of sent fragments")
-    AtomicLong num_sent_frags=new AtomicLong(0);
+    AtomicLong                    num_frags_sent=new AtomicLong(0);
     @ManagedAttribute(description="Number of received fragments")
-    AtomicLong num_received_frags=new AtomicLong(0);
+    AtomicLong                    num_frags_received=new AtomicLong(0);
 
-    public int getFragSize() {return frag_size;}
-    public void setFragSize(int s) {frag_size=s;}
-    public long getNumberOfSentMessages() {return num_sent_msgs.get();}
-    public long getNumberOfSentFragments() {return num_sent_frags.get();}
-    public long getNumberOfReceivedMessages() {return num_received_msgs.get();}
-    public long getNumberOfReceivedFragments() {return num_received_frags.get();}
+    public int   getFragSize()                  {return frag_size;}
+    public void  setFragSize(int s)             {frag_size=s;}
+    public long  getNumberOfSentFragments()     {return num_frags_sent.get();}
+    public long  getNumberOfReceivedFragments() {return num_frags_received.get();}
+    public int   fragSize()                     {return frag_size;}
+    public FRAG2 fragSize(int size)             {frag_size=size; return this;}
 
 
     synchronized int getNextId() {
@@ -88,26 +87,23 @@ public class FRAG2 extends Protocol {
             throw new Exception("frag_size=" + old_frag_size + ", new frag_size=" + frag_size + ": new frag_size is invalid");
 
         TP transport=getTransport();
-        if(transport != null && transport.isEnableBundling()) {
+        if(transport != null) {
             int max_bundle_size=transport.getMaxBundleSize();
             if(frag_size >= max_bundle_size)
                 throw new IllegalArgumentException("frag_size (" + frag_size + ") has to be < TP.max_bundle_size (" +
-                        max_bundle_size + ")");
+                                                     max_bundle_size + ")");
         }
 
         Map<String,Object> info=new HashMap<String,Object>(1);
         info.put("frag_size", frag_size);
-        up_prot.up(new Event(Event.CONFIG, info));
         down_prot.down(new Event(Event.CONFIG, info));
     }
 
 
     public void resetStats() {
         super.resetStats();
-        num_sent_msgs.set(0);
-        num_sent_frags.set(0);
-        num_received_frags.set(0);
-        num_received_msgs.set(0);
+        num_frags_sent.set(0);
+        num_frags_received.set(0);
     }
 
 
@@ -122,12 +118,7 @@ public class FRAG2 extends Protocol {
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
                 long size=msg.getLength();
-                num_sent_msgs.incrementAndGet();
                 if(size > frag_size) {
-                    if(log.isTraceEnabled()) {
-                        log.trace(new StringBuilder("message's buffer size is ").append(size)
-                                .append(", will fragment ").append("(frag_size=").append(frag_size).append(')'));
-                    }
                     fragment(msg);  // Fragment and pass down
                     return null;
                 }
@@ -137,11 +128,9 @@ public class FRAG2 extends Protocol {
                 handleViewChange((View)evt.getArg());
                 break;
 
-            case Event.CONFIG:
-                Object ret=down_prot.down(evt);
-                if(log.isDebugEnabled()) log.debug("received CONFIG event: " + evt.getArg());
-                handleConfigEvent((Map<String,Object>)evt.getArg());
-                return ret;
+            case Event.SET_LOCAL_ADDRESS:
+                local_addr=(Address)evt.getArg();
+                break;
         }
 
         return down_prot.down(evt);  // Pass on to the layer below us
@@ -149,8 +138,7 @@ public class FRAG2 extends Protocol {
 
 
     /**
-     * If event is a message, if it is fragmented, re-assemble fragments into big message and pass up
-     * the stack.
+     * If event is a message, if it is fragmented, re-assemble fragments into big message and pass up the stack.
      */
     public Object up(Event evt) {
         switch(evt.getType()) {
@@ -159,30 +147,42 @@ public class FRAG2 extends Protocol {
                 Message msg=(Message)evt.getArg();
                 FragHeader hdr=(FragHeader)msg.getHeader(this.id);
                 if(hdr != null) { // needs to be defragmented
-                    unfragment(msg, hdr); // Unfragment and possibly pass up
+                    Message assembled_msg=unfragment(msg, hdr);
+                    if(assembled_msg != null) {
+                        if(log.isTraceEnabled()) log.trace("%s: assembled_msg is %s", local_addr, assembled_msg);
+                        assembled_msg.setSrc(msg.getSrc()); // needed ? YES, because fragments have a null src !!
+                        up_prot.up(new Event(Event.MSG, assembled_msg));
+                    }
                     return null;
-                }
-                else {
-                    num_received_msgs.incrementAndGet();
                 }
                 break;
 
             case Event.VIEW_CHANGE:
                 handleViewChange((View)evt.getArg());
                 break;
-
-            case Event.CONFIG:
-                Object ret=up_prot.up(evt);
-                if(log.isDebugEnabled()) log.debug("received CONFIG event: " + evt.getArg());
-                handleConfigEvent((Map<String,Object>)evt.getArg());
-                return ret;
         }
 
         return up_prot.up(evt); // Pass up to the layer above us by default
     }
 
+    public void up(MessageBatch batch) {
+        for(Message msg: batch) {
+            FragHeader hdr=(FragHeader)msg.getHeader(this.id);
+            if(hdr != null) { // needs to be defragmented
+                Message assembled_msg=unfragment(msg,hdr);
+                if(assembled_msg != null)
+                    // the reassembled msg has to be add in the right place (https://issues.jboss.org/browse/JGRP-1648),
+                    // and canot be added to the tail of the batch !
+                    batch.replace(msg, assembled_msg);
+                else
+                    batch.remove(msg);
+            }
+        }
+        if(!batch.isEmpty())
+            up_prot.up(batch);
+    }
 
-    private void handleViewChange(View view) {
+    protected void handleViewChange(View view) {
         List<Address> new_mbrs=view.getMembers();
         List<Address> left_mbrs=Util.determineLeftMembers(members, new_mbrs);
         members.clear();
@@ -191,8 +191,7 @@ public class FRAG2 extends Protocol {
         for(Address mbr: left_mbrs) {
             // the new view doesn't contain the sender, it must have left, hence we will clear its fragmentation tables
             fragment_list.remove(mbr);
-            if(log.isTraceEnabled())
-                log.trace("[VIEW_CHANGE] removed " + mbr + " from fragmentation table");
+            log.trace("%s: removed %s from fragmentation table", local_addr, mbr);
         }
     }
 
@@ -200,8 +199,7 @@ public class FRAG2 extends Protocol {
     public void clearFragmentsFor(Address mbr) {
         if(mbr == null) return;
         fragment_list.remove(mbr);
-        if(log.isTraceEnabled())
-            log.trace("removed " + mbr + " from fragmentation table");
+        log.trace("%s: removed %s from fragmentation table", local_addr, mbr);
     }
 
     @ManagedOperation(description="Removes all entries from the fragmentation table. " +
@@ -221,23 +219,21 @@ public class FRAG2 extends Protocol {
      [2344,3,2]{dst,src,buf3}
      </pre>
      */
-    private void fragment(Message msg) {
+    protected void fragment(Message msg) {
         try {
             byte[] buffer=msg.getRawBuffer();
-            List<Range> fragments=Util.computeFragOffsets(msg.getOffset(), msg.getLength(), frag_size);
+            final List<Range> fragments=Util.computeFragOffsets(msg.getOffset(), msg.getLength(), frag_size);
             int num_frags=fragments.size();
-            num_sent_frags.addAndGet(num_frags);
+            num_frags_sent.addAndGet(num_frags);
 
             if(log.isTraceEnabled()) {
                 Address dest=msg.getDest();
-                StringBuilder sb=new StringBuilder("fragmenting packet to ");
-                sb.append((dest != null ? dest.toString() : "<all members>")).append(" (size=").append(buffer.length);
-                sb.append(") into ").append(num_frags).append(" fragment(s) [frag_size=").append(frag_size).append(']');
-                log.trace(sb.toString());
+                log.trace("%s: fragmenting message to %s (size=%d) into %d fragment(s) [frag_size=%d]",
+                          local_addr, dest != null ? dest : "<all>", msg.getLength(), num_frags, frag_size);
             }
 
             long frag_id=getNextId(); // used as a seqno
-            for(int i=0; i < fragments.size(); i++) {
+            for(int i=0; i < num_frags; i++) {
                 Range r=fragments.get(i);
                 // don't copy the buffer, only src, dest and headers. Only copy the headers one time !
                 Message frag_msg=msg.copy(false, i == 0);
@@ -248,7 +244,7 @@ public class FRAG2 extends Protocol {
             }
         }
         catch(Exception e) {
-            if(log.isErrorEnabled()) log.error("fragmentation failure", e);
+            log.error("%s: fragmentation failure: %s", local_addr, e);
         }
     }
 
@@ -258,11 +254,11 @@ public class FRAG2 extends Protocol {
      2. When all are received -> Assemble them into one big buffer
      3. Read headers and byte buffer from big buffer
      4. Set headers and buffer in msg
-     5. Pass msg up the stack
+     5. Return the message
      */
-    private void unfragment(Message msg, FragHeader hdr) {
-        Address            sender=msg.getSrc();
-        Message            assembled_msg=null;
+    protected Message unfragment(Message msg, FragHeader hdr) {
+        Address   sender=msg.getSrc();
+        Message   assembled_msg=null;
 
         ConcurrentMap<Long,FragEntry> frag_table=fragment_list.get(sender);
         if(frag_table == null) {
@@ -271,7 +267,7 @@ public class FRAG2 extends Protocol {
             if(tmp != null) // value was already present
                 frag_table=tmp;
         }
-        num_received_frags.incrementAndGet();
+        num_frags_received.incrementAndGet();
 
         FragEntry entry=frag_table.get(hdr.id);
         if(entry == null) {
@@ -287,33 +283,16 @@ public class FRAG2 extends Protocol {
             if(entry.isComplete()) {
                 assembled_msg=entry.assembleMessage();
                 frag_table.remove(hdr.id);
+                if(log.isTraceEnabled())
+                    log.trace("%s: unfragmented message from %s (size=%d) from %d fragments",
+                              local_addr, sender, assembled_msg.getLength(), entry.number_of_frags_recvd);
             }
         }
         finally {
             entry.unlock();
         }
 
-        // assembled_msg=frag_table.add(hdr.id, hdr.frag_id, hdr.num_frags, msg);
-        if(assembled_msg != null) {
-            try {
-                if(log.isTraceEnabled()) log.trace("assembled_msg is " + assembled_msg);
-                assembled_msg.setSrc(sender); // needed ? YES, because fragments have a null src !!
-                num_received_msgs.incrementAndGet();
-                up_prot.up(new Event(Event.MSG, assembled_msg));
-            }
-            catch(Exception e) {
-                if(log.isErrorEnabled()) log.error("unfragmentation failed", e);
-            }
-        }
-    }
-
-
-    void handleConfigEvent(Map<String,Object> map) {
-        if(map == null) return;
-        if(map.containsKey("frag_size")) {
-            frag_size=((Integer)map.get("frag_size")).intValue();
-            if(log.isDebugEnabled()) log.debug("setting frag_size=" + frag_size);
-        }
+        return assembled_msg;
     }
 
 
@@ -325,23 +304,21 @@ public class FRAG2 extends Protocol {
      * once all the byte buffer entries have been filled the fragmentation is considered complete.<br/>
      * All methods are unsynchronized, use getLock() to obtain a lock for concurrent access.
      */
-    private static class FragEntry {
+    protected static class FragEntry {
         // each fragment is a byte buffer
         final Message fragments[];
         //the number of fragments we have received
         int number_of_frags_recvd=0;
 
-        private final Lock lock=new ReentrantLock();
+        protected final Lock lock=new ReentrantLock();
 
 
         /**
          * Creates a new entry
          * @param tot_frags the number of fragments to expect for this message
          */
-        private FragEntry(int tot_frags) {
+        protected FragEntry(int tot_frags) {
             fragments=new Message[tot_frags];
-            for(int i=0; i < tot_frags; i++)
-                fragments[i]=null;
         }
 
         /** Use to synchronize on FragEntry */
@@ -393,7 +370,7 @@ public class FRAG2 extends Protocol {
          * @return the complete message in one buffer
          *
          */
-        private Message assembleMessage() {
+        protected Message assembleMessage() {
             Message retval;
             byte[]  combined_buffer, tmp;
             int     combined_length=0, length, offset;

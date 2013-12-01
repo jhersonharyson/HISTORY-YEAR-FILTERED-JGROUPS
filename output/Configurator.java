@@ -84,7 +84,7 @@ public class Configurator {
      *   -----------------------
      * </pre>
      */
-    private static Protocol setupProtocolStack(List<ProtocolConfiguration> protocol_configs, ProtocolStack st) throws Exception {
+    public static Protocol setupProtocolStack(List<ProtocolConfiguration> protocol_configs, ProtocolStack st) throws Exception {
         List<Protocol> protocols=createProtocols(protocol_configs, st);
         if(protocols == null)
             return null;
@@ -358,12 +358,12 @@ public class Configurator {
 
     /**
      * Takes vector of ProtocolConfigurations, iterates through it, creates Protocol for
-     * each ProtocolConfiguration and returns all Protocols in a vector.
-     * @param protocol_configs Vector of ProtocolConfigurations
+     * each ProtocolConfiguration and returns all Protocols in a list.
+     * @param protocol_configs List of ProtocolConfigurations
      * @param stack The protocol stack
      * @return List of Protocols
      */
-    private static List<Protocol> createProtocols(List<ProtocolConfiguration> protocol_configs, final ProtocolStack stack) throws Exception {
+    public static List<Protocol> createProtocols(List<ProtocolConfiguration> protocol_configs, final ProtocolStack stack) throws Exception {
         List<Protocol> retval=new LinkedList<Protocol>();
         ProtocolConfiguration protocol_config;
         Protocol layer;
@@ -405,7 +405,7 @@ public class Configurator {
 
     protected static Protocol createLayer(ProtocolStack stack, ProtocolConfiguration config) throws Exception {
         String              protocol_name=config.getProtocolName();
-        Map<String, String> properties=config.getProperties();
+        Map<String, String> properties=new HashMap<String,String>(config.getProperties());
         Protocol            retval=null;
 
         if(protocol_name == null || properties == null)
@@ -427,7 +427,7 @@ public class Configurator {
             catch(ClassNotFoundException e) {
             }
             if(clazz == null)
-                throw new Exception(Util.getMessage("ProtocolLoadError", protocol_name, defaultProtocolName));
+                throw new Exception(String.format(Util.getMessage("ProtocolLoadError"), protocol_name, defaultProtocolName));
         }
 
         try {
@@ -456,10 +456,10 @@ public class Configurator {
             }
 
             if(!properties.isEmpty())
-                throw new IllegalArgumentException(Util.getMessage("ConfigurationError", protocol_name, properties));
+                throw new IllegalArgumentException(String.format(Util.getMessage("ConfigurationError"), protocol_name, properties));
         }
         catch(InstantiationException inst_ex) {
-            throw new InstantiationException(Util.getMessage("ProtocolCreateError",protocol_name, inst_ex.getLocalizedMessage()));
+            throw new InstantiationException(String.format(Util.getMessage("ProtocolCreateError"), protocol_name, inst_ex.getLocalizedMessage()));
         }
         return retval;
     }
@@ -589,8 +589,7 @@ public class Configurator {
                 ipv6_addrs.add(address) ;
         }
 
-        if(log.isTraceEnabled())
-            log.trace("all addrs=" + addrs + ", IPv4 addrs=" + ipv4_addrs + ", IPv6 addrs=" + ipv6_addrs);
+        log.trace("all addrs=" + addrs + ", IPv4 addrs=" + ipv4_addrs + ", IPv6 addrs=" + ipv6_addrs);
 
 		// the user supplied 1 or more IP address inputs. Check if we have a consistent set
         if (!addrs.isEmpty()) {
@@ -628,7 +627,7 @@ public class Configurator {
     		String protocolName = protocol.getName();
 
     		// regenerate the Properties which were destroyed during basic property processing
-    		Map<String,String> properties = protocol_config.getOriginalProperties();
+    		Map<String,String> properties = new HashMap<String,String>(protocol_config.getProperties());
 
     		// check which InetAddress-related properties are ***non-null ***, and
     		// create an InetAddressInfo structure for them
@@ -743,7 +742,7 @@ public class Configurator {
                                         StackType ip_version) throws Exception {
         InetAddress default_ip_address=Util.getNonLoopbackAddress();
         if(default_ip_address == null) {
-            log.warn("unable to find an address other than loopback for IP version " + ip_version);
+            log.warn(Util.getMessage("OnlyLoopbackFound"), ip_version);
             default_ip_address=Util.getLocalhost(ip_version);
         }
 
@@ -753,7 +752,7 @@ public class Configurator {
             String protocolName=protocol.getName();
 
             // regenerate the Properties which were destroyed during basic property processing
-            Map<String,String> properties=protocol_config.getOriginalProperties();
+            Map<String,String> properties=new HashMap<String,String>(protocol_config.getProperties());
 
             Method[] methods=Util.getAllDeclaredMethodsWithAnnotations(protocol.getClass(), Property.class);
             for(int j=0; j < methods.length; j++) {
@@ -781,8 +780,7 @@ public class Configurator {
                                     throw new Exception("default could not be assigned for method " + propertyName + " in "
                                             + protocolName + " with default " + defaultValue, e);
                                 }
-                                if(log.isDebugEnabled())
-                                    log.debug("set property " + protocolName + "." + propertyName + " to default value " + converted);
+                                log.debug("set property " + protocolName + "." + propertyName + " to default value " + converted);
                             }
                         }
                     }
@@ -819,8 +817,7 @@ public class Configurator {
                                             + protocolName + " with default value " + defaultValue, e);
                                 }
 
-                                if(log.isDebugEnabled())
-                                    log.debug("set property " + protocolName + "." + propertyName + " to default value " + converted);
+                                log.debug("set property " + protocolName + "." + propertyName + " to default value " + converted);
                             }
                         }
                     }
@@ -833,7 +830,7 @@ public class Configurator {
     public static void setDefaultValues(List<Protocol> protocols, StackType ip_version) throws Exception {
         InetAddress default_ip_address=Util.getNonLoopbackAddress();
         if(default_ip_address == null) {
-            log.warn("unable to find an address other than loopback for IP version " + ip_version);
+            log.warn(Util.getMessage("OnlyLoopbackFound"), ip_version);
             default_ip_address=Util.getLocalhost(ip_version);
         }
 
@@ -867,8 +864,7 @@ public class Configurator {
                                         + protocolName + " with default value " + defaultValue, e);
                             }
 
-                            if(log.isDebugEnabled())
-                                log.debug("set property " + protocolName + "." + fields[j].getName() + " to default value " + converted);
+                            log.debug("set property " + protocolName + "." + fields[j].getName() + " to default value " + converted);
                         }
                     }
                 }
@@ -1084,8 +1080,8 @@ public class Configurator {
             if(propertyName != null && propertyValue != null) {
                 String deprecated_msg=annotation.deprecatedMessage();
                 if(deprecated_msg != null && !deprecated_msg.isEmpty()) {
-                    log.warn(Util.getMessage("Deprecated", method.getDeclaringClass().getSimpleName() + "." + methodName,
-                                             deprecated_msg));
+                    log.warn(Util.getMessage("Deprecated"), method.getDeclaringClass().getSimpleName() + "." + methodName,
+                             deprecated_msg);
                 }
             }
 
@@ -1123,16 +1119,18 @@ public class Configurator {
     		String propertyValue=props.get(propertyName);
 
             // if there is a systemProperty attribute defined in the annotation, set the property value from the system property
-            String tmp=grabSystemProp(field.getAnnotation(Property.class));
-            if(tmp != null)
-                propertyValue=tmp;
+            // only do this if the property value hasn't yet been set
+            if(propertyValue == null) {
+                String tmp=grabSystemProp(field.getAnnotation(Property.class));
+                if(tmp != null)
+                    propertyValue=tmp;
+            }
 
             if(propertyName != null && propertyValue != null) {
                 String deprecated_msg=annotation.deprecatedMessage();
                 if(deprecated_msg != null && !deprecated_msg.isEmpty()) {
-
-                    log.warn(Util.getMessage("Deprecated", field.getDeclaringClass().getSimpleName() + "." + field.getName(),
-                                             deprecated_msg));
+                    log.warn(Util.getMessage("Deprecated"), field.getDeclaringClass().getSimpleName() + "." + field.getName(),
+                             deprecated_msg);
                 }
             }
             
@@ -1167,7 +1165,7 @@ public class Configurator {
                     if(propertyValue != null) {
                         if(log.isWarnEnabled()) {
                             String name=obj instanceof Protocol? ((Protocol)obj).getName() : obj.getClass().getName();
-                            log.warn(name + " property " + propertyName + " was deprecated and is ignored");
+                            log.warn(Util.getMessage("Deprecated"), name + "." + propertyName, "will be ignored");
                         }
                         props.remove(propertyName);
                     }
@@ -1191,17 +1189,13 @@ public class Configurator {
 
         for(String system_property_name: system_property_names) {
             if(system_property_name != null && !system_property_name.isEmpty()) {
-                if(system_property_name.equals(Global.BIND_ADDR))
-                    if(Util.isBindAddressPropertyIgnored())
-                        continue;
-                
                 try {
                     retval=System.getProperty(system_property_name);
                     if(retval != null)
                         return retval;
                 }
                 catch(SecurityException ex) {
-                    log.error("failed getting system property for " + system_property_name, ex);
+                    log.error(Util.getMessage("SyspropFailure"), system_property_name, ex);
                 }
             }
         }
@@ -1338,11 +1332,7 @@ public class Configurator {
     				parameterizedTypeSanityCheck(methodParamType) ;
     			}
     			catch(IllegalArgumentException e) {
-    				if(log.isErrorEnabled()) {
-    					log.error("Method " + m.getName() + " failed paramaterizedTypeSanityCheck()") ;
-    				}
-    				// because this Method's parameter fails the sanity check, its probably not 
-    				// an InetAddress related structure
+    				// because this Method's parameter fails the sanity check, its probably not an InetAddress
     				return false ;
     			}
     			
@@ -1411,11 +1401,8 @@ public class Configurator {
     			return ((IpAddress) obj).getIpAddress() ;
     		else if (obj instanceof InetSocketAddress)
     			return ((InetSocketAddress) obj).getAddress() ;
-    		else {
-    			if (log.isWarnEnabled())
-    				log.warn("Input argument does not represent one of InetAddress...: class=" + obj.getClass().getName()) ;
-       			throw new IllegalArgumentException("Input argument does not represent one of InetAddress. IpAddress not InetSocketAddress") ;    			
-    		}
+    		else
+       			throw new IllegalArgumentException("Input argument does not represent one of InetAddress. IpAddress not InetSocketAddress") ;
      	}
     	
     	public String toString() {

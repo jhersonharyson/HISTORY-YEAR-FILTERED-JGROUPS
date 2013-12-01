@@ -3,6 +3,7 @@ package org.jgroups.protocols;
 import org.jgroups.*;
 import org.jgroups.annotations.*;
 import org.jgroups.stack.Protocol;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
 
@@ -26,7 +27,6 @@ import java.util.concurrent.ConcurrentMap;
  * @since 2.11
  */
 @MBean(description="Server side STOPM protocol, STOMP clients can connect to it")
-@Experimental
 public class STOMP extends Protocol implements Runnable {
 
     /* -----------------------------------------    Properties     ----------------------------------------------- */
@@ -215,17 +215,33 @@ public class STOMP extends Protocol implements Runnable {
                 handleView((View)evt.getArg());
                 break;
         }
-        
 
         return up_prot.up(evt);
     }
 
+    public void up(MessageBatch batch) {
+        for(Message msg: batch) {
+            StompHeader hdr=(StompHeader)msg.getHeader(id);
+            if(hdr != null || forward_non_client_generated_msgs) {
+                try {
+                    batch.remove(msg);
+                    up(new Event(Event.MSG, msg));
+                }
+                catch(Throwable t) {
+                    log.error("failed passing up message", t);
+                }
+            }
+        }
+
+        if(!batch.isEmpty())
+            up_prot.up(batch);
+    }
 
     public static Frame readFrame(DataInputStream in) throws IOException {
         String verb=Util.readLine(in);
         if(verb == null)
             throw new EOFException("reading verb");
-        if(verb.length() == 0)
+        if(verb.isEmpty())
             return null;
         verb=verb.trim();
         
@@ -236,7 +252,7 @@ public class STOMP extends Protocol implements Runnable {
             String header=Util.readLine(in);
             if(header == null)
                 throw new EOFException("reading header");
-            if(header.length() == 0)
+            if(header.isEmpty())
                 break;
             int index=header.indexOf(":");
             if(index != -1)
@@ -322,82 +338,14 @@ public class STOMP extends Protocol implements Runnable {
         }
     }
 
-//    protected String getAllClients() {
-//        StringBuilder sb=new StringBuilder();
-//        boolean first=true;
-//
-//        synchronized(connections) {
-//            for(Connection conn: connections) {
-//                UUID session_id=conn.session_id;
-//                if(session_id != null) {
-//                    if(first)
-//                        first=false;
-//                    else
-//                        sb.append(",");
-//                    sb.append(session_id);
-//                }
-//            }
-//        }
-//
-//        return sb.toString();
-//    }
 
     protected void broadcastEndpoint() {
         if(endpoint != null) {
-            Message msg=new Message();
-            msg.putHeader(id, StompHeader.createHeader(StompHeader.Type.ENDPOINT, "endpoint", endpoint));
+            Message msg=new Message().putHeader(id, StompHeader.createHeader(StompHeader.Type.ENDPOINT, "endpoint", endpoint));
             down_prot.down(new Event(Event.MSG, msg));
         }
     }
 
-//    private void sendToClients(String destination, String sender, byte[] buffer, int offset, int length) {
-//        int len=50 + length + (ServerVerb.MESSAGE.name().length() + 2)
-//                + (destination != null? destination.length()+ 2 : 0)
-//                + (sender != null? sender.length() +2 : 0)
-//                + (buffer != null? 20 : 0);
-//
-//        ByteBuffer buf=ByteBuffer.allocate(len);
-//
-//        StringBuilder sb=new StringBuilder(ServerVerb.MESSAGE.name()).append("\n");
-//        if(destination != null)
-//            sb.append("destination: ").append(destination).append("\n");
-//        if(sender != null)
-//            sb.append("sender: ").append(sender).append("\n");
-//        if(buffer != null)
-//            sb.append("content-length: ").append(String.valueOf(length)).append("\n");
-//        sb.append("\n");
-//
-//        byte[] tmp=sb.toString().getBytes();
-//
-//        if(buffer != null) {
-//            buf.put(tmp, 0, tmp.length);
-//            buf.put(buffer, offset, length);
-//        }
-//        buf.put(NULL_BYTE);
-//
-//        final Set<Connection> target_connections=new HashSet<Connection>();
-//        if(destination == null) {
-//            synchronized(connections) {
-//                target_connections.addAll(connections);
-//            }
-//        }
-//        else {
-//            if(!exact_destination_match) {
-//                for(Map.Entry<String,Set<Connection>> entry: subscriptions.entrySet()) {
-//                    if(entry.getKey().startsWith(destination))
-//                        target_connections.addAll(entry.getValue());
-//                }
-//            }
-//            else {
-//                Set<Connection> conns=subscriptions.get(destination);
-//                if(conns != null)
-//                    target_connections.addAll(conns);
-//            }
-//        }
-//
-//        for(Connection conn: target_connections)
-//            conn.writeResponse(buf.array(), buf.arrayOffset(), buf.position());
-//    }
 
 
     private void sendToClients(Map<String,String> headers, byte[] buffer, int offset, int length) {
@@ -529,7 +477,7 @@ public class STOMP extends Protocol implements Runnable {
                         headers.put("sender", session_id.toString());
                     }
 
-                    Message msg=new Message(null, null, frame.getBody());
+                    Message msg=new Message(null, frame.getBody());
                     Header hdr=StompHeader.createHeader(StompHeader.Type.MESSAGE, headers);
                     msg.putHeader(id, hdr);
                     down_prot.down(new Event(Event.MSG, msg));

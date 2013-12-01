@@ -9,6 +9,7 @@ import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.Protocol;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Util;
 
 import java.util.*;
@@ -79,8 +80,8 @@ public abstract class FlowControl extends Protocol {
      * this flag should not be set to true if the concurrent stack is used
      */
     @Property(description="Does not block a down message if it is a result of handling an up message in the" +
-            "same thread. Fixes JGRP-928")
-    protected boolean ignore_synchronous_response=true;
+            "same thread. Fixes JGRP-928",deprecatedMessage="not used any longer")
+    protected boolean ignore_synchronous_response=false;
     
     
     
@@ -105,21 +106,10 @@ public abstract class FlowControl extends Protocol {
     protected volatile boolean running=true;
 
     
-    protected boolean frag_size_received=false;
+    protected int frag_size;
 
    
 
-
-
-    /**
-     * Thread that carries messages through up() and shouldn't be blocked
-     * in down() if ignore_synchronous_response==true. JGRP-465.
-     */
-    protected final ThreadLocal<Boolean> ignore_thread=new ThreadLocal<Boolean>() {
-        protected Boolean initialValue() {
-            return false;
-        }
-    };   
 
 
     public void resetStats() {
@@ -300,9 +290,14 @@ public abstract class FlowControl extends Protocol {
 
     public void start() throws Exception {
         super.start();
-        if(!frag_size_received) {
+        boolean is_udp_transport=getTransport().isMulticastCapable();
+        if(is_udp_transport && frag_size <= 0)
             log.warn("No fragmentation protocol was found. When flow control is used, we recommend " +
-                    "a fragmentation protocol, due to http://jira.jboss.com/jira/browse/JGRP-590");
+                       "a fragmentation protocol, due to http://jira.jboss.com/jira/browse/JGRP-590");
+        if(frag_size > 0 && frag_size >= min_credits) {
+            log.warn("The fragmentation size of the fragmentation protocol is " + frag_size +
+                       ", which is greater than min_credits (" + min_credits +  "). This can lead to blockings " +
+                       "(https://issues.jboss.org/browse/JGRP-1659)");
         }
         running=true;
     }
@@ -310,7 +305,6 @@ public abstract class FlowControl extends Protocol {
     public void stop() {
         super.stop();
         running=false;
-        ignore_thread.remove();
     }
 
 
@@ -319,7 +313,7 @@ public abstract class FlowControl extends Protocol {
         switch(evt.getType()) {
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                if(msg.isFlagSet(Message.NO_FC))
+                if(msg.isFlagSet(Message.Flag.NO_FC))
                     break;
 
                 Address dest=msg.getDest();
@@ -333,11 +327,6 @@ public abstract class FlowControl extends Protocol {
                 if(length == 0)
                     break;
 
-                if(ignore_synchronous_response && ignore_thread.get()) { // JGRP-465
-                    if(log.isTraceEnabled())
-                        log.trace("bypassing flow control because of synchronous response " + Thread.currentThread());
-                    break;
-                }
                 return handleDownMessage(evt, msg, dest, length);
 
             case Event.CONFIG:
@@ -358,7 +347,7 @@ public abstract class FlowControl extends Protocol {
 
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
-                if(msg.isFlagSet(Message.NO_FC))
+                if(msg.isFlagSet(Message.Flag.NO_FC))
                     break;
 
                 Address dest=msg.getDest();
@@ -370,38 +359,17 @@ public abstract class FlowControl extends Protocol {
                     break;
                 
                 if(hdr != null) {
-                    switch(hdr.type) {
-                        case FcHeader.REPLENISH:
-                            num_credit_responses_received++;
-                            handleCredit(msg.getSrc(), (Long)msg.getObject());
-                            break;
-                        case FcHeader.CREDIT_REQUEST:
-                            num_credit_requests_received++;
-                            Address sender=msg.getSrc();
-                            Long requested_credits=(Long)msg.getObject();
-                            if(requested_credits != null)
-                                handleCreditRequest(received, sender, requested_credits.longValue());
-                            break;
-                        default:
-                            log.error("header type " + hdr.type + " not known");
-                            break;
-                    }
+                    handleUpEvent(msg, hdr);
                     return null; // don't pass message up
                 }
 
                 Address sender=msg.getSrc();
                 long new_credits=adjustCredit(received, sender, msg.getLength());
                 
-                // JGRP-928: changed ignore_thread to a ThreadLocal: multiple threads can access it with the
-                // introduction of the concurrent stack
-                if(ignore_synchronous_response)
-                    ignore_thread.set(true);
                 try {
                     return up_prot.up(evt);
                 }
                 finally {
-                    if(ignore_synchronous_response)
-                        ignore_thread.remove(); // need to revert because the thread is placed back into the pool
                     if(new_credits > 0)
                         sendCredit(sender, new_credits);
                 }
@@ -409,28 +377,75 @@ public abstract class FlowControl extends Protocol {
             case Event.VIEW_CHANGE:
                 handleViewChange(((View)evt.getArg()).getMembers());
                 break;
-
-            case Event.CONFIG:
-                Map<String,Object> map=(Map<String,Object>)evt.getArg();
-                handleConfigEvent(map);
-                break;
         }
         return up_prot.up(evt);
     }
 
 
+    protected void handleUpEvent(final Message msg, FcHeader hdr) {
+        switch(hdr.type) {
+            case FcHeader.REPLENISH:
+                num_credit_responses_received++;
+                handleCredit(msg.getSrc(), (Long)msg.getObject());
+                break;
+            case FcHeader.CREDIT_REQUEST:
+                num_credit_requests_received++;
+                Address sender=msg.getSrc();
+                Long requested_credits=(Long)msg.getObject();
+                if(requested_credits != null)
+                    handleCreditRequest(received, sender,requested_credits);
+                break;
+            default:
+                log.error("header type " + hdr.type + " not known");
+                break;
+        }
+    }
+
+
+    public void up(MessageBatch batch) {
+        int length=0;
+        for(Message msg: batch) {
+            if(msg.isFlagSet(Message.Flag.NO_FC))
+                continue;
+
+            Address dest=msg.getDest();
+            boolean multicast=dest == null;
+            boolean handle_multicasts=handleMulticastMessage();
+            FcHeader hdr=(FcHeader)msg.getHeader(this.id);
+            boolean process=(handle_multicasts && multicast) || (!handle_multicasts && !multicast) || hdr != null;
+            if(!process)
+                continue;
+
+            if(hdr != null) {
+                batch.remove(msg); // remove the message with a flow control header so it won't get passed up
+                handleUpEvent(msg,hdr);
+                continue;
+            }
+            length+=msg.getLength();
+        }
+
+        Address sender=batch.sender();
+        long new_credits=0;
+        if(length > 0)
+            new_credits=adjustCredit(received, sender, length);
+
+        if(!batch.isEmpty()) {
+            try {
+                up_prot.up(batch);
+            }
+            finally {
+                if(new_credits > 0)
+                    sendCredit(sender, new_credits);
+            }
+        }
+    }
+
+
     protected void handleConfigEvent(Map<String,Object> info) {
         if(info != null) {
-            Integer frag_size=(Integer)info.get("frag_size");
-            if(frag_size != null) {
-                if(frag_size > max_credits) {
-                    log.warn("The fragmentation size of the fragmentation protocol is " + frag_size +
-                            ", which is greater than the max credits. While this is not incorrect, " +
-                            "it may cause blockings. Frag size should be less than max_credits " +
-                            "(http://jira.jboss.com/jira/browse/JGRP-590)");
-                }
-                frag_size_received=true;
-            }
+            Integer tmp=(Integer)info.get("frag_size");
+            if(tmp != null)
+                this.frag_size=tmp;
         }
     }
 
@@ -477,15 +492,14 @@ public abstract class FlowControl extends Protocol {
     protected void sendCredit(Address dest, long credits) {
         if(log.isTraceEnabled())
             if(log.isTraceEnabled()) log.trace("sending " + credits + " credits to " + dest);
-        Message msg=new Message(dest, null, new Long(credits));
-        msg.setFlag(Message.OOB);
-        msg.putHeader(this.id, REPLENISH_HDR);
+        Message msg=new Message(dest, credits).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
+          .putHeader(this.id,REPLENISH_HDR);
         down_prot.down(new Event(Event.MSG, msg));
         num_credit_responses_sent++;
     }
 
     /**
-     * We cannot send this request as OOB messages, as the credit request needs to queue up behind the regular messages;
+     * We cannot send this request as OOB message, as the credit request needs to queue up behind the regular messages;
      * if a receiver cannot process the regular messages, that is a sign that the sender should be throttled !
      * @param dest The member to which we send the credit request
      * @param credits_needed The number of bytes (of credits) left for dest
@@ -493,8 +507,8 @@ public abstract class FlowControl extends Protocol {
     protected void sendCreditRequest(final Address dest, Long credits_needed) {
         if(log.isTraceEnabled())
             log.trace("sending request for " + credits_needed + " credits to " + dest);
-        Message msg=new Message(dest, null, credits_needed);
-        msg.putHeader(this.id, CREDIT_REQUEST_HDR);
+        Message msg=new Message(dest, credits_needed).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
+          .putHeader(this.id, CREDIT_REQUEST_HDR);
         down_prot.down(new Event(Event.MSG, msg));
         num_credit_requests_sent++;
     }

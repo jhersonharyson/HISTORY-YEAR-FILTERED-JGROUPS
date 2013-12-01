@@ -63,6 +63,9 @@ public abstract class Discovery extends Protocol {
       "contents of the disk cache before returning the results")
     protected boolean use_disk_cache=false;
 
+    @Property(description="When sending a discovery request, always send the physical address and logical name too")
+    protected boolean always_send_physical_addr_with_discovery_request=false;
+
 
     @ManagedOperation(description="Sets force_sending_discovery_rsps")
     public void setForceSendingDiscoveryRsps(boolean flag) {
@@ -135,25 +138,28 @@ public abstract class Discovery extends Protocol {
 
     }
 
-    public long getTimeout() {
-        return timeout;
-    }
+    public long      getTimeout()                       {return timeout;}
+    public void      setTimeout(long timeout)           {this.timeout=timeout;}
+    public int       getNumInitialMembers()             {return num_initial_members;}
+    public void      setNumInitialMembers(int num)      {this.num_initial_members=num;}
+    public int       getNumberOfDiscoveryRequestsSent() {return num_discovery_requests;}
+    public long      timeout()                          {return timeout;}
+    public Discovery timeout(long timeout)              {this.timeout=timeout; return this;}
+    public long      numInitialMembers()                {return num_initial_members;}
+    public Discovery numInitialMembers(int num)         {this.num_initial_members=num; return this;}
+    public boolean   breakOnCoordResponse()             {return break_on_coord_rsp;}
+    public Discovery breakOnCoordResponse(boolean flag) {break_on_coord_rsp=flag; return this;}
+    public boolean   returnEntireCache()                {return return_entire_cache;}
+    public Discovery returnEntireCache(boolean flag)    {return_entire_cache=flag; return this;}
+    public long      staggerTimeout()                   {return stagger_timeout;}
+    public Discovery staggerTimeout(long timeout)       {stagger_timeout=timeout; return this;}
+    public boolean   forceDiscoveryResponses()          {return force_sending_discovery_rsps;}
+    public Discovery forceDiscoveryResponses(boolean f) {force_sending_discovery_rsps=f; return this;}
+    public boolean   useDiskCache()                     {return use_disk_cache;}
+    public Discovery useDiskCache(boolean flag)         {use_disk_cache=flag; return this;}
 
-    public void setTimeout(long timeout) {
-        this.timeout=timeout;
-    }
 
-    public int getNumInitialMembers() {
-        return num_initial_members;
-    }
 
-    public void setNumInitialMembers(int num_initial_members) {
-        this.num_initial_members=num_initial_members;
-    }
-
-    public int getNumberOfDiscoveryRequestsSent() {
-        return num_discovery_requests;
-    }
 
     @ManagedAttribute
     public String getView() {return view != null? view.getViewId().toString() : "null";}
@@ -248,16 +254,19 @@ public abstract class Discovery extends Protocol {
         PingData data=null;
         PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
 
-        if(view_id == null)
-            data=new PingData(local_addr, null, false, UUID.get(local_addr), Arrays.asList(physical_addr));
+        // https://issues.jboss.org/browse/JGRP-1670
+        if(view_id == null || always_send_physical_addr_with_discovery_request)
+            data=new PingData(local_addr, null, false, UUID.get(local_addr), physical_addr != null? Arrays.asList(physical_addr) : null);
 
-        PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ, data, cluster_name);
-        hdr.view_id=view_id;
+        PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ).clusterName(cluster_name).viewId(view_id);
 
         Collection<PhysicalAddress> cluster_members=fetchClusterMembers(cluster_name);
         if(cluster_members == null) {
-            // multicast msg
-            Message msg=new Message(null).setFlag(Message.OOB).putHeader(getId(), hdr);
+            // message needs to have DONT_BUNDLE flag: if A sends message M to B, and we need to fetch B's physical
+            // address, then the bundler thread blocks until the discovery request has returned. However, we cannot send
+            // the discovery *request* until the bundler thread has returned from sending M
+            Message msg=new Message(null).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
+              .putHeader(getId(), hdr).setBuffer(marshal(data));
             sendMcastDiscoveryRequest(msg);
         }
         else {
@@ -276,11 +285,11 @@ public abstract class Discovery extends Protocol {
             }
             else {
                 for(final Address addr: cluster_members) {
-                    if(addr.equals(physical_addr)) // no need to send the request to myself
+                    if(physical_addr != null && addr.equals(physical_addr)) // no need to send the request to myself
                         continue;
-                    final Message msg=new Message(addr, null, null);
-                    msg.setFlag(Message.OOB);
-                    msg.putHeader(this.id, hdr);
+                    // the message needs to be DONT_BUNDLE, see explanation above
+                    final Message msg=new Message(addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
+                      .putHeader(this.id, hdr).setBuffer(marshal(data));
                     if(log.isTraceEnabled())
                         log.trace(local_addr + ": sending discovery request to " + msg.getDest());
                     if(!sendDiscoveryRequestsInParallel()) {
@@ -369,11 +378,11 @@ public abstract class Discovery extends Protocol {
                 if(hdr == null)
                     return up_prot.up(evt);
 
-                PingData data=hdr.data;
-                Address logical_addr=data != null? data.getAddress() : null;
-
                 if(is_leaving)
                     return null; // prevents merging back a leaving member (https://issues.jboss.org/browse/JGRP-1336)
+
+                PingData data=readPingData(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                Address logical_addr=data != null? data.getAddress() : null;
 
                 switch(hdr.type) {
 
@@ -514,6 +523,7 @@ public abstract class Discovery extends Protocol {
     }
 
 
+
     /**
      * An event is to be sent down the stack. The layer may want to examine its type and perform
      * some action on it, depending on the event's type. If the event is a message MSG, then
@@ -620,21 +630,27 @@ public abstract class Discovery extends Protocol {
         }
     }
 
+    public static Buffer marshal(PingData data) {
+        return Util.streamableToBuffer(data);
+    }
+
+    protected PingData readPingData(byte[] buffer, int offset, int length) {
+        try {
+            return buffer != null? Util.streamableFromBuffer(PingData.class, buffer, offset, length) : null;
+        }
+        catch(Exception ex) {
+            log.error("%s: failed reading PingData from message: %s", local_addr, ex);
+            return null;
+        }
+    }
 
     protected void sendDiscoveryResponse(Address logical_addr, List<PhysicalAddress> physical_addrs,
                                          boolean is_server, boolean return_view_only, String logical_name, final Address sender) {
-        PingData data;
-        if(return_view_only) {
-            data=new PingData(logical_addr, view, is_server, null, null);
-        }
-        else {
-            ViewId view_id=view != null? view.getViewId() : null;
-            data=new PingData(logical_addr, null, view_id, is_server, logical_name, physical_addrs);
-        }
+        final PingData data=return_view_only? new PingData(logical_addr, view, is_server, null, null)
+          : new PingData(logical_addr, null, view != null? view.getViewId() : null, is_server, logical_name, physical_addrs);
 
-        final Message rsp_msg=new Message(sender).setFlag(Message.OOB);
-        final PingHeader rsp_hdr=new PingHeader(PingHeader.GET_MBRS_RSP, data);
-        rsp_msg.putHeader(this.id, rsp_hdr);
+        final Message rsp_msg=new Message(sender).setFlag(Message.Flag.INTERNAL)
+          .putHeader(this.id, new PingHeader(PingHeader.GET_MBRS_RSP)).setBuffer(marshal(data));
 
         if(stagger_timeout > 0) {
             int view_size=view != null? view.size() : 10;
@@ -644,7 +660,7 @@ public abstract class Discovery extends Protocol {
             timer.schedule(new Runnable() {
                 public void run() {
                     if(log.isTraceEnabled())
-                        log.trace(local_addr + ": received GET_MBRS_REQ from " + sender + ", sending staggered response " + rsp_hdr);
+                        log.trace(local_addr + ": received GET_MBRS_REQ from " + sender + ", sending staggered response " + data);
                     down_prot.down(new Event(Event.MSG, rsp_msg));
                 }
             }, sleep_time, TimeUnit.MILLISECONDS);
@@ -652,7 +668,7 @@ public abstract class Discovery extends Protocol {
         }
 
         if(log.isTraceEnabled())
-            log.trace(local_addr + ": received GET_MBRS_REQ from " + sender + ", sending response " + rsp_hdr);
+            log.trace(local_addr + ": received GET_MBRS_REQ from " + sender + ", sending response " + data);
         down_prot.down(new Event(Event.MSG, rsp_msg));
     }
 

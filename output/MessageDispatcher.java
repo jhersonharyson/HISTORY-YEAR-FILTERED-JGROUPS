@@ -37,24 +37,25 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * @author Bela Ban
  */
-public class MessageDispatcher implements RequestHandler, ChannelListener {
-    protected Channel channel=null;
-    protected RequestCorrelator corr=null;
-    protected MessageListener msg_listener=null;
-    protected MembershipListener membership_listener=null;
-    protected RequestHandler req_handler=null;
-    protected ProtocolAdapter prot_adapter=null;
-    protected volatile Collection<Address> members=new HashSet<Address>();
-    protected Address local_addr=null;
-    protected final Log log=LogFactory.getLog(getClass());
-    protected boolean hardware_multicast_supported=false;
-    protected final AtomicInteger sync_unicasts=new AtomicInteger(0);
-    protected final AtomicInteger async_unicasts=new AtomicInteger(0);
-    protected final AtomicInteger sync_multicasts=new AtomicInteger(0);
-    protected final AtomicInteger async_multicasts=new AtomicInteger(0);
-    protected final AtomicInteger sync_anycasts=new AtomicInteger(0);
-    protected final AtomicInteger async_anycasts=new AtomicInteger(0);
-    protected final Set<ChannelListener> channel_listeners=new CopyOnWriteArraySet<ChannelListener>();
+public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
+    protected Channel                               channel;
+    protected RequestCorrelator                     corr;
+    protected MessageListener                       msg_listener;
+    protected MembershipListener                    membership_listener;
+    protected RequestHandler                        req_handler;
+    protected boolean                               async_dispatching;
+    protected ProtocolAdapter                       prot_adapter;
+    protected volatile Collection<Address>          members=new HashSet<Address>();
+    protected Address                               local_addr;
+    protected final Log                             log=LogFactory.getLog(getClass());
+    protected boolean                               hardware_multicast_supported=false;
+    protected final AtomicInteger                   sync_unicasts=new AtomicInteger(0);
+    protected final AtomicInteger                   async_unicasts=new AtomicInteger(0);
+    protected final AtomicInteger                   sync_multicasts=new AtomicInteger(0);
+    protected final AtomicInteger                   async_multicasts=new AtomicInteger(0);
+    protected final AtomicInteger                   sync_anycasts=new AtomicInteger(0);
+    protected final AtomicInteger                   async_anycasts=new AtomicInteger(0);
+    protected final Set<ChannelListener>            channel_listeners=new CopyOnWriteArraySet<ChannelListener>();
     protected final DiagnosticsHandler.ProbeHandler probe_handler=new MyProbeHandler();
 
 
@@ -70,9 +71,8 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
         }
         setMessageListener(l);
         setMembershipListener(l2);
-        if(channel != null) {
+        if(channel != null)
             installUpHandler(prot_adapter, true);
-        }
         start();
     }
 
@@ -85,6 +85,14 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
     }
 
 
+    public boolean asyncDispatching() {return async_dispatching;}
+
+    public MessageDispatcher asyncDispatching(boolean flag) {
+        async_dispatching=flag;
+        if(corr != null)
+            corr.asyncDispatching(flag);
+        return this;
+    }
 
 
     public UpHandler getProtocolAdapter() {
@@ -121,7 +129,7 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
 
     public void start() {
         if(corr == null)
-            corr=createRequestCorrelator(prot_adapter, this, local_addr);
+            corr=createRequestCorrelator(prot_adapter, this, local_addr).asyncDispatching(async_dispatching);
         correlatorStarted();
         corr.start();
 
@@ -254,21 +262,39 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
      * @param dests A list of group members from which to expect responses (if the call is blocking).
      * @param msg The message to be sent
      * @param options A set of options that govern the call. See {@link org.jgroups.blocks.RequestOptions} for details
+     * @param listener A FutureListener which will be registered (if non null) with the future <em>before</em> the call is invoked
+     * @return NotifyingFuture<T> A future from which the results (RspList) can be retrieved
+     * @throws Exception If the request cannot be sent
+     */
+    public <T> NotifyingFuture<RspList<T>> castMessageWithFuture(final Collection<Address> dests,
+                                                                 Message msg,
+                                                                 RequestOptions options,
+                                                                 FutureListener<T> listener) throws Exception {
+        GroupRequest<T> req=cast(dests,msg,options,false, listener);
+        return req != null? req : new NullFuture<RspList>(new RspList());
+    }
+
+    /**
+     * Sends a message to all members and expects responses from members in dests (if non-null).
+     * @param dests A list of group members from which to expect responses (if the call is blocking).
+     * @param msg The message to be sent
+     * @param options A set of options that govern the call. See {@link org.jgroups.blocks.RequestOptions} for details
      * @return NotifyingFuture<T> A future from which the results (RspList) can be retrieved
      * @throws Exception If the request cannot be sent
      */
     public <T> NotifyingFuture<RspList<T>> castMessageWithFuture(final Collection<Address> dests,
                                                                  Message msg,
                                                                  RequestOptions options) throws Exception {
-        GroupRequest<T> req=cast(dests, msg, options, false);
-        return req != null? req : new NullFuture<RspList>(new RspList());
+        return castMessageWithFuture(dests, msg, options, null);
     }
 
-    protected <T> GroupRequest<T> cast(final Collection<Address> dests, Message msg,
-                                       RequestOptions options,
-                                       boolean block_for_results) throws Exception {
-        List<Address> real_dests;
 
+
+    protected <T> GroupRequest<T> cast(final Collection<Address> dests, Message msg, RequestOptions options,
+                                       boolean block_for_results, FutureListener<T> listener) throws Exception {
+        if(msg.getDest() != null && !(msg.getDest() instanceof AnycastAddress))
+            throw new IllegalArgumentException("message destination is non-null, cannot send message");
+        List<Address> real_dests;
         // we need to clone because we don't want to modify the original
         if(dests != null) {
             real_dests=new ArrayList<Address>();
@@ -320,6 +346,8 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
         }
 
         GroupRequest<T> req=new GroupRequest<T>(msg, corr, real_dests, options);
+        if(listener != null)
+            req.setListener(listener);
         if(options != null) {
             req.setResponseFilter(options.getRspFilter());
             req.setAnycasting(options.getAnycasting());
@@ -330,6 +358,11 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
         req.setBlockForResults(block_for_results);
         req.execute();
         return req;
+    }
+
+    protected <T> GroupRequest<T> cast(final Collection<Address> dests, Message msg, RequestOptions options,
+                                       boolean block_for_results) throws Exception {
+        return cast(dests, msg, options, block_for_results, null);
     }
 
 
@@ -392,12 +425,14 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
      * Sends a unicast message to the target defined by msg.getDest() and returns a future
      * @param msg The unicast message to be sent. msg.getDest() must not be null
      * @param options
+     * @param listener A FutureListener which will be registered (if non null) with the future <em>before</em> the call is invoked
      * @return NotifyingFuture<T> A future from which the result can be fetched
      * @throws Exception If there was problem sending the request, processing it at the receiver, or processing
      *                   it at the sender. {@link java.util.concurrent.Future#get()} will throw this exception
      * @throws TimeoutException If the call didn't succeed within the timeout defined in options (if set)
      */
-    public <T> NotifyingFuture<T> sendMessageWithFuture(Message msg, RequestOptions options) throws Exception {
+    public <T> NotifyingFuture<T> sendMessageWithFuture(Message msg, RequestOptions options,
+                                                        FutureListener<T> listener) throws Exception {
         Address dest=msg.getDest();
         if(dest == null)
             throw new IllegalArgumentException("message destination is null, cannot send message");
@@ -413,11 +448,27 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
         }
 
         UnicastRequest<T> req=new UnicastRequest<T>(msg, corr, dest, options);
+        if(listener != null)
+            req.setListener(listener);
         req.setBlockForResults(false);
         req.execute();
         if(options != null && options.getMode() == ResponseMode.GET_NONE)
             return new NullFuture<T>(null);
         return req;
+    }
+
+
+    /**
+     * Sends a unicast message to the target defined by msg.getDest() and returns a future
+     * @param msg The unicast message to be sent. msg.getDest() must not be null
+     * @param options
+     * @return NotifyingFuture<T> A future from which the result can be fetched
+     * @throws Exception If there was problem sending the request, processing it at the receiver, or processing
+     *                   it at the sender. {@link java.util.concurrent.Future#get()} will throw this exception
+     * @throws TimeoutException If the call didn't succeed within the timeout defined in options (if set)
+     */
+    public <T> NotifyingFuture<T> sendMessageWithFuture(Message msg, RequestOptions options) throws Exception {
+        return sendMessageWithFuture(msg, options, null);
     }
 
 
@@ -430,6 +481,26 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
     }
     /* -------------------- End of RequestHandler Interface ------------------- */
 
+
+
+    /* -------------------- AsyncRequestHandler Interface --------------------- */
+    public void handle(Message request, Response response) throws Exception {
+        if(req_handler != null) {
+            if(req_handler instanceof AsyncRequestHandler)
+                ((AsyncRequestHandler)req_handler).handle(request, response);
+            else {
+                Object retval=req_handler.handle(request);
+                if(response != null)
+                    response.send(retval, false);
+            }
+            return;
+        }
+
+        Object retval=handle(request);
+        if(response != null)
+            response.send(retval, false);
+    }
+    /* ------------------ End of AsyncRequestHandler Interface----------------- */
 
 
 
@@ -493,8 +564,10 @@ public class MessageDispatcher implements RequestHandler, ChannelListener {
             case Event.GET_STATE_OK:
                 if(msg_listener != null) {
                     StateTransferResult result=(StateTransferResult)evt.getArg();
-                    ByteArrayInputStream input=new ByteArrayInputStream(result.getBuffer());
-                    msg_listener.setState(input);
+                    if(result.hasBuffer()) {
+                        ByteArrayInputStream input=new ByteArrayInputStream(result.getBuffer());
+                        msg_listener.setState(input);
+                    }
                 }
                 break;
 

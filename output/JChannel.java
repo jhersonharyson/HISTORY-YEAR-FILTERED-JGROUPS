@@ -7,8 +7,6 @@ import org.jgroups.blocks.MethodCall;
 import org.jgroups.conf.ConfiguratorFactory;
 import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.conf.ProtocolStackConfigurator;
-import org.jgroups.logging.Log;
-import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.TP;
 import org.jgroups.stack.*;
 import org.jgroups.util.*;
@@ -66,8 +64,6 @@ public class JChannel extends Channel {
 
 
     protected final ConcurrentMap<String,Object>    config=Util.createConcurrentMap(16);
-
-    protected final Log                             log=LogFactory.getLog(JChannel.class);
 
     /** Collect statistics */
     @ManagedAttribute(description="Collect channel statistics",writable=true)
@@ -220,7 +216,6 @@ public class JChannel extends Channel {
             prot_stack.setChannel(this);
     }
 
-    protected Log getLog() {return log;}
 
     /**
      * Returns the protocol stack configuration in string format. An example of this property is<br/>
@@ -232,8 +227,8 @@ public class JChannel extends Channel {
 
     public void enableStats(boolean stats) {this.stats=stats;}
 
-    @Deprecated @ManagedAttribute public boolean isOpen() {return !(state == State.CLOSED);}
-    @Deprecated @ManagedAttribute public boolean isConnected() {return state == State.CONNECTED;}
+    @ManagedAttribute public boolean isOpen() {return !(state == State.CLOSED);}
+    @ManagedAttribute public boolean isConnected() {return state == State.CONNECTED;}
 
     @ManagedOperation
     public void resetStats()          {sent_msgs=received_msgs=sent_bytes=received_bytes=0;}
@@ -367,7 +362,7 @@ public class JChannel extends Channel {
                         down(new Event(Event.DISCONNECT, local_addr));   // DISCONNECT is handled by each layer
                     }
                     catch(Throwable t) {
-                        log.error("disconnect failed", t);
+                        log.error(Util.getMessage("DisconnectFailure"), local_addr, t);
                     }
                 }
                 state=State.OPEN;
@@ -424,25 +419,20 @@ public class JChannel extends Channel {
         checkClosedOrNotConnected();
         if(msg == null)
             throw new NullPointerException("msg is null");
-        if(stats) {
-            sent_msgs++;
-            sent_bytes+=msg.getLength();
-        }
-
         down(new Event(Event.MSG, msg));
     }
 
 
     public void send(Address dst, Object obj) throws Exception {
-        send(new Message(dst, null, obj));
+        send(new Message(dst, obj));
     }
 
     public void send(Address dst, byte[] buf) throws Exception {
-        send(new Message(dst, null, buf));
+        send(new Message(dst, buf));
     }
 
     public void send(Address dst, byte[] buf, int offset, int length) throws Exception {
-        send(new Message(dst, null, buf, offset, length));
+        send(new Message(dst, buf, offset, length));
     }
 
 
@@ -450,7 +440,7 @@ public class JChannel extends Channel {
         return state == State.CONNECTED ? my_view : null;
     }
     
-    @ManagedAttribute(name="View")
+    @ManagedAttribute(name="view")
     public String getViewAsString() {
         View v=getView();
         return v != null ? v.toString() : "n/a";
@@ -462,10 +452,10 @@ public class JChannel extends Channel {
 
     public Address getAddress() {return state == State.CLOSED ? null : local_addr;}
 
-    @ManagedAttribute(name="Address")
+    @ManagedAttribute(name="address")
     public String getAddressAsString() {return local_addr != null? local_addr.toString() : "n/a";}
 
-    @ManagedAttribute(name="Address (UUID)")
+    @ManagedAttribute(name="address_uuid")
     public String getAddressAsUUID() {return local_addr instanceof UUID? ((UUID)local_addr).toStringLong() : null;}
 
     public String getName() {return name;}
@@ -483,6 +473,10 @@ public class JChannel extends Channel {
                 UUID.add(local_addr, this.name);
         }
     }
+
+    public JChannel name(String name) {setName(name); return this;}
+
+    public JChannel receiver(Receiver r) {setReceiver(r); return this;}
 
     @ManagedAttribute(description="Returns cluster name this channel is connected to")
     public String getClusterName() {return state == State.CONNECTED? cluster_name : null;}
@@ -561,8 +555,7 @@ public class JChannel extends Channel {
         if(target == null)
             target=determineCoordinator();
         if(target != null && local_addr != null && target.equals(local_addr)) {
-            if(log.isTraceEnabled())
-                log.trace("cannot get state from myself (" + target + "): probably the first member");
+            log.trace("cannot get state from myself (" + target + "): probably the first member");
             return;
         }
 
@@ -616,7 +609,7 @@ public class JChannel extends Channel {
             case Event.VIEW_CHANGE:
                 View tmp=(View)evt.getArg();
                 if(tmp instanceof MergeView)
-                    my_view=new View(tmp.getVid(), tmp.getMembers());
+                    my_view=new View(tmp.getViewId(), tmp.getMembers());
                 else
                     my_view=tmp;
 
@@ -720,6 +713,39 @@ public class JChannel extends Channel {
     }
 
 
+    /** Callback invoked by the protocol stack to deliver a message batch */
+    public void up(MessageBatch batch) {
+        if(stats) {
+            received_msgs+=batch.size();
+            received_bytes+=batch.length();
+        }
+
+        // discard local messages (sent by myself to me)
+        if(discard_own_messages && local_addr != null && batch.sender() != null && local_addr.equals(batch.sender()))
+            return;
+
+        for(Message msg: batch) {
+            if(up_handler != null) {
+                try {
+                    up_handler.up(new Event(Event.MSG, msg));
+                }
+                catch(Throwable t) {
+                    log.error(Util.getMessage("UpHandlerFailure"), t);
+                }
+            }
+            else if(receiver != null) {
+                try {
+                    receiver.receive(msg);
+                }
+                catch(Throwable t) {
+                    log.error(Util.getMessage("ReceiverFailure"), t);
+                }
+            }
+        }
+    }
+
+
+
     /**
      * Sends an event down the protocol stack. Note that - contrary to {@link #send(Message)}, if the event is a message,
      * no checks are performed whether the channel is closed or disconnected.
@@ -727,6 +753,10 @@ public class JChannel extends Channel {
      */
     public Object down(Event evt) {
         if(evt == null) return null;
+        if(stats && evt.getType() == Event.MSG) {
+            sent_msgs++;
+            sent_bytes+=((Message)evt.getArg()).getLength();
+        }
         return prot_stack.down(evt);
     }
 
@@ -823,9 +853,8 @@ public class JChannel extends Channel {
         checkClosed();
 
         /*make sure we have a valid channel name*/
-        if(cluster_name == null) {
-            if(log.isDebugEnabled()) log.debug("cluster_name is null, assuming unicast channel");
-        }
+        if(cluster_name == null)
+            log.debug("cluster_name is null, assuming unicast channel");
         else
             this.cluster_name=cluster_name;
 
@@ -920,8 +949,7 @@ public class JChannel extends Channel {
                     prot_stack.destroy();
             }
             catch(Exception e) {
-                if(log.isErrorEnabled())
-                    log.error("failed destroying the protocol stack", e);
+                log.error(Util.getMessage("StackDestroyFailure"), e);
             }
 
             TP transport=prot_stack.getTransport();
@@ -1017,7 +1045,7 @@ public class JChannel extends Channel {
                             handleOperation(map, key.substring(index+1));
                         }
                         catch(Throwable throwable) {
-                            log.error("failed invoking operation " + key.substring(index+1), throwable);
+                            log.error(Util.getMessage("OperationInvocationFailure"), key.substring(index+1), throwable);
                         }
                     }
                 }
@@ -1066,10 +1094,8 @@ public class JChannel extends Channel {
                                   if(value != null)
                                       prot.setValue(attrname, value);
                             }
-                            else {
-                                if(log.isWarnEnabled())
-                                    log.warn("Field \"" + attrname + "\" not found in protocol " + protocol_name);
-                            }
+                            else
+                                log.warn(Util.getMessage("FieldNotFound"), attrname, protocol_name);
                             it.remove();
                         }
                     }
@@ -1118,8 +1144,7 @@ public class JChannel extends Channel {
 
             Method method=MethodCall.findMethod(prot.getClass(), method_name, args);
             if(method == null) {
-                if(log.isWarnEnabled())
-                    log.warn(local_addr + ": method " + prot.getClass().getSimpleName() + "." + method_name + " not found");
+                log.warn(Util.getMessage("MethodNotFound"), local_addr, prot.getClass().getSimpleName(), method_name);
                 return;
             }
             MethodCall call=new MethodCall(method);

@@ -1,32 +1,26 @@
-
 package org.jgroups.protocols;
+
+import org.jgroups.Address;
+import org.jgroups.Event;
+import org.jgroups.Message;
+import org.jgroups.PhysicalAddress;
+import org.jgroups.annotations.Experimental;
+import org.jgroups.annotations.Property;
+import org.jgroups.stack.*;
+import org.jgroups.util.Buffer;
+import org.jgroups.util.ExposedByteArrayOutputStream;
+import org.jgroups.util.ExposedDataOutputStream;
+import org.jgroups.util.Util;
 
 import java.io.DataInputStream;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Global;
-import org.jgroups.Message;
-import org.jgroups.PhysicalAddress;
-import org.jgroups.annotations.Experimental;
-import org.jgroups.annotations.Property;
-import org.jgroups.stack.GossipData;
-import org.jgroups.stack.GossipRouter;
-import org.jgroups.stack.RouterStubManager;
-import org.jgroups.stack.IpAddress;
-import org.jgroups.stack.Protocol;
-import org.jgroups.stack.RouterStub;
-import org.jgroups.util.Buffer;
-import org.jgroups.util.ExposedByteArrayOutputStream;
-import org.jgroups.util.ExposedDataOutputStream;
-import org.jgroups.util.Util;
 
 /**
  * Replacement for UDP. Instead of sending packets via UDP, a TCP connection is opened to a Router
@@ -110,20 +104,12 @@ public class TUNNEL extends TP {
 
     public void init() throws Exception {
         super.init();
-
-        if(enable_bundling) {
-            log.warn("bundling is currently not supported by TUNNEL; bundling is disabled");
-            enable_bundling=false;
-        }
-
         if (timer == null)
             throw new Exception("timer cannot be retrieved from protocol stack");
       
-        // Postpone TUNNEL and shared transport until 3.0 timeframe
         // TODO [JGRP-1194] - Revisit implementation of TUNNEL and shared transport
-        if (isSingleton()) {
+        if (isSingleton())
             throw new Exception("TUNNEL and shared transport mode are not supported!");
-        }
 
         if (log.isDebugEnabled())
             log.debug("GossipRouters are:" + gossip_router_hosts.toString());
@@ -152,18 +138,10 @@ public class TUNNEL extends TP {
          case Event.CONNECT_USE_FLUSH:
          case Event.CONNECT_WITH_STATE_TRANSFER_USE_FLUSH:
              String group=(String)evt.getArg();
-             Address local= null;
-             if(!isSingleton()) {
-                 local = local_addr;                 
-             } else {
-                 // TODO [JGRP-1194] - Revisit implementation of TUNNEL and shared transport   
-                 ProtocolAdapter adapter = ProtocolAdapter.thread_local.get();
-                 local = adapter.local_addr;
-             }
-             
-             if(stubManager != null) {
+             Address local=local_addr;
+
+             if(stubManager != null)
                 stubManager.destroyStubs();
-             }
              stubManager = new TUNNELStubManager(this,group,local,getReconnectInterval());
              for (InetSocketAddress gr : gossip_router_hosts) {
                  RouterStub stub = stubManager.createAndRegisterStub(gr.getHostName(), gr.getPort(), bind_addr);
@@ -177,15 +155,8 @@ public class TUNNEL extends TP {
             break;
 
          case Event.DISCONNECT:
-             if(!isSingleton()) {
-                 local = local_addr;        
-                 group = channel_name;
-             } else {
-                 // TODO [JGRP-1194] - Revisit implementation of TUNNEL and shared transport
-                 ProtocolAdapter adapter = ProtocolAdapter.thread_local.get();
-                 local = adapter.local_addr;
-                 group = adapter.cluster_name;
-             }
+             local = local_addr;
+             group = channel_name;
              disconnectStub(group,local);
             break;
       }
@@ -255,12 +226,12 @@ public class TUNNEL extends TP {
                             }
                             break;
                     }
+                }catch (SocketException ioe) {
+                    break;
                 }catch (Exception ioe) {     
-                    if(stub.isConnected())
-                        continue mainloop;
-                    else 
+                    if(!stub.isConnected())
                         break;
-                } 
+                }
             }
         }
 

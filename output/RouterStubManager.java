@@ -1,24 +1,4 @@
-/*
- * JBoss, Home of Professional Open Source.
- * Copyright 2009, Red Hat Middleware LLC, and individual contributors
- * as indicated by the @author tags. See the copyright.txt file in the
- * distribution for a full listing of individual contributors.
- *
- * This is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Lesser General Public License as
- * published by the Free Software Foundation; either version 2.1 of
- * the License, or (at your option) any later version.
- *
- * This software is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this software; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA, or see the FSF site: http://www.fsf.org.
- */
+
 package org.jgroups.stack;
 
 import org.jgroups.Address;
@@ -30,15 +10,19 @@ import org.jgroups.logging.LogFactory;
 import org.jgroups.util.TimeScheduler;
 
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.*;
 
+/**
+ * Manages a list of RouterStubs (e.g. health checking, reconnecting etc.
+ * @author Vladimir Blagojevic
+ * @author Bela Ban
+ */
 public class RouterStubManager implements RouterStub.ConnectionListener {
 
     @GuardedBy("reconnectorLock")
-    private final ConcurrentMap<InetSocketAddress, Future<?>> futures=new ConcurrentHashMap<InetSocketAddress, Future<?>>();
+    private final ConcurrentMap<RouterStub,Future<?>> futures=new ConcurrentHashMap<RouterStub,Future<?>>();
     private final List<RouterStub> stubs;
     
     private final Protocol owner;
@@ -51,7 +35,7 @@ public class RouterStubManager implements RouterStub.ConnectionListener {
 
     public RouterStubManager(Protocol owner, String channelName, Address logicalAddress, long interval) {
         this.owner = owner;
-        this.stubs = new CopyOnWriteArrayList<RouterStub>();             
+        this.stubs = new CopyOnWriteArrayList<RouterStub>();
         this.log = LogFactory.getLog(owner.getClass());     
         this.timer = owner.getTransport().getTimer();
         this.channelName = channelName;
@@ -69,35 +53,34 @@ public class RouterStubManager implements RouterStub.ConnectionListener {
     
     public RouterStub createAndRegisterStub(String routerHost, int routerPort, InetAddress bindAddress) {
         RouterStub s = new RouterStub(routerHost,routerPort,bindAddress,this);
-        unregisterAndDestroyStub(s.getGossipRouterAddress());       
+        unregisterAndDestroyStub(s);
         stubs.add(s);   
         return s;
     }
     
     public void registerStub(RouterStub s) {        
-        unregisterAndDestroyStub(s.getGossipRouterAddress());        
+        unregisterAndDestroyStub(s);
         stubs.add(s);           
     }
     
-    public boolean unregisterStub(final RouterStub s) {
-        return stubs.remove(s);
-    }
-    
-    public RouterStub unregisterStub(final InetSocketAddress address) {
-        if(address == null) 
-            throw new IllegalArgumentException("Cannot remove null address");
-        for (RouterStub s : stubs) {
-            if (s.getGossipRouterAddress().equals(address)) {
-                stubs.remove(address);
-                return s;
+    public RouterStub unregisterStub(final RouterStub stub) {
+        if(stub == null)
+            throw new IllegalArgumentException("Cannot remove null stub");
+        RouterStub found=null;
+        for (RouterStub s: stubs) {
+            if (s.equals(stub)) {
+                found=s;
+                break;
             }
         }
-        return null;
+        if(found != null)
+            stubs.remove(found);
+        return found;
     }
     
-    public boolean unregisterAndDestroyStub(final InetSocketAddress address) {
-        RouterStub unregisteredStub = unregisterStub(address);
-        if(unregisteredStub !=null) {
+    public boolean unregisterAndDestroyStub(final RouterStub stub) {
+        RouterStub unregisteredStub = unregisterStub(stub);
+        if(unregisteredStub != null) {
             unregisteredStub.destroy();
             return true;
         }
@@ -122,8 +105,7 @@ public class RouterStubManager implements RouterStub.ConnectionListener {
     }
 
     public void startReconnecting(final RouterStub stub) {
-        InetSocketAddress routerAddress = stub.getGossipRouterAddress();
-        Future<?> f = futures.remove(routerAddress);
+        Future<?> f = futures.remove(stub);
         if (f != null)
             f.cancel(true);
 
@@ -148,15 +130,14 @@ public class RouterStubManager implements RouterStub.ConnectionListener {
             }
         };
         f = timer.scheduleWithFixedDelay(reconnector, 0, interval, TimeUnit.MILLISECONDS);
-        futures.putIfAbsent(stub.getGossipRouterAddress(), f);
+        futures.putIfAbsent(stub, f);
     }
 
     public void stopReconnecting(final RouterStub stub) {
-        InetSocketAddress routerAddress = stub.getGossipRouterAddress();
-        Future<?> f = futures.get(stub.getGossipRouterAddress());
+        Future<?> f = futures.get(stub);
         if (f != null) {
             f.cancel(true);
-            futures.remove(routerAddress);
+            futures.remove(stub);
         }
 
         final Runnable pinger = new Runnable() {
@@ -176,7 +157,7 @@ public class RouterStubManager implements RouterStub.ConnectionListener {
             }
         };
         f = timer.scheduleWithFixedDelay(pinger, 1000, interval, TimeUnit.MILLISECONDS);
-        futures.putIfAbsent(stub.getGossipRouterAddress(),f);
+        futures.putIfAbsent(stub, f);
     }
    
 

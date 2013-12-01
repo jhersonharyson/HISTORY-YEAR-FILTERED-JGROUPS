@@ -1,13 +1,14 @@
 package org.jgroups.protocols;
 
 import org.jgroups.*;
-import org.jgroups.annotations.Experimental;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.AckCollector;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.TimeScheduler;
+import org.jgroups.util.Util;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -22,7 +23,6 @@ import java.util.concurrent.TimeUnit;
  * @author Bela Ban
  * @since 3.1
  */
-@Experimental
 @MBean(description="Implements synchronous acks for messages which have their RSVP flag set)")
 public class RSVP extends Protocol {
 
@@ -65,8 +65,7 @@ public class RSVP extends Protocol {
         super.init();
         timer=getTransport().getTimer();
         if(timeout > 0 && resend_interval > 0 && resend_interval >= timeout) {
-            log.warn("resend_interval (" + resend_interval + ") is >= timeout (" + timeout + "); setting " +
-                       "resend_interval to timeout / 3");
+            log.warn(Util.getMessage("RSVP_Misconfig"), resend_interval, timeout);
             resend_interval=timeout / 3;
         }
     }
@@ -121,7 +120,7 @@ public class RSVP extends Protocol {
                     if(throw_exception_on_timeout)
                         throw e;
                     else if(log.isWarnEnabled())
-                        log.warn("message ran into a timeout, missing acks: " + entry);
+                        log.warn(Util.getMessage("RSVP_Timeout"), entry);
                 }
                 finally {
                     synchronized(ids) {
@@ -188,10 +187,48 @@ public class RSVP extends Protocol {
         return up_prot.up(evt);
     }
 
+    public void up(MessageBatch batch) {
+        List<Short> response_ids=null;
+        for(Message msg: batch) {
+            if(msg.isFlagSet(Message.Flag.RSVP)) {
+                RsvpHeader hdr=(RsvpHeader)msg.getHeader(id);
+                if(hdr == null) {
+                    log.error("message with RSVP flag needs to have an RsvpHeader");
+                    continue;
+                }
+                switch(hdr.type) {
+                    case RsvpHeader.REQ:
+                        if(!ack_on_delivery) // send ack on *reception*
+                            sendResponse(batch.sender(), hdr.id);
+                        else {
+                            if(response_ids == null)
+                                response_ids=new ArrayList<Short>();
+                            response_ids.add(hdr.id);
+                        }
+                        break;
+
+                    case RsvpHeader.REQ_ONLY:
+                    case RsvpHeader.RSP:
+                        if(hdr.type == RsvpHeader.RSP)
+                            handleResponse(msg.getSrc(), hdr.id);
+                        batch.remove(msg);
+                        break;
+                }
+            }
+        }
+
+        if(!batch.isEmpty())
+            up_prot.up(batch);
+
+        // we're sending RSVP responses if ack_on_delivery is true. Unfortunately, this is done after the entire
+        // *batch* was delivered, not after each message that was delivered
+        if(response_ids != null)
+            for(short id: response_ids)
+                sendResponse(batch.sender(), id);
+    }
 
     protected void handleView(View view) {
         members=view.getMembers();
-
         synchronized(ids) {
             for(Iterator<Map.Entry<Short,Entry>> it=ids.entrySet().iterator(); it.hasNext();) {
                 Entry entry=it.next().getValue();
@@ -219,10 +256,9 @@ public class RSVP extends Protocol {
 
     protected void sendResponse(Address dest, short id) {
         try {
-            Message msg=new Message(dest);
-            msg.setFlag(Message.Flag.RSVP, Message.Flag.OOB);
             RsvpHeader hdr=new RsvpHeader(RsvpHeader.RSP,id);
-            msg.putHeader(this.id, hdr);
+            Message msg=new Message(dest).setFlag(Message.Flag.RSVP, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
+              .putHeader(this.id, hdr);
             if(log.isTraceEnabled())
                 log.trace(local_addr + ": " + hdr.typeToString() + " --> " + dest);
             down_prot.down(new Event(Event.MSG, msg));
@@ -264,10 +300,8 @@ public class RSVP extends Protocol {
                         cancelTask();
                         return;
                     }
-                    Message msg=new Message(target);
-                    msg.setFlag(Message.Flag.RSVP);
                     RsvpHeader hdr=new RsvpHeader(RsvpHeader.REQ_ONLY, rsvp_id);
-                    msg.putHeader(id, hdr);
+                    Message msg=new Message(target).setFlag(Message.Flag.RSVP).putHeader(id,hdr);
                     if(log.isTraceEnabled())
                         log.trace(local_addr + ": " + hdr.typeToString() + " --> " + target);
                     down_prot.down(new Event(Event.MSG, msg));

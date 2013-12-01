@@ -6,6 +6,7 @@ import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.conf.PropertyConverter;
 import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.protocols.TP;
+import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Tuple;
 import org.jgroups.util.Util;
 
@@ -37,16 +38,18 @@ public class ProtocolStack extends Protocol {
      * Holds the shared transports, keyed by 'TP.singleton_name'. The values are the transport and the use count for
      * init() (decremented by destroy()) and start() (decremented by stop()
      */
-    private static final ConcurrentMap<String,Tuple<TP,RefCounter>> singleton_transports=new ConcurrentHashMap<String,Tuple<TP,RefCounter>>();
+    protected static final ConcurrentMap<String,Tuple<TP,RefCounter>> singleton_transports=new ConcurrentHashMap<String,Tuple<TP,RefCounter>>();
 
-    private Protocol                      top_prot;
-    private Protocol                      bottom_prot;
-    // protected List<ProtocolConfiguration> configs;
-    private JChannel                      channel;
-    private volatile boolean              stopped=true;
+    protected Protocol                      top_prot;
+    protected Protocol                      bottom_prot;
+    protected JChannel                      channel;
+    protected volatile boolean              stopped=true;
 
 
-    private final DiagnosticsHandler.ProbeHandler props_handler=new DiagnosticsHandler.ProbeHandler() {
+    public ProtocolStack topProtocol(Protocol top)       {this.top_prot=top; return this;}
+    public ProtocolStack bottomProtocol(Protocol bottom) {this.bottom_prot=bottom; return this;}
+
+    protected final DiagnosticsHandler.ProbeHandler props_handler=new DiagnosticsHandler.ProbeHandler() {
 
         public Map<String, String> handleProbe(String... keys) {
             for(String key: keys) {
@@ -71,7 +74,7 @@ public class ProtocolStack extends Protocol {
                     int index=key.indexOf("=");
                     if(index != -1) {
                         String prot_name=key.substring(index +1);
-                        if(prot_name != null && prot_name.length() > 0) {
+                        if(prot_name != null && !prot_name.isEmpty()) {
                             try {
                                 Protocol removed=removeProtocol(prot_name);
                                 if(removed != null)
@@ -90,11 +93,15 @@ public class ProtocolStack extends Protocol {
 
                     // 1. name of the protocol to be inserted
                     String prot_name=key.substring(0, index).trim();
+                    if(findProtocol(prot_name) != null) {
+                        log.error("Protocol %s cannot be inserted as it is already present", prot_name);
+                        break;
+                    }
                     Protocol prot=null;
                     try {
                         prot=createProtocol(prot_name);
-                        prot.init();
-                        prot.start();
+                        //prot.init();
+                        //prot.start();
                     }
                     catch(Exception e) {
                         log.error("failed creating an instance of " + prot_name, e);
@@ -130,13 +137,22 @@ public class ProtocolStack extends Protocol {
                     catch(Exception e) {
                         log.error("failed inserting protocol " + prot_name + " " + tmp + " " + neighbor_prot, e);
                     }
+
+                    try {
+                        prot.init();
+                        prot.start();
+                    }
+                    catch(Exception e) {
+                        log.error("failed creating an instance of " + prot_name, e);
+                    }
                 }
             }
             return null;
         }
 
         public String[] supportedKeys() {
-            return new String[]{"props", "print-protocols", "\nremove-protocol=<name>", "\ninsert-protocol=<name>;above | below=<name>"};
+            return new String[]{"props", "print-protocols", "\nremove-protocol=<name>",
+              "\ninsert-protocol=<name>=above | below=<name>"};
         }
     };
 
@@ -200,9 +216,8 @@ public class ProtocolStack extends Protocol {
                         List<String> possible_names=new LinkedList<String>();
                         if(annotation.name() != null)
                             possible_names.add(annotation.name());
-                        possible_names.add(methodName.substring(3));
                         possible_names.add(Util.methodNameToAttributeName(methodName));
-                        Field field=findField(prot, possible_names);
+                        Field field=Util.findField(prot, possible_names);
                         if(field != null) {
                             Object value=Util.getField(field, prot);
                             Util.setField(field, new_prot, value);
@@ -214,23 +229,7 @@ public class ProtocolStack extends Protocol {
         return retval;
     }
 
-    private static Field findField(Object target, List<String> possible_names) {
-        if(target == null)
-            return null;
-        for(Class<?> clazz=target.getClass(); clazz != null; clazz=clazz.getSuperclass()) {
-            for(String name: possible_names) {
-                try {
-                    Field field=clazz.getDeclaredField(name);
-                    if(field != null)
-                        return field;
-                }
-                catch(NoSuchFieldException e) {
-                }
-            }
-        }
 
-        return null;
-    }
 
 
     /** Returns the bottom most protocol */
@@ -436,9 +435,8 @@ public class ProtocolStack extends Protocol {
                     List<String> possible_names=new LinkedList<String>();
                     if(annotation.name() != null)
                         possible_names.add(annotation.name());
-                    possible_names.add(methodName.substring(3));
                     possible_names.add(Util.methodNameToAttributeName(methodName));
-                    Field field=findField(prot, possible_names);
+                    Field field=Util.findField(prot, possible_names);
                     if(field != null) {
                         Object value=Util.getField(field, prot);
                         if(value != null) {
@@ -601,6 +599,10 @@ public class ProtocolStack extends Protocol {
         if(neighbor == null)
             throw new IllegalArgumentException("protocol \"" + neighbor_prot + "\" not found in " + stack.printProtocolSpec(false));
 
+        if(position == ProtocolStack.BELOW && neighbor instanceof TP)
+            throw new IllegalArgumentException("protocol \"" + prot + "\" cannot be inserted below the transport protocol (" +
+                                                 neighbor + ")");
+
         insertProtocolInStack(prot, neighbor,  position);
     }
 
@@ -631,8 +633,7 @@ public class ProtocolStack extends Protocol {
         prot.down_prot=top_prot;
         prot.up_prot=this;
         top_prot=prot;
-        if(log.isDebugEnabled())
-            log.debug("inserted " + prot + " at the top of the stack");
+        log.debug("inserted " + prot + " at the top of the stack");
     }
 
 
@@ -643,9 +644,37 @@ public class ProtocolStack extends Protocol {
      *                  (otherwise the stack won't be created), the name refers to just 1 protocol.
      * @exception Exception Thrown if the protocol cannot be stopped correctly.
      */
-    public Protocol removeProtocol(String prot_name) throws Exception {
+    public Protocol removeProtocol(String prot_name) {
         if(prot_name == null) return null;
-        Protocol prot=findProtocol(prot_name);
+        return removeProtocol(findProtocol(prot_name));
+    }
+
+    public void removeProtocols(String ... protocols) {
+        for(String protocol: protocols)
+            removeProtocol(protocol);
+    }
+
+
+    public Protocol removeProtocol(Class ... protocols) {
+        Protocol retval=null;
+        if(protocols != null)
+            for(Class cl: protocols) {
+                Protocol tmp=removeProtocol(cl);
+                if(tmp != null)
+                    retval=tmp;
+            }
+
+        return retval;
+    }
+
+
+    public Protocol removeProtocol(Class prot) {
+        if(prot == null)
+            return null;
+        return removeProtocol(findProtocol(prot));
+    }
+
+    public Protocol removeProtocol(Protocol prot) {
         if(prot == null) return null;
         Protocol above=prot.getUpProtocol(), below=prot.getDownProtocol();
         checkAndSwitchTop(prot, below);
@@ -668,46 +697,6 @@ public class ProtocolStack extends Protocol {
             log.error("failed destroying " + prot.getName() + ": " + t);
         }
         return prot;
-    }
-
-    public void removeProtocols(String ... protocols) throws Exception {
-        for(String protocol: protocols)
-            removeProtocol(protocol);
-    }
-
-
-    public Protocol removeProtocol(Class ... protocols) {
-        Protocol retval=null;
-        if(protocols != null)
-            for(Class cl: protocols) {
-                Protocol tmp=removeProtocol(cl);
-                if(tmp != null) {
-                    tmp.stop();
-                    tmp.destroy();
-                    retval=tmp;
-                }
-            }
-
-        return retval;
-    }
-
-
-    public Protocol removeProtocol(Class prot) {
-        if(prot == null)
-            return null;
-        Protocol retval=findProtocol(prot);
-        if(retval == null)
-            return null;
-
-        Protocol above=retval.getUpProtocol(), below=retval.getDownProtocol();
-        checkAndSwitchTop(retval, below);
-        if(above != null)
-            above.setDownProtocol(below);
-        if(below != null)
-            below.setUpProtocol(above);
-        retval.setUpProtocol(null);
-        retval.setDownProtocol(null);
-        return retval;
     }
 
 
@@ -778,6 +767,7 @@ public class ProtocolStack extends Protocol {
 
         existing_prot.setDownProtocol(null);
         existing_prot.setUpProtocol(null);
+        existing_prot.stop();
         existing_prot.destroy();
 
         if(new_prot.getUpProtocol() == this)
@@ -987,7 +977,12 @@ public class ProtocolStack extends Protocol {
                     String singleton_name=transport.getSingletonName();
                     final Map<String,Protocol> up_prots=transport.getUpProtocols();
                     synchronized(up_prots) {
-                        up_prots.remove(cluster_name);
+                        Protocol adapter=up_prots.remove(cluster_name);
+                        if(adapter != null) {
+                            Protocol neighbor_above=adapter.getUpProtocol();
+                            if(neighbor_above != null)
+                                neighbor_above.setDownProtocol(transport);
+                        }
                     }
                     synchronized(singleton_transports) {
                         Tuple<TP, ProtocolStack.RefCounter> val=singleton_transports.get(singleton_name);
@@ -1018,6 +1013,10 @@ public class ProtocolStack extends Protocol {
 
     public Object up(Event evt) {
         return channel.up(evt);
+    }
+
+    public void up(MessageBatch batch) {
+        channel.up(batch);
     }
 
     public Object down(Event evt) {

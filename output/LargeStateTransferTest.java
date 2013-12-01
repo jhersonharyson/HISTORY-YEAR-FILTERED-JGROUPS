@@ -4,7 +4,6 @@ package org.jgroups.tests;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.ReceiverAdapter;
-import org.jgroups.View;
 import org.jgroups.protocols.TP;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.stack.ProtocolStack;
@@ -39,11 +38,9 @@ public class LargeStateTransferTest extends ChannelTestBase {
 
     @BeforeMethod
     protected void setUp() throws Exception {
-        provider=createChannel(true, 2);
-        provider.setName("provider");
+        provider=createChannel(true, 2, "provider");
         modifyStack(provider);
-        requester=createChannel(provider);
-        requester.setName("requester");
+        requester=createChannel(provider, "requester");
         setOOBPoolSize(provider, requester);
     }
 
@@ -78,10 +75,8 @@ public class LargeStateTransferTest extends ChannelTestBase {
         p.reset();
         requester.setReceiver(new Requester(p));
         requester.connect(GROUP);
-        View requester_view=requester.getView();
-        assert requester_view.size() == 2 : "requester view is " + requester_view + ", but should have 2 members";
-        View provider_view=provider.getView();
-        assert provider_view.size() == 2 : "provider view is " + provider_view + ", but should have 2 members";
+        Util.waitUntilAllChannelsHaveSameSize(20000, 1000, provider, requester);
+
         log("requesting state of " + Util.printBytes(size));
         long start=System.currentTimeMillis();
         requester.getState(provider.getAddress(), 20000);
@@ -96,8 +91,9 @@ public class LargeStateTransferTest extends ChannelTestBase {
     private static void setOOBPoolSize(JChannel... channels) {
         for(JChannel channel: channels) {
             TP transport=channel.getProtocolStack().getTransport();
-            transport.setOOBThreadPoolMinThreads(1);
-            transport.setOOBThreadPoolMaxThreads(2);
+            transport.setOOBThreadPoolMinThreads(2);
+            transport.setOOBThreadPoolMaxThreads(8);
+            transport.setOOBThreadPoolQueueEnabled(false);
         }
     }
 

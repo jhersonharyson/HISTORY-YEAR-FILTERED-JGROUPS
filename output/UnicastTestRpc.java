@@ -4,8 +4,8 @@ package org.jgroups.tests;
 import org.jgroups.*;
 import org.jgroups.blocks.*;
 import org.jgroups.jmx.JmxConfigurator;
+import org.jgroups.protocols.relay.RELAY2;
 import org.jgroups.protocols.relay.SiteMaster;
-import org.jgroups.protocols.relay.SiteUUID;
 import org.jgroups.util.Buffer;
 import org.jgroups.util.Util;
 
@@ -16,6 +16,7 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -176,8 +177,8 @@ public class UnicastTestRpc extends ReceiverAdapter {
         
         // The first call needs to be synchronous with OOB !
         RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 15000, anycasting, null);
-        if(sync) options.setFlags(Message.DONT_BUNDLE);
-        if(oob) options.setFlags(Message.OOB);
+        if(sync) options.setFlags(Message.Flag.DONT_BUNDLE);
+        if(oob) options.setFlags(Message.Flag.OOB);
 
         options.setMode(sync? ResponseMode.GET_ALL : ResponseMode.GET_NONE);
 
@@ -264,16 +265,14 @@ public class UnicastTestRpc extends ReceiverAdapter {
     private Address getReceiver() {
         try {
             List<Address> mbrs=new ArrayList<Address>(channel.getView().getMembers());
-
-            if(SiteUUID.hasCacheValues()) {
-                for(String site_master: SiteUUID.cacheValues()) {
-                    try {
-                        SiteMaster sm=new SiteMaster(site_master);
-                        mbrs.add(sm);
-                    }
-                    catch(Throwable t) {
-                        System.err.println("failed creating site master: " + t);
-                    }
+            List<String> site_names=getSites(channel);
+            for(String site_name: site_names) {
+                try {
+                    SiteMaster sm=new SiteMaster(site_name);
+                    mbrs.add(sm);
+                }
+                catch(Throwable t) {
+                    System.err.println("failed creating site master: " + t);
                 }
             }
 
@@ -298,6 +297,13 @@ public class UnicastTestRpc extends ReceiverAdapter {
             return null;
         }
     }
+
+
+    protected static List<String> getSites(JChannel channel) {
+        RELAY2 relay=(RELAY2)channel.getProtocolStack().findProtocol(RELAY2.class);
+        return relay != null? relay.siteNames() : Collections.<String>emptyList();
+    }
+
 
     private class Invoker extends Thread {
         private final Address             dest;

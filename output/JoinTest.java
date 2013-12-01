@@ -1,9 +1,10 @@
 package org.jgroups.tests;
 
 import org.jgroups.*;
-import org.jgroups.protocols.DELAY_JOIN_REQ;
+import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.Discovery;
 import org.jgroups.protocols.pbcast.GMS;
+import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Util;
 import org.testng.annotations.AfterMethod;
@@ -21,24 +22,24 @@ import java.util.List;
  */
 @Test(groups=Global.STACK_DEPENDENT,sequential=true)
 public class JoinTest extends ChannelTestBase {
-    JChannel c1, c2;
+    JChannel a, b;
 
     @BeforeMethod
     void setUp() throws Exception {
-        c1=createChannel(true, 2);
-        c2=createChannel(c1);
+        a=createChannel(true, 2, "A");
+        b=createChannel(a, "B");
     }
 
 
     @AfterMethod
     void tearDown() throws Exception {
-        Util.close(c2,c1);
+        Util.close(b,a);
     }
 
     @Test
     public void testSingleJoin() throws Exception {
-        c1.connect("JoinTest");
-        View v=c1.getView();
+        a.connect("JoinTest");
+        View v=a.getView();
         assert v != null;
         assert v.size() == 1;
     }
@@ -49,12 +50,12 @@ public class JoinTest extends ChannelTestBase {
      */
     @Test
     public void testJoinsOnTwoChannels() throws Exception {
-        c1.connect("JoinTest");
-        c2.connect("JoinTest");
+        a.connect("JoinTest");
+        b.connect("JoinTest");
         
         Util.sleep(2000); //no blocking is used, let the view propagate
         
-        View v1=c1.getView(), v2=c2.getView();
+        View v1=a.getView(), v2=b.getView();
         System.out.println("v1=" + v1 + ", v2=" + v2);
         assert v1 != null;
         assert v2 != null;
@@ -66,25 +67,25 @@ public class JoinTest extends ChannelTestBase {
 
     @Test
     public void testJoinsOnTwoChannelsAndSend() throws Exception {
-        c1.connect("JoinTest");
-        c2.connect("JoinTest");
+        a.connect("JoinTest");
+        b.connect("JoinTest");
         MyReceiver r1=new MyReceiver("c1");
         MyReceiver r2=new MyReceiver("c2");
-        c1.setReceiver(r1);
-        c2.setReceiver(r2);
+        a.setReceiver(r1);
+        b.setReceiver(r2);
         Message m1=new Message(null, null, "message-1"), m2=new Message(null, null, "message-2");
-        c1.connect("JoinTest-2");
-        View view=c1.getView();
+        a.connect("JoinTest-2");
+        View view=a.getView();
         assert view.size() == 2 : "c1's view: " + view;
-        c2.connect("JoinTest-2");
-        view=c2.getView();
+        b.connect("JoinTest-2");
+        view=b.getView();
         assert view.size() == 2 : "c2's view: " + view;
         Util.sleep(200);
-        view=c1.getView();
+        view=a.getView();
         assert view.size() == 2 : "c1's view: " + view;
 
-        c1.send(m1);
-        c2.send(m2);
+        a.send(m1);
+        b.send(m2);
 
         Util.sleep(1500);
         List<String>c1_list=r1.getMsgs(), c2_list=r2.getMsgs();
@@ -144,11 +145,11 @@ public class JoinTest extends ChannelTestBase {
 
     void _testDelayedJoinResponse(long discovery_timeout, long join_timeout,
                                   long delay_join_req, long tolerance) throws Exception {
-        c1.connect("JoinTest");
-        c2.connect("JoinTest");
+        a.connect("JoinTest");
+        b.connect("JoinTest");
 
-        ProtocolStack stack=c2.getProtocolStack();
-        GMS gms=(GMS)stack.findProtocol("GMS");
+        ProtocolStack stack=b.getProtocolStack();
+        GMS gms=(GMS)stack.findProtocol(GMS.class);
         if(gms != null) {
             gms.setJoinTimeout(join_timeout);
         }
@@ -159,14 +160,13 @@ public class JoinTest extends ChannelTestBase {
             discovery.setTimeout(discovery_timeout);
         }
 
-        stack=c1.getProtocolStack();
-        DELAY_JOIN_REQ delay=new DELAY_JOIN_REQ();
-        delay.setDelay(delay_join_req);
-        stack.insertProtocol(delay, ProtocolStack.BELOW, "GMS");
+        stack=a.getProtocolStack();
+        DELAY_JOIN_REQ delay=new DELAY_JOIN_REQ().delay(delay_join_req);
+        stack.insertProtocol(delay, ProtocolStack.BELOW, GMS.class);
 
         System.out.println(new Date() + ": joining c2");
         long start=System.currentTimeMillis(), stop;
-        c2.connect("JoinTest-2");
+        b.connect("JoinTest-2");
         stop=System.currentTimeMillis();
         long join_time=stop-start;
         long tolerated_join_time=discovery_timeout + delay_join_req + tolerance; // 1 sec more is okay (garbage collection etc)
@@ -201,4 +201,40 @@ public class JoinTest extends ChannelTestBase {
             System.out.println("[" + name + "] view: " + new_view);
         }
     }
+
+
+    protected class DELAY_JOIN_REQ extends Protocol {
+        private long        delay=4000;
+        private final short gms_id=ClassConfigurator.getProtocolId(GMS.class);
+
+        public long           delay()           {return delay;}
+        public DELAY_JOIN_REQ delay(long delay) {this.delay=delay; return this;}
+
+        public Object up(final Event evt) {
+            switch(evt.getType()) {
+                case Event.MSG:
+                    Message msg=(Message)evt.getArg();
+                    final GMS.GmsHeader hdr=(GMS.GmsHeader)msg.getHeader(gms_id);
+                    if(hdr != null) {
+                        switch(hdr.getType()) {
+                            case GMS.GmsHeader.JOIN_REQ:
+                            case GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER:
+                                System.out.println(new Date() + ": delaying JOIN-REQ by " + delay + " ms");
+                                Thread thread=new Thread() {
+                                    public void run() {
+                                        Util.sleep(delay);
+                                        System.out.println(new Date() + ": sending up delayed JOIN-REQ by " + hdr.getMember());
+                                        up_prot.up(evt);
+                                    }
+                                };
+                                thread.start();
+                                return null;
+                        }
+                    }
+                    break;
+            }
+            return up_prot.up(evt);
+        }
+    }
+
 }
