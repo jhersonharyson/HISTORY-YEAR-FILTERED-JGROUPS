@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Test cases for TimeScheduler
  * @author Bela Ban
  */
-@Test(groups=Global.TIME_SENSITIVE,dataProvider="createTimer",sequential=true)
+@Test(groups=Global.TIME_SENSITIVE,dataProvider="createTimer",singleThreaded=true)
 public class TimeSchedulerTest {
     static final int NUM_MSGS=1000;
     static int[]     xmit_timeouts={1000, 2000, 4000, 8000};
@@ -31,8 +31,12 @@ public class TimeSchedulerTest {
 
     @DataProvider(name="createTimer")
     Object[][] createTimer() {
-        return Util.createTimer();
+        return new Object[][]{
+          {new TimeScheduler3()}
+        };
     }
+
+
 
 
     @Test(dataProvider="createTimer")
@@ -266,12 +270,12 @@ public class TimeSchedulerTest {
             }
             System.out.println("-- added "+ (NUM_A * NUM_B) + " tasks, waiting for termination");
             Util.sleep(1000);
-            for(int i=0; i < 10; i++) {
+            for(int i=0; i < 20; i++) {
                 int size=timer.size();
                 System.out.println(size);
                 if(size == 0)
                     break;
-                Util.sleep(500);
+                Util.sleep(1000);
             }
             assert timer.size() == 0;
         }

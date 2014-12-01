@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit;
  * Tests merging with a large number of members
  * @author Bela Ban
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class LargeMergeTest {
     static final int NUM=50; // number of members
     static final int MAX_PARTICIPANTS_IN_MERGE=NUM / 3;
@@ -51,7 +51,7 @@ public class LargeMergeTest {
                                          new DefaultThreadFactory("", false));
         handler.start();
         
-        TimeScheduler timer=new TimeScheduler2(new DefaultThreadFactory("Timer", true, true),
+        TimeScheduler timer=new TimeScheduler3(new DefaultThreadFactory("Timer", true, true),
                                                5,20,
                                                3000, 5000, "abort");
 
@@ -68,9 +68,7 @@ public class LargeMergeTest {
 
         System.out.print("Connecting channels: ");
         for(int i=0; i < NUM; i++) {
-            SHARED_LOOPBACK shared_loopback=(SHARED_LOOPBACK)new SHARED_LOOPBACK().setValue("enable_bundling", false);
-            // UDP shared_loopback=(UDP)new UDP().setValue("enable_bundling", false);
-            shared_loopback.setLoopback(false);
+            SHARED_LOOPBACK shared_loopback=new SHARED_LOOPBACK();
             shared_loopback.setTimer(timer);
             shared_loopback.setOOBThreadPool(oob_thread_pool);
             shared_loopback.setDefaultThreadPool(thread_pool);
@@ -78,8 +76,7 @@ public class LargeMergeTest {
 
             channels[i]=Util.createChannel(shared_loopback,
                                            new DISCARD().setValue("discard_all",true),
-                                           new PING().setValue("timeout",1).setValue("num_initial_members",50)
-                                             .setValue("force_sending_discovery_rsps", true),
+                                           new SHARED_LOOPBACK_PING().setValue("force_sending_discovery_rsps", true),
                                            new MERGE3().setValue("min_interval",1000)
                                              .setValue("max_interval",5000)
                                              .setValue("max_participants_in_merge", MAX_PARTICIPANTS_IN_MERGE),
@@ -93,6 +90,7 @@ public class LargeMergeTest {
                                              .setValue("conn_expiry_timeout", 10000),
                                            new STABLE().setValue("max_bytes",500000),
                                            new GMS().setValue("print_local_addr",false)
+                                             .setValue("join_timeout", 1)
                                              .setValue("leave_timeout",100)
                                              .setValue("log_view_warnings",false)
                                              .setValue("view_ack_collection_timeout",2000)
@@ -122,8 +120,6 @@ public class LargeMergeTest {
     public void testClusterFormationAfterMerge() {
         System.out.println("\nEnabling message traffic between members to start the merge");
         for(JChannel ch: channels) {
-            Discovery ping=(Discovery)ch.getProtocolStack().findProtocol(PING.class);
-            ping.setTimeout(3000);
             DISCARD discard=(DISCARD)ch.getProtocolStack().findProtocol(DISCARD.class);
             discard.setDiscardAll(false);
         }
@@ -138,14 +134,7 @@ public class LargeMergeTest {
             for(JChannel ch: channels) {
                 ViewId view_id=ch.getView().getViewId();
                 Integer val=views.get(view_id);
-                if(val == null) {
-                    views.put(view_id, 1);
-                }
-                else {
-                    views.put(view_id, val +1);
-                }
-
-
+                views.put(view_id, val == null? 1 : val+1);
                 int size=ch.getView().size();
                 if(size != NUM)
                     merge_completed=false;
@@ -194,10 +183,6 @@ public class LargeMergeTest {
         int gms_merge_task_running=0;
 
         for(JChannel ch:  channels) {
-            MERGE2 merge=(MERGE2)ch.getProtocolStack().findProtocol(MERGE2.class);
-            if(merge != null && merge.isMergeTaskRunning())
-                merge_task_running++;
-
             MERGE3 merge3=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
             if(merge3 != null && merge3.isMergeTaskRunning())
                 merge_task_running++;

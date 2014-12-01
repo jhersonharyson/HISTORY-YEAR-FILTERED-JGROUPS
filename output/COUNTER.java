@@ -504,13 +504,11 @@ public class COUNTER extends Protocol {
     }
 
     protected static Buffer streamableToBuffer(byte req_or_rsp, byte type, Streamable obj) throws Exception {
-        ExposedByteArrayOutputStream output=new ExposedByteArrayOutputStream(100);
-        DataOutputStream out=new DataOutputStream(output);
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(100);
         out.writeByte(req_or_rsp);
         out.writeByte(type);
         obj.writeTo(out);
-        out.flush();
-        return output.getBuffer();
+        return new Buffer(out.buffer(), 0, out.position());
     }
 
     protected static Streamable streamableFromBuffer(byte[] buf, int offset, int length) throws Exception {
@@ -593,24 +591,24 @@ public class COUNTER extends Protocol {
         }
         out.writeInt(names.length);
         for(String name: names)
-            Util.writeString(name, out);
+            Bits.writeString(name,out);
         for(long value: values)
-            Util.writeLong(value, out);
+            Bits.writeLong(value, out);
         for(long version: versions)
-            Util.writeLong(version, out);
+            Bits.writeLong(version, out);
     }
 
     protected static String[] readReconciliationNames(DataInput in, int len) throws Exception {
         String[] retval=new String[len];
         for(int i=0; i < len; i++)
-            retval[i]=Util.readString(in);
+            retval[i]=Bits.readString(in);
         return retval;
     }
 
     protected static long[] readReconciliationLongs(DataInput in, int len) throws Exception {
         long[] retval=new long[len];
         for(int i=0; i < len; i++)
-            retval[i]=Util.readLong(in);
+            retval[i]=Bits.readLong(in);
         return retval;
     }
 
@@ -754,13 +752,13 @@ public class COUNTER extends Protocol {
 
         public void writeTo(DataOutput out) throws Exception {
             owner.writeTo(out);
-            Util.writeString(name, out);
+            Bits.writeString(name,out);
         }
 
         public void readFrom(DataInput in) throws Exception {
             owner=new Owner();
             owner.readFrom(in);
-            name=Util.readString(in);
+            name=Bits.readString(in);
         }
 
         public String toString() {
@@ -786,12 +784,12 @@ public class COUNTER extends Protocol {
 
         public void readFrom(DataInput in) throws Exception {
             super.readFrom(in);
-            initial_value=Util.readLong(in);
+            initial_value=Bits.readLong(in);
         }
 
         public void writeTo(DataOutput out) throws Exception {
             super.writeTo(out);
-            Util.writeLong(initial_value, out);
+            Bits.writeLong(initial_value, out);
         }
     }
 
@@ -832,12 +830,12 @@ public class COUNTER extends Protocol {
 
         public void readFrom(DataInput in) throws Exception {
             super.readFrom(in);
-            value=Util.readLong(in);
+            value=Bits.readLong(in);
         }
 
         public void writeTo(DataOutput out) throws Exception {
             super.writeTo(out);
-            Util.writeLong(value, out);
+            Bits.writeLong(value, out);
         }
 
         public String toString() {return super.toString() + ": " + value;}
@@ -857,14 +855,14 @@ public class COUNTER extends Protocol {
 
         public void readFrom(DataInput in) throws Exception {
             super.readFrom(in);
-            expected=Util.readLong(in);
-            update=Util.readLong(in);
+            expected=Bits.readLong(in);
+            update=Bits.readLong(in);
         }
 
         public void writeTo(DataOutput out) throws Exception {
             super.writeTo(out);
-            Util.writeLong(expected, out);
-            Util.writeLong(update, out);
+            Bits.writeLong(expected, out);
+            Bits.writeLong(update, out);
         }
 
         public String toString() {return super.toString() + ", expected=" + expected + ", update=" + update;}
@@ -914,15 +912,15 @@ public class COUNTER extends Protocol {
         }
 
         public void writeTo(DataOutput out) throws Exception {
-            Util.writeString(name, out);
-            Util.writeLong(value, out);
-            Util.writeLong(version, out);
+            Bits.writeString(name,out);
+            Bits.writeLong(value, out);
+            Bits.writeLong(version, out);
         }
 
         public void readFrom(DataInput in) throws Exception {
-            name=Util.readString(in);
-            value=Util.readLong(in);
-            version=Util.readLong(in);
+            name=Bits.readString(in);
+            value=Bits.readLong(in);
+            version=Bits.readLong(in);
         }
 
         public String toString() {return "UpdateRequest(" + name + ": "+ value + " (" + version + ")";}
@@ -948,12 +946,12 @@ public class COUNTER extends Protocol {
         public void readFrom(DataInput in) throws Exception {
             owner=new Owner();
             owner.readFrom(in);
-            version=Util.readLong(in);
+            version=Bits.readLong(in);
         }
 
         public void writeTo(DataOutput out) throws Exception {
             owner.writeTo(out);
-            Util.writeLong(version, out);
+            Bits.writeLong(version, out);
         }
 
         public String toString() {return "Response";}
@@ -995,12 +993,12 @@ public class COUNTER extends Protocol {
 
         public void readFrom(DataInput in) throws Exception {
             super.readFrom(in);
-            result=Util.readLong(in);
+            result=Bits.readLong(in);
         }
 
         public void writeTo(DataOutput out) throws Exception {
             super.writeTo(out);
-            Util.writeLong(result, out);
+            Bits.writeLong(result, out);
         }
 
         public String toString() {return "ValueResponse(" + result + ")";}
@@ -1030,12 +1028,12 @@ public class COUNTER extends Protocol {
 
         public void readFrom(DataInput in) throws Exception {
             super.readFrom(in);
-            error_message=Util.readString(in);
+            error_message=Bits.readString(in);
         }
 
         public void writeTo(DataOutput out) throws Exception {
             super.writeTo(out);
-            Util.writeString(error_message, out);
+            Bits.writeString(error_message,out);
         }
 
         public String toString() {return "ExceptionResponse: " + super.toString();}

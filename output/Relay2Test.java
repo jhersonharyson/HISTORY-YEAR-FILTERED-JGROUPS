@@ -1,10 +1,7 @@
 package org.jgroups.tests;
 
 import org.jgroups.*;
-import org.jgroups.protocols.FORWARD_TO_COORD;
-import org.jgroups.protocols.PING;
-import org.jgroups.protocols.SHARED_LOOPBACK;
-import org.jgroups.protocols.UNICAST3;
+import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.relay.RELAY2;
@@ -24,7 +21,7 @@ import java.util.List;
  * @author Bela Ban
  * @since 3.2
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class Relay2Test {
     protected JChannel a, b, c;  // members in site "lon"
     protected JChannel x, y, z;  // members in site "sfo
@@ -40,33 +37,32 @@ public class Relay2Test {
      * Test that RELAY2 can be added to an already connected channel.
      */
     public void testAddRelay2ToAnAlreadyConnectedChannel() throws Exception {
-    	// 1- Create and connect a channel.
-		a = new JChannel();
-		a.connect(SFO_CLUSTER);
-		
-		System.out.println("Channel " + a.getName() + " is connected. View: " + a.getView());
-		
-		// 3- Add RELAY2 protocol to the already connected channel.
-		RELAY2 relayToInject = createRELAY2(SFO);
+        // 1- Create and connect a channel.
+        a=new JChannel();
+        a.connect(SFO_CLUSTER);
+        System.out.println("Channel " + a.getName() + " is connected. View: " + a.getView());
+
+        // 3- Add RELAY2 protocol to the already connected channel.
+        RELAY2 relayToInject = createRELAY2(SFO);
         // Util.setField(Util.getField(relayToInject.getClass(), "local_addr"), relayToInject, a.getAddress());
 
-		a.getProtocolStack().insertProtocolAtTop(relayToInject);
+        a.getProtocolStack().insertProtocolAtTop(relayToInject);
         relayToInject.down(new Event(Event.SET_LOCAL_ADDRESS, a.getAddress()));
         relayToInject.setProtocolStack(a.getProtocolStack());
-		relayToInject.configure();
+        relayToInject.configure();
         relayToInject.handleView(a.getView());
-		
-		// 4- Check RELAY2 presence.
-		RELAY2 ar=(RELAY2)a.getProtocolStack().findProtocol(RELAY2.class);
-		assert ar != null;
-		
-		waitUntilRoute(SFO, true, 2000, 500, a);
-		
-		assert !ar.printRoutes().equals("n/a (not site master)") : "This member should be site master";
-		
-		Relayer.Route route=getRoute(a, SFO);
-		System.out.println("Route at sfo to sfo: " + route);
-		assert route != null;
+
+        // 4- Check RELAY2 presence.
+        RELAY2 ar=(RELAY2)a.getProtocolStack().findProtocol(RELAY2.class);
+        assert ar != null;
+
+        waitUntilRoute(SFO, true, 10000, 500, a);
+
+        assert !ar.printRoutes().equals("n/a (not site master)") : "This member should be site master";
+
+        Relayer.Route route=getRoute(a, SFO);
+        System.out.println("Route at sfo to sfo: " + route);
+        assert route != null;
     }
     
     /**
@@ -76,7 +72,7 @@ public class Relay2Test {
     public void testMissingRouteAfterMerge() throws Exception {
         a=createNode(LON, "A", LON_CLUSTER, null);
         b=createNode(LON, "B", LON_CLUSTER, null);
-        Util.waitUntilAllChannelsHaveSameSize(30000, 500, a,b);
+        Util.waitUntilAllChannelsHaveSameSize(30000, 1000, a,b);
 
         x=createNode(SFO, "X", SFO_CLUSTER, null);
         assert x.getView().size() == 1;
@@ -188,63 +184,33 @@ public class Relay2Test {
     }
 
 
-
-
-
-    /**
-     * Tests that queued messages are forwarded successfully. The scenario is:
-     * <ul>
-     *     <li>Node A in site LON, node X in site SFO</li>
-     *     <li>Node X is brought down (gracefully)</li>
-     *     <li>Node A sends a few unicast messages to the site master of SFO (queued)</li>
-     *     <li>Node X is started again</li>
-     *     <li>The queued messages on A should be forwarded to the site master of SFO</li>
-     * </ul>
-     * https://issues.jboss.org/browse/JGRP-1528
-     */
-    /*public void testQueueingAndForwarding() throws Exception {
-        MyReceiver rx=new MyReceiver();
+    public void testCoordinatorShutdown() throws Exception {
         a=createNode(LON, "A", LON_CLUSTER, null);
-        x=createNode(SFO, "X", SFO_CLUSTER, rx);
+        b=createNode(LON, "B", LON_CLUSTER, null);
+        x=createNode(SFO, "X", SFO_CLUSTER, null);
+        y=createNode(SFO, "Y", SFO_CLUSTER, null);
+        Util.waitUntilAllChannelsHaveSameSize(10000, 100, a, b);
+        Util.waitUntilAllChannelsHaveSameSize(10000, 100, x, y);
+        waitForBridgeView(2, 20000, 100, a, x); // A and X are site masters
 
-        System.out.println("A: waiting for site SFO to be UP");
-        waitUntilRoute(SFO, true, 20000, 500, a);
+        long start=System.currentTimeMillis();
+        a.close();
+        long time=System.currentTimeMillis()-start;
+        System.out.println("A took " + time + " ms");
 
-        Address sm_sfo=new SiteMaster(SFO);
-        System.out.println("A: sending message 0 to the site master of SFO");
-        a.send(sm_sfo, 0);
+        Util.waitUntilAllChannelsHaveSameSize(10000, 100, b);
+        waitForBridgeView(2, 20000, 100, b, x); // B and X are now site masters
 
-        List<Integer> list=rx.getList();
-        for(int i=0; i < 20; i++) {
-            if(!list.isEmpty())
-                break;
-            Util.sleep(500);
-        }
-        System.out.println("list = " + list);
-        assert list.size() == 1 && list.get(0) == 0;
-        rx.clear();
+        long start2=System.currentTimeMillis();
+        b.close();
+        long time2=System.currentTimeMillis() - start2;
+        System.out.println("B took " + time2 + " ms");
 
-        x.disconnect();
-        System.out.println("Waiting for site SFO to be UNKNOWN");
-        waitUntilRoute(SFO, false, 20000, 500, a);
+        waitForBridgeView(1, 20000, 100, x);
 
-        System.out.println("A: sending 5 messages to site SFO - they should all get queued");
-        for(int i=1; i <= 5; i++)
-            a.send(sm_sfo, i);
+        Util.close(x,y);
+    }
 
-        System.out.println("Starting X again; the queued messages should now get re-sent from A to X");
-        x.connect(SFO_CLUSTER);
-
-        for(int i=0; i < 20; i++) {
-            if(list.size() == 5)
-                break;
-            Util.sleep(500);
-        }
-        System.out.println("list = " + list);
-        assert list.size() == 5 : "list should be 5 but is: " + list;
-        for(int i=1; i <= 5; i++)
-            assert list.contains(i);
-    }*/
 
 
     /**
@@ -285,7 +251,8 @@ public class Relay2Test {
     protected JChannel createNode(String site_name, String node_name, String cluster_name,
                                   Receiver receiver) throws Exception {
         JChannel ch=new JChannel(new SHARED_LOOPBACK(),
-                                 new PING().setValue("timeout", 300).setValue("num_initial_members", 2),
+                                 new SHARED_LOOPBACK_PING(),
+                                 new MERGE3().setValue("max_interval", 3000).setValue("min_interval", 1000),
                                  new NAKACK2(),
                                  new UNICAST3(),
                                  new GMS().setValue("print_local_addr", false),
@@ -301,7 +268,7 @@ public class Relay2Test {
 
 
     protected RELAY2 createRELAY2(String site_name) {
-        RELAY2 relay=new RELAY2().site(site_name).enableAddressTagging(false).asyncRelayCreation(true);
+        RELAY2 relay=new RELAY2().site(site_name).enableAddressTagging(false).asyncRelayCreation(false);
 
         RelayConfig.SiteConfig lon_cfg=new RelayConfig.SiteConfig(LON),
           sfo_cfg=new RelayConfig.SiteConfig(SFO);
@@ -315,7 +282,8 @@ public class Relay2Test {
     protected static Protocol[] createBridgeStack() {
         return new Protocol[]{
           new SHARED_LOOPBACK(),
-          new PING().setValue("timeout", 500).setValue("num_initial_members", 2),
+          new SHARED_LOOPBACK_PING(),
+          new MERGE3().setValue("max_interval", 3000).setValue("min_interval", 1000),
           new NAKACK2(),
           new UNICAST3(),
           new GMS().setValue("print_local_addr", false)

@@ -23,7 +23,7 @@ import java.util.*;
  * @author Bela Ban
  * @since 3.1
  */
-@Test(groups=Global.STACK_INDEPENDENT,sequential=true)
+@Test(groups=Global.STACK_INDEPENDENT,singleThreaded=true)
 public class SequencerMergeTest {
     JChannel a, b, c, d;
     static final String GROUP="SequencerMergeTest";
@@ -195,13 +195,13 @@ public class SequencerMergeTest {
     protected JChannel create(String name, boolean insert_discard) throws Exception {
         JChannel ch=new JChannel(new SHARED_LOOPBACK(),
                                  new DISCARD().setValue("discard_all", insert_discard),
-                                 new PING().setValue("timeout",100),
+                                 new PING(),
                                  new NAKACK2().setValue("use_mcast_xmit",false)
                                    .setValue("log_discard_msgs",false).setValue("log_not_found_msgs",false),
                                  new UNICAST3(),
                                  new STABLE().setValue("max_bytes",50000),
                                  new SEQUENCER(), // below GMS, to establish total order between views and messages
-                                 new GMS().setValue("print_local_addr",false).setValue("leave_timeout",100)
+                                 new GMS().setValue("print_local_addr",false).setValue("join_timeout", 100).setValue("leave_timeout",100)
                                    .setValue("log_view_warnings",false).setValue("view_ack_collection_timeout",50)
                                    .setValue("log_collect_msgs",false));
         ch.setName(name);
@@ -266,16 +266,22 @@ public class SequencerMergeTest {
         }
 
         public List<String> getList() {
-            return list;
+            synchronized(list) {
+                return new ArrayList(list);
+            }
         }
 
         public void receive(Message msg) {
-            list.add(msg.getObject().toString());
+            synchronized(list) {
+                list.add(msg.getObject().toString());
+            }
         }
 
         public void viewAccepted(View view) {
             String tmp="V" + view.getViewId().getId();
-            list.add(tmp);
+            synchronized(list) {
+                list.add(tmp);
+            }
         }
     }
 

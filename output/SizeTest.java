@@ -41,54 +41,26 @@ public class SizeTest {
         _testSize(new PingHeader(PingHeader.GET_MBRS_REQ).clusterName("bla"));
         _testSize(new PingHeader(PingHeader.GET_MBRS_RSP));
         _testSize(new PingHeader(PingHeader.GET_MBRS_RSP).clusterName(null));
-        Address self=Util.createRandomAddress();
+        _testSize(new PingHeader(PingHeader.GET_MBRS_RSP).clusterName("cluster"));
     }
  
 
     public static void testPingData() throws Exception {
         PingData data;
-        final Address own=org.jgroups.util.UUID.randomUUID();
-        final Address coord=org.jgroups.util.UUID.randomUUID();
-        final PhysicalAddress physical_addr_1=new IpAddress("127.0.0.1", 7500);
-        final PhysicalAddress physical_addr_2=new IpAddress("192.168.1.5", 6000);
-        final PhysicalAddress physical_addr_3=new IpAddress("192.134.2.1", 6655);
-        final Address self=Util.createRandomAddress();
+        final Address a=Util.createRandomAddress("A");
+        final PhysicalAddress physical_addr=new IpAddress("127.0.0.1", 7500);
 
-        data=new PingData(null, null, false);
+        data=new PingData(null, false);
         _testSize(data);
 
-        data=new PingData(own, View.create(coord, 22, coord, Util.createRandomAddress()), false);
+        data=new PingData(a, true);
         _testSize(data);
 
-        data=new PingData(null, null, false, "node-1", null);
+        data=new PingData(a, true, "A", physical_addr).coord(true);
         _testSize(data);
 
-        data=new PingData(own, View.create(coord, 22, coord), false, "node-1", null);
-        _testSize(data);
-
-        data=new PingData(own, View.create(coord, 22, coord), false, "node-1", new ArrayList<PhysicalAddress>(7));
-        _testSize(data);
-
-        data=new PingData(null, null, false, "node-1", new ArrayList<PhysicalAddress>(7));
-        _testSize(data);
-
-        List<PhysicalAddress> list=new ArrayList<PhysicalAddress>();
-        list.add(physical_addr_1);
-        list.add(physical_addr_2);
-        list.add(physical_addr_3);
-        data=new PingData(null, null, false, "node-1", list);
-        _testSize(data);
-
-        list.clear();
-        list.add(new IpAddress("127.0.0.1", 7500));
-        data=new PingData(null, null, false, "node-1", list);
-        _testSize(data);
-
-        View view=View.create(coord, 322649, coord, own, UUID.randomUUID());
-        data.setView(view);
-        _testSize(data);
-
-         data=new PingData(self, View.create(self, 1, self), true, "logical-name", null);
+        data=new PingData(a, true, "A", physical_addr).coord(true)
+          .mbrs(Arrays.asList(Util.createRandomAddress("A"), Util.createRandomAddress("B")));
         _testSize(data);
     }
 
@@ -110,32 +82,22 @@ public class SizeTest {
         UUID.add(coord, "coord");
 
         final PhysicalAddress physical_addr_1=new IpAddress("127.0.0.1", 7500);
-        final PhysicalAddress physical_addr_2=new IpAddress("192.168.1.5", 6000);
-        final PhysicalAddress physical_addr_3=new IpAddress("192.134.2.1", 6655);
 
         _testSize(new GossipData());
 
         data=new GossipData((byte)1);
         _testSize(data);
 
-        data=new GossipData((byte)1, "DemoCluster", own, (List<Address>)null, null);
+        data=new GossipData((byte)1, "DemoCluster", own, (List<Address>)null, (PhysicalAddress)null);
         _testSize(data);
 
-        data=new GossipData((byte)1, "DemoCluster", own, Arrays.asList(own, coord), null);
+        data=new GossipData((byte)1, "DemoCluster", own, Arrays.asList(own, coord), (PhysicalAddress)null);
         _testSize(data);
 
-        data=new GossipData((byte)1, "DemoCluster", own, Arrays.asList(own, coord),
-                            Arrays.asList(physical_addr_1, physical_addr_2, physical_addr_3));
+        data=new GossipData((byte)1, "DemoCluster", own, Arrays.asList(own, coord), physical_addr_1);
         _testSize(data);
 
-        List<PhysicalAddress> list=new ArrayList<PhysicalAddress>();
-        list.add(physical_addr_1);
-        list.add(physical_addr_2);
-        list.add(physical_addr_3);
-        data=new GossipData((byte)1, "DemoCluster", own, Arrays.asList(own, coord), list); 
-        _testSize(data);
-
-        data=new GossipData((byte)1, "demo", own, "logical_name", null);
+        data=new GossipData((byte)1, "demo", own, "logical_name", (PhysicalAddress)null);
         _testSize(data);
 
         data=new GossipData((byte)1, "demo", own, new byte[]{'b', 'e', 'l', 'a'});
@@ -165,9 +127,9 @@ public class SizeTest {
     }
 
     public static void testNakackHeader() throws Exception {
-        _testSize(NakAckHeader.createMessageHeader(322649));
-        _testSize(NakAckHeader.createXmitRequestHeader(100, 104, Util.createRandomAddress()));
-        _testSize(NakAckHeader.createXmitResponseHeader());
+        _testSize(NakAckHeader2.createMessageHeader(322649));
+        _testSize(NakAckHeader2.createXmitRequestHeader(Util.createRandomAddress()));
+        _testSize(NakAckHeader2.createXmitResponseHeader());
     }
 
 
@@ -221,7 +183,7 @@ public class SizeTest {
 
         // check that IpAddress is correctly sized in FD_SOCK.FdHeader
         hdr = new FD_SOCK.FdHeader(FD_SOCK.FdHeader.I_HAVE_SOCK, new IpAddress("127.0.0.1", 4567), 
-				   new IpAddress("127.0.0.1", 4567));
+                                   new IpAddress("127.0.0.1", 4567));
         _testSize(hdr) ;
     }
 
@@ -287,12 +249,39 @@ public class SizeTest {
         _testMarshalling(hdr);
     }
 
+    public static void testUnicast3Header() throws Exception {
+        UNICAST3.Header hdr=UNICAST3.Header.createDataHeader(322649, (short)127, false);
+        _testSize(hdr);
+        _testMarshalling(hdr);
+
+        hdr=UNICAST3.Header.createDataHeader(322649, Short.MAX_VALUE, false);
+        _testSize(hdr);
+        _testMarshalling(hdr);
+
+        hdr=UNICAST3.Header.createDataHeader(322649, (short)(Short.MAX_VALUE -10), true);
+        _testSize(hdr);
+        _testMarshalling(hdr);
+
+        for(long timestamp: new long[]{0, 100, Long.MAX_VALUE -1, Long.MAX_VALUE, Long.MAX_VALUE +100}) {
+            hdr=UNICAST3.Header.createSendFirstSeqnoHeader((int)timestamp);
+            _testSize(hdr);
+            _testMarshalling(hdr);
+        }
+
+        hdr=UNICAST3.Header.createAckHeader(322649, (short)2, 500600);
+        _testSize(hdr);
+        _testMarshalling(hdr);
+
+        hdr=UNICAST3.Header.createXmitReqHeader();
+        _testSize(hdr);
+        _testMarshalling(hdr);
+    }
+
 
     public static void testStableHeader() throws Exception {
         org.jgroups.protocols.pbcast.STABLE.StableHeader hdr;
         Address addr=UUID.randomUUID();
         View view=View.create(addr, 1, addr);
-        Digest digest=new Digest(view.getMembersRaw(), new long[]{200, 205});
 
         hdr=new STABLE.StableHeader(STABLE.StableHeader.STABLE_GOSSIP, view.getViewId());
         _testSize(hdr);
@@ -551,12 +540,9 @@ public class SizeTest {
         String logical_name="A";
         hdr=MERGE3.MergeHeader.createInfo(view_id, logical_name, null);
         _testSize(hdr);
-        List<PhysicalAddress> physical_addr=new ArrayList<PhysicalAddress>();
-        physical_addr.add(new IpAddress(5002));
+        PhysicalAddress physical_addr=new IpAddress(5002);
         hdr=MERGE3.MergeHeader.createInfo(view_id, logical_name, physical_addr);
         _testSize(hdr);
-        Address a=Util.createRandomAddress("A"), b=Util.createRandomAddress("B"), c=Util.createRandomAddress("C");
-        View view=View.create(a, 22, a,b,c);
         hdr=MERGE3.MergeHeader.createViewRequest();
         _testSize(hdr);
         hdr=MERGE3.MergeHeader.createViewResponse();
@@ -610,7 +596,6 @@ public class SizeTest {
         List<Address> members=new ArrayList<Address>();
         members.add(addr);
         members.add(addr);
-        View v=new View(addr, 33, members);
         hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP);
         _testSize(hdr);
 
@@ -684,9 +669,7 @@ public class SizeTest {
     }
 
     public static void testStateHeader() throws Exception {
-        IpAddress addr=new IpAddress("127.0.0.1", 5555);
-        STATE_TRANSFER.StateHeader hdr;
-        hdr=new STATE_TRANSFER.StateHeader(STATE_TRANSFER.StateHeader.STATE_REQ, null);
+        STATE_TRANSFER.StateHeader hdr=new STATE_TRANSFER.StateHeader(STATE_TRANSFER.StateHeader.STATE_REQ, null);
         _testSize(hdr);
     }
 
@@ -702,9 +685,9 @@ public class SizeTest {
 
 
     public static void testEncryptHeader() throws Exception {
-        ENCRYPT.EncryptHeader hdr=new ENCRYPT.EncryptHeader((short)1, null);
+        ENCRYPT.EncryptHeader hdr=new ENCRYPT.EncryptHeader((byte)1, new byte[]{'b','e', 'l', 'a'});
         _testSize(hdr);
-        hdr=new ENCRYPT.EncryptHeader((short)2, "Hello world");
+        hdr=new ENCRYPT.EncryptHeader((byte)2, "Hello world".getBytes());
         _testSize(hdr);
     }
 
@@ -900,6 +883,11 @@ public class SizeTest {
         assert hdr.rsp_expected;
         Assert.assertEquals(356, hdr.corrId);
         Assert.assertEquals(RequestCorrelator.Header.RSP, hdr.type);
+
+        Address a=Util.createRandomAddress("A"), b=Util.createRandomAddress("B");
+
+        hdr=new RequestCorrelator.MultiDestinationHeader(RequestCorrelator.Header.REQ, 322649, true, (short)22, new Address[]{a,b});
+        _testSize(hdr);
     }
 
 
@@ -912,6 +900,17 @@ public class SizeTest {
         assert hdr.getHighSeqno() == hdr2.getHighSeqno();
         assert hdr.getConnId()    == hdr2.getConnId();
         assert hdr.isFirst()      == hdr2.isFirst();
+    }
+
+    private static void _testMarshalling(UNICAST3.Header hdr) throws Exception {
+        byte[] buf=Util.streamableToByteBuffer(hdr);
+        UNICAST3.Header hdr2=(UNICAST3.Header)Util.streamableFromByteBuffer(UNICAST3.Header.class, buf);
+
+        assert hdr.type()       == hdr2.type();
+        assert hdr.seqno()      == hdr2.seqno();
+        assert hdr.connId()     == hdr2.connId();
+        assert hdr.first()      == hdr2.first();
+        assert hdr.timestamp()  == hdr.timestamp();
     }
 
     private static void _testSize(Digest digest) throws Exception {

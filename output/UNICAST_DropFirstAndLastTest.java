@@ -21,7 +21,7 @@ import java.util.List;
  * @author Bela Ban
  * @since  3.3
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class UNICAST_DropFirstAndLastTest {
     protected JChannel            a, b;
     protected MyReceiver<Integer> rb;
@@ -68,7 +68,7 @@ public class UNICAST_DropFirstAndLastTest {
         }
 
         List<Integer> msgs=rb.list();
-        Util.waitUntilListHasSize(msgs, 5, 5000, 500);
+        Util.waitUntilListHasSize(msgs, 5, 10000, 1000);
         System.out.println("list=" + msgs);
     }
 
@@ -114,7 +114,7 @@ public class UNICAST_DropFirstAndLastTest {
         if(unicast instanceof UNICAST2)
             unicast.setValue("stable_interval", 1000);
         return new JChannel(new SHARED_LOOPBACK().setValue("enable_batching", true),
-                            new PING().setValue("timeout", 1000),
+                            new SHARED_LOOPBACK_PING(),
                             new NAKACK2().setValue("use_mcast_xmit", false),
                             new DISCARD(),
                             unicast.setValue("xmit_interval", 500),

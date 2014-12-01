@@ -5,13 +5,12 @@ import org.jgroups.annotations.Property;
 import org.jgroups.blocks.*;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.jmx.JmxConfigurator;
+import org.jgroups.protocols.TP;
 import org.jgroups.protocols.relay.RELAY2;
 import org.jgroups.protocols.relay.SiteMaster;
+import org.jgroups.stack.AddressGenerator;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.Rsp;
-import org.jgroups.util.RspList;
-import org.jgroups.util.Streamable;
-import org.jgroups.util.Util;
+import org.jgroups.util.*;
 
 import javax.management.MBeanServer;
 import java.io.DataInput;
@@ -34,7 +33,10 @@ public class UPerf extends ReceiverAdapter {
     private RpcDispatcher          disp;
     static final String            groupname="uperf";
     protected final List<Address>  members=new ArrayList<Address>();
+    protected volatile View        view;
     protected final List<Address>  site_masters=new ArrayList<Address>();
+    protected volatile boolean     looping=true;
+    protected Thread               event_loop_thread;
 
 
     // ============ configurable properties ==================
@@ -45,6 +47,7 @@ public class UPerf extends ReceiverAdapter {
     @Property protected boolean use_anycast_addrs;
     @Property protected boolean msg_bundling=true;
     @Property protected double  read_percentage=0.8; // 80% reads, 20% writes
+    @Property protected boolean get_before_put=false; // invoke a sync GET before a PUT
     // ... add your own here, just don't forget to annotate them with @Property
     // =======================================================
 
@@ -54,9 +57,10 @@ public class UPerf extends ReceiverAdapter {
     private static final short PUT                   =  2;
     private static final short GET_CONFIG            =  3;
     private static final short SET                   =  4;
+    private static final short QUIT_ALL              =  5;
 
     private final AtomicInteger COUNTER=new AtomicInteger(1);
-    private byte[] GET_RSP=new byte[msg_size];
+    private byte[] BUFFER=new byte[msg_size];
     static NumberFormat f;
 
     static {
@@ -66,6 +70,7 @@ public class UPerf extends ReceiverAdapter {
             METHODS[PUT]                   = UPerf.class.getMethod("put", long.class, byte[].class);
             METHODS[GET_CONFIG]            = UPerf.class.getMethod("getConfig");
             METHODS[SET]                   = UPerf.class.getMethod("set", String.class, Object.class);
+            METHODS[QUIT_ALL]              = UPerf.class.getMethod("quitAll");
 
             ClassConfigurator.add((short)11000, Results.class);
             f=NumberFormat.getNumberInstance();
@@ -79,10 +84,18 @@ public class UPerf extends ReceiverAdapter {
     }
 
 
-    public void init(String props, String name, boolean xsite) throws Throwable {
+    public void init(String props, String name, boolean xsite, AddressGenerator generator, int bind_port) throws Throwable {
         channel=new JChannel(props);
+        if(generator != null)
+            channel.addAddressGenerator(generator);
         if(name != null)
             channel.setName(name);
+
+        if(bind_port > 0) {
+            TP transport=channel.getProtocolStack().getTransport();
+            transport.setBindPort(bind_port);
+        }
+
         disp=new RpcDispatcher(channel, null, this, this);
         disp.setMethodLookup(new MethodLookup() {
             public Method findMethod(short id) {
@@ -116,7 +129,7 @@ public class UPerf extends ReceiverAdapter {
         if(members.size() < 2)
             return;
         Address coord=members.get(0);
-        Config config=(Config)disp.callRemoteMethod(coord, new MethodCall(GET_CONFIG), new RequestOptions(ResponseMode.GET_ALL, 5000));
+        Config config=disp.callRemoteMethod(coord, new MethodCall(GET_CONFIG), new RequestOptions(ResponseMode.GET_ALL, 5000));
         if(config != null) {
             applyConfig(config);
             System.out.println("Fetched config from " + coord + ": " + config);
@@ -131,7 +144,32 @@ public class UPerf extends ReceiverAdapter {
         Util.close(channel);
     }
 
+    protected void startEventThread() {
+        event_loop_thread=new Thread("EventLoop") {
+            public void run() {
+                try {
+                    eventLoop();
+                }
+                catch(Throwable ex) {
+                    ex.printStackTrace();
+                    UPerf.this.stop();
+                }
+            }
+        };
+        event_loop_thread.setDaemon(true);
+        event_loop_thread.start();
+    }
+
+    protected void stopEventThread() {
+        Thread tmp=event_loop_thread;
+        looping=false;
+        if(tmp != null)
+            tmp.interrupt();
+        Util.close(channel);
+    }
+
     public void viewAccepted(View new_view) {
+        this.view=new_view;
         System.out.println("** view: " + new_view);
         members.clear();
         members.addAll(new_view.getMembers());
@@ -149,11 +187,11 @@ public class UPerf extends ReceiverAdapter {
     // =================================== callbacks ======================================
 
     public Results startTest() throws Throwable {
-
+        BUFFER=new byte[msg_size];
         addSiteMastersToMembers();
 
-        System.out.println("invoking " + num_msgs + " RPCs of " + Util.printBytes(msg_size) +
-                             ", sync=" + sync + ", oob=" + oob + ", use_anycast_addrs=" + use_anycast_addrs);
+        System.out.println("invoking " + num_msgs + " RPCs of " + Util.printBytes(BUFFER.length) + ", sync=" + sync +
+                             ", oob=" + oob + ", msg_bundling=" + msg_bundling + ", use_anycast_addrs=" + use_anycast_addrs);
         int total_gets=0, total_puts=0;
         final AtomicInteger num_msgs_sent=new AtomicInteger(0);
 
@@ -172,8 +210,14 @@ public class UPerf extends ReceiverAdapter {
         }
 
         long total_time=System.currentTimeMillis() - start;
-        System.out.println("done (in " + total_time + " ms)");
+        System.out.println("\ndone (in " + total_time + " ms)");
         return new Results(total_gets, total_puts, total_time);
+    }
+
+    public void quitAll() {
+        Util.sleepRandom(10, 10000);
+        System.out.println("-- received quitAll(): shutting down");
+        stopEventThread();
     }
 
 
@@ -188,12 +232,11 @@ public class UPerf extends ReceiverAdapter {
     }
 
     public byte[] get(long key) {
-        return GET_RSP;
+        return BUFFER;
     }
 
 
     public void put(long key, byte[] val) {
-        
     }
 
     public Config getConfig() {
@@ -221,15 +264,16 @@ public class UPerf extends ReceiverAdapter {
 
         addSiteMastersToMembers();
 
-        while(true) {
+        while(looping) {
             c=Util.keyPress("[1] Send msgs [2] Print view" +
                               "\n[6] Set sender threads (" + num_threads + ") [7] Set num msgs (" + num_msgs + ") " +
                               "[8] Set msg size (" + Util.printBytes(msg_size) + ")" +
                               " [9] Set anycast count (" + anycast_count + ")" +
                               "\n[o] Toggle OOB (" + oob + ") [s] Toggle sync (" + sync +
-                              ") [r] Set read percentage (" + f.format(read_percentage) + ") " +
-                              "[a] Toggle use_anycast_addrs (" + use_anycast_addrs + ")" +
-                              "\n[q] Quit\n");
+                              ") [r] Set read percentage (" + f.format(read_percentage) + ") [g] get_before_put (" + get_before_put + ") " +
+                              "\n[a] Toggle use_anycast_addrs (" + use_anycast_addrs + ") [b] Toggle msg_bundling (" +
+                              (msg_bundling? "on" : "off") + ")" +
+                              "\n[q] Quit [X] quit all\n");
             switch(c) {
                 case -1:
                     break;
@@ -270,9 +314,22 @@ public class UPerf extends ReceiverAdapter {
                 case 'b':
                     changeFieldAcrossCluster("msg_bundling", !msg_bundling);
                     break;
+                case 'g':
+                    changeFieldAcrossCluster("get_before_put", !get_before_put);
+                    break;
                 case 'q':
                     channel.close();
                     return;
+                case 'X':
+                    try {
+                        RequestOptions options=new RequestOptions(ResponseMode.GET_NONE, 0).setExclusionList(local_addr);
+                        options.setFlags(Message.Flag.OOB, Message.Flag.DONT_BUNDLE, Message.Flag.NO_FC);
+                        disp.callRemoteMethods(null, new MethodCall(QUIT_ALL), options);
+                    }
+                    catch(Throwable t) {
+                        System.err.println("Calling quitAll() failed: " + t);
+                    }
+                    break;
                 case '\n':
                 case '\r':
                     break;
@@ -285,7 +342,7 @@ public class UPerf extends ReceiverAdapter {
 
     /** Kicks off the benchmark on all cluster nodes */
     void startBenchmark() {
-        RspList<Object> responses=null;
+        RspList<Results> responses=null;
         try {
             RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 0);
             options.setFlags(Message.Flag.OOB, Message.Flag.DONT_BUNDLE, Message.Flag.NO_FC);
@@ -300,16 +357,18 @@ public class UPerf extends ReceiverAdapter {
         long total_time=0;
 
         System.out.println("\n======================= Results: ===========================");
-        for(Map.Entry<Address,Rsp<Object>> entry: responses.entrySet()) {
+        for(Map.Entry<Address,Rsp<Results>> entry: responses.entrySet()) {
             Address mbr=entry.getKey();
-            Rsp rsp=entry.getValue();
-            Results result=(Results)rsp.getValue();
-            total_reqs+=result.num_gets + result.num_puts;
-            total_time+=result.time;
+            Rsp<Results> rsp=entry.getValue();
+            Results result=rsp.getValue();
+            if(result != null) {
+                total_reqs+=result.num_gets + result.num_puts;
+                total_time+=result.time;
+            }
             System.out.println(mbr + ": " + result);
         }
         double total_reqs_sec=total_reqs / ( total_time/ 1000.0);
-        double throughput=total_reqs_sec * msg_size;
+        double throughput=total_reqs_sec * BUFFER.length;
         double ms_per_req=total_time / (double)total_reqs;
         Protocol prot=channel.getProtocolStack().findProtocol(Util.getUnicastProtocols());
         System.out.println("\n");
@@ -332,9 +391,9 @@ public class UPerf extends ReceiverAdapter {
 
     int getAnycastCount() throws Exception {
         int tmp=Util.readIntFromStdin("Anycast count: ");
-        View view=channel.getView();
-        if(tmp > view.size()) {
-            System.err.println("anycast count must be smaller or equal to the view size (" + view + ")\n");
+        View tmp_view=channel.getView();
+        if(tmp > tmp_view.size()) {
+            System.err.println("anycast count must be smaller or equal to the view size (" + tmp_view + ")\n");
             return -1;
         }
         return tmp;
@@ -347,7 +406,7 @@ public class UPerf extends ReceiverAdapter {
 
 
     void printView() {
-        System.out.println("\n-- view: " + members + '\n');
+        System.out.println("\n-- view: " + view + '\n');
         try {
             System.in.skip(System.in.available());
         }
@@ -380,12 +439,14 @@ public class UPerf extends ReceiverAdapter {
         private final AtomicInteger  num_msgs_sent;
         private int                  num_gets=0;
         private int                  num_puts=0;
+        private final int            PRINT;
 
 
         public Invoker(Collection<Address> dests, int num_msgs_to_send, AtomicInteger num_msgs_sent) {
             this.num_msgs_sent=num_msgs_sent;
             this.dests.addAll(dests);
             this.num_msgs_to_send=num_msgs_to_send;
+            PRINT=Math.max(num_msgs_to_send / 10, 10);
             setName("Invoker-" + COUNTER.getAndIncrement());
         }
 
@@ -395,46 +456,54 @@ public class UPerf extends ReceiverAdapter {
 
 
         public void run() {
-            final byte[] buf=new byte[msg_size];
-            Object[] put_args={0, buf};
+            Object[] put_args={0, BUFFER};
             Object[] get_args={0};
             MethodCall get_call=new MethodCall(GET, get_args);
             MethodCall put_call=new MethodCall(PUT, put_args);
             RequestOptions get_options=new RequestOptions(ResponseMode.GET_ALL, 40000, false, null);
             RequestOptions put_options=new RequestOptions(sync ? ResponseMode.GET_ALL : ResponseMode.GET_NONE, 40000, true, null);
-
-            // Don't use bundling as we have sync requests (e.g. GETs) regardless of whether we set sync=true or false
-            get_options.setFlags(Message.Flag.DONT_BUNDLE);
-            put_options.setFlags(Message.Flag.DONT_BUNDLE);
+            RequestOptions get_before_put_options=new RequestOptions(ResponseMode.GET_FIRST, 40000, true, null, Message.Flag.DONT_BUNDLE, Message.Flag.OOB);
 
             if(oob) {
                 get_options.setFlags(Message.Flag.OOB);
                 put_options.setFlags(Message.Flag.OOB);
             }
-            if(sync) {
-                get_options.setFlags(Message.Flag.DONT_BUNDLE, Message.Flag.NO_FC);
-                put_options.setFlags(Message.Flag.DONT_BUNDLE, Message.Flag.NO_FC);
+            if(!msg_bundling) {
+                get_options.setFlags(Message.Flag.DONT_BUNDLE);
+                put_options.setFlags(Message.Flag.DONT_BUNDLE);
             }
-            if(use_anycast_addrs) {
+            if(use_anycast_addrs)
                 put_options.useAnycastAddresses(true);
-            }
 
             while(true) {
                 long i=num_msgs_sent.getAndIncrement();
                 if(i >= num_msgs_to_send)
                     break;
+                if(i > 0 && i % PRINT == 0)
+                    System.out.print(".");
                 
                 boolean get=Util.tossWeightedCoin(read_percentage);
 
                 try {
                     if(get) { // sync GET
                         Address target=pickTarget();
-                        get_args[0]=i;
-                        disp.callRemoteMethod(target, get_call, get_options);
+                        if(target != null && target.equals(local_addr)) {
+                            get(1);
+                        }
+                        else {
+                            get_args[0]=i;
+                            disp.callRemoteMethod(target, get_call, get_options);
+                        }
                         num_gets++;
                     }
                     else {    // sync or async (based on value of 'sync') PUT
-                        Collection<Address> targets=pickAnycastTargets();
+                        final Collection<Address> targets=pickAnycastTargets();
+                        if(get_before_put) {
+                            // sync GET
+                            get_args[0]=i;
+                            disp.callRemoteMethods(targets, get_call, get_before_put_options);
+                            num_gets++;
+                        }
                         put_args[0]=i;
                         disp.callRemoteMethods(targets, put_call, put_options);
                         num_puts++;
@@ -447,9 +516,10 @@ public class UPerf extends ReceiverAdapter {
         }
 
         private Address pickTarget() {
-            int index=dests.indexOf(local_addr);
-            int new_index=(index +1) % dests.size();
-            return dests.get(new_index);
+            return Util.pickRandomElement(dests);
+            // int index=dests.indexOf(local_addr);
+            // int new_index=(index +1) % dests.size();
+            // return dests.get(new_index);
         }
 
         private Collection<Address> pickAnycastTargets() {
@@ -515,7 +585,7 @@ public class UPerf extends ReceiverAdapter {
         public void writeTo(DataOutput out) throws Exception {
             out.writeInt(values.size());
             for(Map.Entry<String,Object> entry: values.entrySet()) {
-                Util.writeString(entry.getKey(), out);
+                Bits.writeString(entry.getKey(),out);
                 Util.objectToStream(entry.getValue(), out);
             }
         }
@@ -523,7 +593,7 @@ public class UPerf extends ReceiverAdapter {
         public void readFrom(DataInput in) throws Exception {
             int size=in.readInt();
             for(int i=0; i < size; i++) {
-                String key=Util.readString(in);
+                String key=Bits.readString(in);
                 Object value=Util.objectFromStream(in);
                 if(key == null)
                     continue;
@@ -537,10 +607,15 @@ public class UPerf extends ReceiverAdapter {
     }
 
 
+
+
     public static void main(String[] args) {
         String  props=null;
         String  name=null;
         boolean xsite=true;
+        boolean run_event_loop=true;
+        AddressGenerator addr_generator=null;
+        int port=0;
 
         for(int i=0; i < args.length; i++) {
             if("-props".equals(args[i])) {
@@ -555,6 +630,18 @@ public class UPerf extends ReceiverAdapter {
                 xsite=Boolean.valueOf(args[++i]);
                 continue;
             }
+            if("-nohup".equals(args[i])) {
+                run_event_loop=false;
+                continue;
+            }
+            if("-uuid".equals(args[i])) {
+                addr_generator=new OneTimeAddressGenerator(Long.valueOf(args[++i]));
+                continue;
+            }
+            if("-port".equals(args[i])) {
+                port=Integer.valueOf(args[++i]);
+                continue;
+            }
             help();
             return;
         }
@@ -562,8 +649,9 @@ public class UPerf extends ReceiverAdapter {
         UPerf test=null;
         try {
             test=new UPerf();
-            test.init(props, name, xsite);
-            test.eventLoop();
+            test.init(props, name, xsite, addr_generator, port);
+            if(run_event_loop)
+                test.startEventThread();
         }
         catch(Throwable ex) {
             ex.printStackTrace();
@@ -573,7 +661,8 @@ public class UPerf extends ReceiverAdapter {
     }
 
     static void help() {
-        System.out.println("UPerf [-props <props>] [-name name] [-xsite <true | false>]");
+        System.out.println("UPerf [-props <props>] [-name name] [-xsite <true | false>] " +
+                             "[-nohup] [-uuid <UUID>] [-port <bind port>]");
     }
 
 

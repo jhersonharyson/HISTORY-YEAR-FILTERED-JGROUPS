@@ -2,8 +2,7 @@
 package org.jgroups.tests;
 
 import org.jgroups.*;
-import org.jgroups.util.Buffer;
-import org.jgroups.util.Util;
+import org.jgroups.util.*;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -328,16 +327,24 @@ public class UtilTest {
         Assert.assertEquals(msg.getLength(), msg2.getLength());
     }
 
+    public static void testStringMarshalling() throws Exception {
+        byte[] tmp={'B', 'e', 'l', 'a'};
+        String str=new String(tmp);
+        byte[] buf=Util.objectToByteBuffer(str);
+        String str2=(String)Util.objectFromByteBuffer(buf);
+        assert str.equals(str2);
+        tmp[1]='a';
+        str2=(String)Util.objectFromByteBuffer(buf);
+        assert str.equals(str2);
+    }
 
     public static void testObjectToByteArrayWithLargeString() throws Exception {
         marshalString(Short.MAX_VALUE );
     }
 
-
-     public static void testObjectToByteArrayWithLargeString2() throws Exception {
+    public static void testObjectToByteArrayWithLargeString2() throws Exception {
         marshalString(Short.MAX_VALUE - 100);
     }
-
 
     public static void testObjectToByteArrayWithLargeString3() throws Exception {
         marshalString(Short.MAX_VALUE + 1);
@@ -424,14 +431,14 @@ public class UtilTest {
         String s1="Bela Ban", s2="Michelle Ban";
         ByteArrayOutputStream outstream=new ByteArrayOutputStream();
         DataOutputStream dos=new DataOutputStream(outstream);
-        Util.writeString(s1, dos);
-        Util.writeString(s2, dos);
+        Bits.writeString(s1,dos);
+        Bits.writeString(s2,dos);
         dos.close();
         byte[] buf=outstream.toByteArray();
         ByteArrayInputStream instream=new ByteArrayInputStream(buf);
         DataInputStream dis=new DataInputStream(instream);
-        String s3=Util.readString(dis);
-        String s4=Util.readString(dis);
+        String s3=Bits.readString(dis);
+        String s4=Bits.readString(dis);
         Assert.assertEquals(s1, s3);
         Assert.assertEquals(s2, s4);
     }
@@ -485,83 +492,26 @@ public class UtilTest {
         Assert.assertEquals(buf.length, buf2.length);
     }
 
+    public static void testWriteAndReadStreamableArray() throws Exception {
+        Message[] msgs={
+          new Message(null, "hello world").setFlag(Message.Flag.OOB, Message.Flag.NO_RELIABILITY),
+          new Message(Util.createRandomAddress("dest"), "bela ban"),
+          new Message(Util.createRandomAddress("dest"), Util.createRandomAddress("src"), "hello world again").setTransientFlag(Message.TransientFlag.DONT_LOOPBACK)
+        };
 
-    public static void testEncodeAndDecode() {
-        long[] numbers={0, 1, 50, 127, 128, 254, 255, 256,
-          Short.MAX_VALUE, Short.MAX_VALUE +1, Short.MAX_VALUE *2, Short.MAX_VALUE *2 +1,
-          100000, 500000, 100000,
-          Integer.MAX_VALUE, (long)Integer.MAX_VALUE +1, (long)Integer.MAX_VALUE *2, (long)Integer.MAX_VALUE +10,
-          Long.MAX_VALUE /10, Long.MAX_VALUE -1, Long.MAX_VALUE};
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(256);
+        Util.write(msgs, out);
 
-        for(long num: numbers) {
-            byte[] buf=Util.encode(num);
-            long result=Util.decode(buf);
-            System.out.println(num + " encoded to " + printBuffer(buf) + " (" + buf.length + " bytes), decoded to " + result);
-            assert num == result;
+        ByteArrayDataInputStream in=new ByteArrayDataInputStream(out.buffer(), 0, out.position());
+        Message[] tmp=Util.read(Message.class, in);
+        for(int i=0; i < msgs.length; i++) {
+            if(msgs[i].dest() == null)
+                assert tmp[i].dest() == null;
+            else
+                assert(msgs[i].dest().equals(tmp[i].dest()));
+            assert msgs[i].getLength() == tmp[i].getLength();
+            assert msgs[i].getObject().equals(tmp[i].getObject());
         }
-    }
-
-    public static void testEncodeLength() {
-        byte lengths=Util.encodeLength((byte)8, (byte)8);
-        byte[] lens=Util.decodeLength(lengths);
-
-        assert 8 == lens[0];
-        assert 8 == lens[1];
-    }
-
-    public static void testEncodeLength2() {
-        int combinations=0;
-        for(byte i=1; i <= 8; i++) {
-            for(byte j=1; j <= 8; j++) {
-                byte lengths=Util.encodeLength(i, j);
-                byte[] lens=Util.decodeLength(lengths);
-                assert lens[0] == i && lens[1] == j : "lens[0]=" + lens[0] + ", lens[1]=" +lens[1] + ", i=" + i + ", j=" + j;
-                combinations++;
-            }
-        }
-        System.out.println("all " + combinations + " combinations were encoded / decoded successfully");
-    }
-
-    public static void testSize() {
-        int[] shifts={0, 1, 7, 8, 15, 16, 17, 23, 24, 25, 31, 32, 33, 39, 40, 41, 47, 48, 49, 55, 56};
-
-        assert Util.size(0) == 1;
-
-        for(int shift: shifts) {
-            long num=((long)1) << shift;
-            byte size=Util.size(num);
-            System.out.println(num + " needs " + size + " bytes");
-            int num_bytes_required=(shift / 8) +2;
-            assert size == num_bytes_required;
-        }
-
-    }
-
-
-    public static void testEncodeAndDecodeLongSequence() {
-        long[] numbers={0, 1, 50, 127, 128, 254, 255, 256,
-          Short.MAX_VALUE, Short.MAX_VALUE +1, Short.MAX_VALUE *2, Short.MAX_VALUE *2 +1,
-          100000, 500000, 100000,
-          Integer.MAX_VALUE, (long)Integer.MAX_VALUE +1, (long)Integer.MAX_VALUE *2, (long)Integer.MAX_VALUE +10,
-          Long.MAX_VALUE /10, Long.MAX_VALUE -1, Long.MAX_VALUE};
-
-        for(long num: numbers) {
-            byte[] buf=Util.encodeLongSequence(num, num);
-            long[] result=Util.decodeLongSequence(buf);
-            System.out.println(num + " | " + num + " encoded to " + buf.length +
-                                 " bytes, decoded to " + result[0] + " | " + result[1]);
-            assert num == result[0] && num == result[1];
-        }
-    }
-
-
-    static String printBuffer(byte[] buf) {
-        StringBuilder sb=new StringBuilder();
-        if(buf != null) {
-            for(byte b: buf)
-                sb.append(b).append(" ");
-        }
-        return sb.toString();
     }
 
 

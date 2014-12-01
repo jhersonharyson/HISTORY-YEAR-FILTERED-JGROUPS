@@ -34,13 +34,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author Richard Achmatowicz
  * @author Bela Ban
  */
-@Test(groups=Global.FUNCTIONAL, sequential=true)
+@Test(groups=Global.FUNCTIONAL, singleThreaded=true)
 public class NakackTest {
     final static int NUM_PEERS=3;
     final static int NUM_SENDERS=NUM_PEERS-1;
     final static int NUM_MSGS=1000;
     final static int WAIT_TIMEOUT=10; // secs
-    final static int MSGS_PER_STATUS_LINE=100;
+    final static int MSGS_PER_STATUS_LINE=500;
     final static int TOT_MSGS_FOR_ALL_RECEIVERS=NUM_SENDERS * NUM_MSGS * NUM_PEERS;
 
     // convey assertion failure from thread to main framework
@@ -70,6 +70,7 @@ public class NakackTest {
             receivers[i]=new Receiver(channels[i]);
             channels[i].setReceiver(receivers[i]);
         }
+        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, channels);
     }
 
     @AfterMethod
@@ -81,7 +82,7 @@ public class NakackTest {
      * Test to see thyat NAKACK delivery is reliable and FIFO.
      */
     public void testReceptionOfAllMessages() throws TimeoutException {
-        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, channels);
+
 
         // start the NAKACK peers and let them exchange messages
         for(int i=0; i < NUM_PEERS; i++) {
@@ -115,8 +116,8 @@ public class NakackTest {
     protected static JChannel createChannel() throws Exception {
         Protocol[] protocols={
           new SHARED_LOOPBACK(),
-          new PING().setValue("timeout", 2000).setValue("num_initial_members", 3),
-          new MERGE2().setValue("min_interval", 1000).setValue("max_interval", 3000),
+          new SHARED_LOOPBACK_PING(),
+          new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000),
           new NAKACK2().setValue("use_mcast_xmit", false),
           new UNICAST3(),
           new STABLE().setValue("max_bytes", 50000),
@@ -138,7 +139,6 @@ public class NakackTest {
      */
     protected class Receiver extends ReceiverAdapter {
         final JChannel               channel;
-        int                          num_mgs_received=0;
         ConcurrentMap<Address, Long> senders=new ConcurrentHashMap<Address, Long>();
 
         public Receiver(JChannel channel) {
@@ -165,7 +165,6 @@ public class NakackTest {
             try {
                 num=(Long)msg.getObject();
                 long received_seqno=num;
-                num_mgs_received++;
 
                 // 1. check if sequence numbers are in sequence
                 if(received_seqno == last_seqno) // correct - update with next expected seqno
@@ -183,11 +182,6 @@ public class NakackTest {
             catch(Exception ex) {
                 System.err.println(ex.toString());
             }
-        }
-
-
-        public int getNumberOfReceivedMessages() {
-            return num_mgs_received;
         }
     }
 

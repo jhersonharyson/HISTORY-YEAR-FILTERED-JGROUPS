@@ -20,7 +20,7 @@ import java.util.*;
  * (see individual tests for more detailed descriptions).
  * @author Bela Ban
  */
-@Test(groups=Global.BYTEMAN,sequential=true)
+@Test(groups=Global.BYTEMAN,singleThreaded=true)
 public class SequencerFailoverTest extends BMNGRunner {
     JChannel a, b, c; // A is the coordinator
     static final String GROUP="SequencerFailoverTest";
@@ -267,7 +267,7 @@ public class SequencerFailoverTest extends BMNGRunner {
     /** Removes FD, FD_ALL, MERGEX protocols, sets SEQUENCER.threshold=0 */
     protected void adjustConfiguration(JChannel ... channels) {
         for(JChannel ch: channels) {
-            ch.getProtocolStack().removeProtocol(FD_ALL.class,FD.class,MERGE2.class,MERGE3.class, VERIFY_SUSPECT.class);
+            ch.getProtocolStack().removeProtocol(FD_ALL.class,FD.class,MERGE3.class, VERIFY_SUSPECT.class);
             SEQUENCER seq=(SEQUENCER)ch.getProtocolStack().findProtocol(SEQUENCER.class);
             seq.setThreshold(0); // permanent ack-mode
         }

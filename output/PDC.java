@@ -8,10 +8,8 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.Streamable;
-import org.jgroups.util.Tuple;
+import org.jgroups.util.*;
 import org.jgroups.util.UUID;
-import org.jgroups.util.Util;
 
 import java.io.*;
 import java.nio.channels.FileChannel;
@@ -69,9 +67,8 @@ public class PDC extends Protocol {
     public Object down(Event evt) {
         switch(evt.getType()) {
             case Event.GET_PHYSICAL_ADDRESS:
-                Address logical_addr=(Address)evt.getArg();
                 Object addr=down_prot.down(evt);
-                return addr != null? addr : cache.get(logical_addr);
+                return addr != null? addr : cache.get((Address)evt.getArg());
 
             case Event.GET_PHYSICAL_ADDRESSES:
                 Collection<PhysicalAddress> addrs=(Collection<PhysicalAddress>)down_prot.down(evt);
@@ -237,7 +234,7 @@ public class PDC extends Protocol {
             out=new DataOutputStream(new FileOutputStream(file));
             Util.writeAddress(logical_addr, out);
             Util.writeAddress(physical_addr, out);
-            Util.writeString(logical_name, out);
+            Bits.writeString(logical_name,out);
             Util.close(out);
             if(log.isTraceEnabled())
                 log.trace("Stored temporary file: " + file.getAbsolutePath());
@@ -314,13 +311,13 @@ public class PDC extends Protocol {
         public void writeTo(DataOutput out) throws Exception {
             Util.writeAddress(logical_addr, out);
             Util.writeAddress(physical_addr, out);
-            Util.writeString(logical_name, out);
+            Bits.writeString(logical_name,out);
         }
 
         public void readFrom(DataInput in) throws Exception {
             logical_addr=Util.readAddress(in);
             physical_addr=Util.readAddress(in);
-            logical_name=Util.readString(in);
+            logical_name=Bits.readString(in);
         }
 
         public String toString() {

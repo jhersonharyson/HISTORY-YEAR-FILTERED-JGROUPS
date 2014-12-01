@@ -64,6 +64,7 @@ public class ForkChannel extends JChannel implements ChannelListener {
                        boolean create_fork_if_absent, int position, Class<? extends Protocol> neighbor,
                        Protocol ... protocols) throws Exception {
 
+        super(false);
         if(main_channel == null)    throw new IllegalArgumentException("main channel cannot be null");
         if(fork_stack_id == null)   throw new IllegalArgumentException("fork_stack_id cannot be null");
         if(fork_channel_id == null) throw new IllegalArgumentException("fork_channel_id cannot be null");
@@ -71,12 +72,14 @@ public class ForkChannel extends JChannel implements ChannelListener {
         this.main_channel=main_channel;
         this.fork_channel_id=fork_channel_id;
 
-        FORK fork=getFORK(main_channel, position, neighbor, create_fork_if_absent);
-        Protocol bottom_prot=fork.get(fork_stack_id);
-        if(bottom_prot == null) // Create the fork-stack if absent
-            bottom_prot=fork.createForkStack(fork_stack_id, new ForkProtocolStack(), false,
-                                             protocols == null? null : Arrays.asList(protocols));
-
+        Protocol bottom_prot=null;
+        synchronized(ForkChannel.class) { // To prevent multiple concurrent FORK creations https://issues.jboss.org/browse/JGRP-1842
+            FORK fork=getFORK(main_channel, position, neighbor, create_fork_if_absent);
+            bottom_prot=fork.get(fork_stack_id);
+            if(bottom_prot == null) // Create the fork-stack if absent
+                bottom_prot=fork.createForkStack(fork_stack_id, new ForkProtocolStack(), false,
+                                                 protocols == null? null : Arrays.asList(protocols));
+        }
         prot_stack=getForkStack(bottom_prot);
         flush_supported=main_channel.flushSupported();
     }
@@ -213,7 +216,7 @@ public class ForkChannel extends JChannel implements ChannelListener {
         throw new UnsupportedOperationException();
     }
 
-    public void setAddressGenerator(AddressGenerator address_generator) {
+    public void addAddressGenerator(AddressGenerator address_generator) {
         log.warn("setting of address generator is not supported by fork-channel; address generator is ignored");
     }
 

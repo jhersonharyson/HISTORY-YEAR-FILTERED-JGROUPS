@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit;
  * @author Dan Berindei
  * @author Bela Ban
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class MessageDispatcherRSVPTest {
     protected static final int          NUM=2; // number of members
     protected final JChannel[]          channels=new JChannel[NUM];
@@ -50,7 +50,7 @@ public class MessageDispatcherRSVPTest {
                                          new DefaultThreadFactory("", false));
         handler.start();
 
-        TimeScheduler timer=new TimeScheduler2(new DefaultThreadFactory("Timer", true, true),
+        TimeScheduler timer=new TimeScheduler3(new DefaultThreadFactory("Timer", true, true),
                                                5,20,
                                                3000, 5000, "abort");
 
@@ -65,8 +65,7 @@ public class MessageDispatcherRSVPTest {
 
         System.out.print("Connecting channels: ");
         for(int i=0; i < NUM; i++) {
-            SHARED_LOOPBACK shared_loopback=(SHARED_LOOPBACK)new SHARED_LOOPBACK().setValue("enable_bundling", false);
-            shared_loopback.setLoopback(false);
+            SHARED_LOOPBACK shared_loopback=new SHARED_LOOPBACK();
             shared_loopback.setTimer(timer);
             shared_loopback.setOOBThreadPool(oob_thread_pool);
             shared_loopback.setDefaultThreadPool(thread_pool);
@@ -74,16 +73,15 @@ public class MessageDispatcherRSVPTest {
 
             channels[i]=Util.createChannel(shared_loopback,
                                            new DISCARD(),
-                                           new PING().setValue("timeout",1000).setValue("num_initial_members",NUM)
-                                             .setValue("force_sending_discovery_rsps", true),
-                                           new MERGE2().setValue("min_interval", 1000).setValue("max_interval", 3000),
+                                           new SHARED_LOOPBACK_PING(),
+                                           new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000),
                                            new NAKACK2().setValue("use_mcast_xmit",false)
                                              .setValue("discard_delivered_msgs",true)
                                              .setValue("log_discard_msgs", false).setValue("log_not_found_msgs", false),
                                            new UNICAST3().setValue("xmit_table_num_rows",5).setValue("xmit_interval", 300),
                                            new RSVP().setValue("timeout", 10000).setValue("throw_exception_on_timeout", true),
                                            new GMS().setValue("print_local_addr",false)
-                                             .setValue("leave_timeout",100)
+                                             .setValue("leave_timeout",100).setValue("join_timeout", 500)
                                              .setValue("log_view_warnings",false)
                                              .setValue("view_ack_collection_timeout",2000)
                                              .setValue("log_collect_msgs",false));

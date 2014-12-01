@@ -3,10 +3,9 @@ package org.jgroups.protocols;
 import org.jgroups.Event;
 import org.jgroups.Header;
 import org.jgroups.Message;
-import org.jgroups.annotations.MBean;
-import org.jgroups.annotations.ManagedAttribute;
-import org.jgroups.annotations.Property;
+import org.jgroups.annotations.*;
 import org.jgroups.conf.ClassConfigurator;
+import org.jgroups.conf.ConfiguratorFactory;
 import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.fork.ForkConfig;
 import org.jgroups.fork.ForkProtocol;
@@ -14,13 +13,15 @@ import org.jgroups.fork.ForkProtocolStack;
 import org.jgroups.stack.Configurator;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
+import org.jgroups.util.Bits;
 import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Util;
+import org.w3c.dom.Node;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.FileInputStream;
-import java.io.InputStream;
+import java.io.*;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.security.AccessControlException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -34,6 +35,8 @@ import java.util.concurrent.ConcurrentMap;
  * @author Bela Ban
  * @since  3.4
  */
+@XmlInclude(schema="fork-stacks.xsd",type=XmlInclude.Type.IMPORT,namespace="fork",alias="fork")
+@XmlElement(name="fork-stacks",type="fork:ForkStacksType")
 @MBean(description="Implementation of FORK protocol")
 public class FORK extends Protocol {
     public static short ID=ClassConfigurator.getProtocolId(FORK.class);
@@ -71,7 +74,7 @@ public class FORK extends Protocol {
                 if(hdr.fork_stack_id == null)
                     throw new IllegalArgumentException("header has a null fork_stack_id");
                 Protocol bottom_prot=get(hdr.fork_stack_id);
-                return bottom_prot.up(evt);
+                return bottom_prot != null? bottom_prot.up(evt) : null;
 
             case Event.VIEW_CHANGE:
                 for(Protocol bottom: fork_stacks.values())
@@ -102,6 +105,8 @@ public class FORK extends Protocol {
             String fork_stack_id=entry.getKey();
             List<Message> list=entry.getValue();
             Protocol bottom_prot=get(fork_stack_id);
+            if(bottom_prot == null)
+                continue;
             MessageBatch mb=new MessageBatch(batch.dest(), batch.sender(), batch.clusterName(), batch.multicast(), list);
             try {
                 bottom_prot.up(mb);
@@ -117,8 +122,14 @@ public class FORK extends Protocol {
 
 
     protected void createForkStacks(String config, boolean replace_existing) throws Exception {
-        InputStream in=new FileInputStream(config);
+        InputStream in=getForkStream(config);
+        if(in == null)
+            throw new FileNotFoundException("fork stacks config " + config + " not found");
         Map<String,List<ProtocolConfiguration>> protocols=ForkConfig.parse(in);
+        createForkStacks(protocols, replace_existing);
+    }
+
+    protected void createForkStacks(Map<String,List<ProtocolConfiguration>> protocols, boolean replace_existing) throws Exception {
         for(Map.Entry<String,List<ProtocolConfiguration>> entry: protocols.entrySet()) {
             String fork_stack_id=entry.getKey();
             if(get(fork_stack_id) != null && !replace_existing)
@@ -130,6 +141,10 @@ public class FORK extends Protocol {
         }
     }
 
+    public void parse(Node node) throws Exception {
+        Map<String,List<ProtocolConfiguration>> protocols=ForkConfig.parse(node);
+        createForkStacks(protocols, false);
+    }
 
     /**
      * Creates a new fork-stack from protocols and adds it into the hashmap of fork-stack (key is fork_stack_id).
@@ -186,6 +201,32 @@ public class FORK extends Protocol {
         return Configurator.createProtocols(protocol_configs,stack);
     }
 
+    public static InputStream getForkStream(String config) throws IOException {
+        InputStream configStream = null;
+
+        try {
+            configStream=new FileInputStream(config);
+        }
+        catch(FileNotFoundException fnfe) {
+        }
+        catch(AccessControlException access_ex) { // fixes http://jira.jboss.com/jira/browse/JGRP-94
+        }
+
+        // Check to see if the properties string is a URL.
+        if(configStream == null) {
+            try {
+                configStream=new URL(config).openStream();
+            }
+            catch (MalformedURLException mre) {
+            }
+        }
+
+        // Check to see if the properties string is the name of a resource, e.g. udp.xml.
+        if(configStream == null)
+            configStream=Util.getResourceAsStream(config, ConfiguratorFactory.class);
+        return configStream;
+    }
+
 
     public static class ForkHeader extends Header {
         protected String fork_stack_id, fork_channel_id;
@@ -217,13 +258,13 @@ public class FORK extends Protocol {
         public int size() {return Util.size(fork_stack_id) + Util.size(fork_channel_id);}
 
         public void writeTo(DataOutput out) throws Exception {
-            Util.writeString(fork_stack_id, out);
-            Util.writeString(fork_channel_id, out);
+            Bits.writeString(fork_stack_id,out);
+            Bits.writeString(fork_channel_id,out);
         }
 
         public void readFrom(DataInput in) throws Exception {
-            fork_stack_id=Util.readString(in);
-            fork_channel_id=Util.readString(in);
+            fork_stack_id=Bits.readString(in);
+            fork_channel_id=Bits.readString(in);
         }
 
         public String toString() {return fork_stack_id + ":" + fork_channel_id;}

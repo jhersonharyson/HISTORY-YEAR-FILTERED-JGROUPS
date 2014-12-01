@@ -14,7 +14,7 @@ import org.testng.annotations.Test;
  * Tests the NAKACK protocol's REBROADCAST behavior
  * @author Dennis Reed
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class NAKACK_REBROADCAST_Test {
     static final short           NAKACK_ID=ClassConfigurator.getProtocolId(NAKACK2.class);
     protected Address            a1;
@@ -31,7 +31,7 @@ public class NAKACK_REBROADCAST_Test {
         nak.setDownProtocol(interceptor);
         TP transport=new TP() {
             public boolean supportsMulticasting() {return false;}
-            public void sendMulticast(byte[] data, int offset, int length) throws Exception {}
+            public void sendMulticast(AsciiString cluster_name, byte[] data, int offset, int length) throws Exception {}
             public void sendUnicast(PhysicalAddress dest, byte[] data, int offset, int length) throws Exception {}
             public String getInfo() {return null;}
             public Object down(Event evt) {return null;}

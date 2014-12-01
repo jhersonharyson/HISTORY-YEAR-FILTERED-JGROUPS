@@ -17,6 +17,7 @@ import org.jgroups.util.MessageBatch;
 import org.jgroups.util.SocketFactory;
 import org.jgroups.util.ThreadFactory;
 import org.jgroups.util.Util;
+import org.w3c.dom.Node;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -72,8 +73,8 @@ public abstract class Protocol {
      * @param level The new level. Valid values are "fatal", "error", "warn", "info", "debug", "trace"
      * (capitalization not relevant)
      */
-    @Property(name="level", description="Sets the logger level (see javadocs)")
     public void          setLevel(String level)            {log.setLevel(level);}
+    @Property(name="level", description="logger level (see javadocs)")
     public String        getLevel()                        {return log.getLevel();}
     public Protocol      level(String level)               {this.log.setLevel(level); return this;}
     public boolean       isErgonomics()                    {return ergonomics;}
@@ -120,6 +121,12 @@ public abstract class Protocol {
         Field field=Util.getField(getClass(), name);
         if(field == null)
             throw new IllegalArgumentException("field \"" + name + "\n not found");
+        Property prop=field.getAnnotation(Property.class);
+        if(prop != null) {
+            String deprecated_msg=prop.deprecatedMessage();
+            if(deprecated_msg != null && !deprecated_msg.isEmpty())
+                log.warn("Field " + getName() + "." + name + " is deprecated: " + deprecated_msg);
+        }
         Util.setField(field, this, value);
         return this;
     }
@@ -134,6 +141,10 @@ public abstract class Protocol {
      * @return
      */
     protected List<Object> getConfigurableObjects() {return null;}
+
+    /** Called by the XML parser when subelements are found in the configuration of a protocol. This allows
+     * a protocol to define protocol-specific information and to parse it */
+    public void parse(Node node) throws Exception {;}
 
     /** Returns the protocol IDs of all protocols above this one (excluding the current protocol) */
     public short[] getIdsAbove() {

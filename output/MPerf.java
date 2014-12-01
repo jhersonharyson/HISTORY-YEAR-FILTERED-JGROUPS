@@ -6,10 +6,8 @@ import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.stack.ProtocolStack;
-import org.jgroups.util.AckCollector;
-import org.jgroups.util.ResponseCollector;
-import org.jgroups.util.Streamable;
-import org.jgroups.util.Util;
+import org.jgroups.util.*;
+import org.jgroups.util.Bits;
 
 import java.io.*;
 import java.lang.reflect.Field;
@@ -40,9 +38,9 @@ public class MPerf extends ReceiverAdapter {
 
     protected int                   num_msgs=1000 * 1000;
     protected int                   msg_size=1000;
-    protected int                   num_threads=1;
+    protected int                   num_threads=10;
     protected int                   log_interval=num_msgs / 10; // log every 10%
-    protected int                   receive_log_interval=num_msgs / 10;
+    protected int                   receive_log_interval=Math.max(1, num_msgs / 10);
     protected int                   num_senders=-1; // <= 0: all
     protected boolean               oob=false;
 
@@ -272,7 +270,7 @@ public class MPerf extends ReceiverAdapter {
                 // can screw this up, that's why we check for correct order only when we
                 // only have 1 sender thread
                 // This is *different* from NAKACK{2} order, which is correct
-                handleData(msg.getSrc(),msg.getLength(),hdr.seqno, num_threads == 1 && !oob);
+                handleData(msg.getSrc(), hdr.seqno, num_threads == 1 && !oob);
                 break;
 
             case MPerfHeader.START_SENDING:
@@ -394,9 +392,7 @@ public class MPerf extends ReceiverAdapter {
         }
     }
 
-    protected void handleData(Address src, int length, long seqno, boolean check_order) {
-        if(length == 0)
-            return;
+    protected void handleData(Address src, long seqno, boolean check_order) {
         Stats result=received_msgs.get(src);
         if(result == null) {
             result=new Stats();
@@ -467,7 +463,7 @@ public class MPerf extends ReceiverAdapter {
             Util.setField(field,this,attr_value);
             System.out.println(config_change.attr_name + "=" + attr_value);
             log_interval=num_msgs / 10;
-            receive_log_interval=num_msgs * Math.max(1, members.size()) / 10;
+            receive_log_interval=Math.max(1, num_msgs * Math.max(1, members.size()) / 10);
         }
         catch(Exception e) {
             System.err.println("failed applying config change for attr " + attr_name + ": " + e);
@@ -495,7 +491,7 @@ public class MPerf extends ReceiverAdapter {
         final List<Address> mbrs=view.getMembers();
         members.clear();
         members.addAll(mbrs);
-        receive_log_interval=num_msgs * mbrs.size() / 10;
+        receive_log_interval=Math.max(1, num_msgs * mbrs.size() / 10);
 
         // Remove non members from received messages
         received_msgs.keySet().retainAll(mbrs);
@@ -513,13 +509,14 @@ public class MPerf extends ReceiverAdapter {
     
     protected void sendMessages() {
         final AtomicInteger num_msgs_sent=new AtomicInteger(0); // all threads will increment this
+        final AtomicInteger actually_sent=new AtomicInteger(0); // incremented *after* sending a message
         final AtomicLong    seqno=new AtomicLong(1); // monotonically increasing seqno, to be used by all threads
         final Sender[]      senders=new Sender[num_threads];
         final CyclicBarrier barrier=new CyclicBarrier(num_threads +1);
         final byte[]        payload=new byte[msg_size];
 
         for(int i=0; i < num_threads; i++) {
-            senders[i]=new Sender(barrier, num_msgs_sent, seqno, payload);
+            senders[i]=new Sender(barrier, num_msgs_sent, actually_sent, seqno, payload);
             senders[i].setName("sender-" + i);
             senders[i].start();
         }
@@ -548,13 +545,15 @@ public class MPerf extends ReceiverAdapter {
     
     protected class Sender extends Thread {
         protected final CyclicBarrier barrier;
-        protected final AtomicInteger num_msgs_sent;
+        protected final AtomicInteger num_msgs_sent, actually_sent;
         protected final AtomicLong    seqno;
         protected final byte[]        payload;
 
-        protected Sender(CyclicBarrier barrier, AtomicInteger num_msgs_sent, AtomicLong seqno, byte[] payload) {
+        protected Sender(CyclicBarrier barrier, AtomicInteger num_msgs_sent, AtomicInteger actually_sent,
+                         AtomicLong seqno, byte[] payload) {
             this.barrier=barrier;
             this.num_msgs_sent=num_msgs_sent;
+            this.actually_sent=actually_sent;
             this.seqno=seqno;
             this.payload=payload;
         }
@@ -580,6 +579,10 @@ public class MPerf extends ReceiverAdapter {
                     channel.send(msg);
                     if(tmp % log_interval == 0)
                         System.out.println("++ sent " + tmp);
+
+                    // if we used num_msgs_sent, we might have thread T3 which reaches the condition below, but
+                    // actually didn't send the *last* message !
+                    tmp=actually_sent.incrementAndGet(); // reuse tmp
                     if(tmp == num_msgs) // last message, send SENDING_DONE message
                         send(null, null, MPerfHeader.SENDING_DONE, Message.Flag.RSVP);
                 }
@@ -613,12 +616,12 @@ public class MPerf extends ReceiverAdapter {
         }
 
         public void writeTo(DataOutput out) throws Exception {
-            Util.writeString(attr_name, out);
+            Bits.writeString(attr_name,out);
             Util.writeByteBuffer(attr_value, out);
         }
 
         public void readFrom(DataInput in) throws Exception {
-            attr_name=Util.readString(in);
+            attr_name=Bits.readString(in);
             attr_value=Util.readByteBuffer(in);
         }
     }
@@ -707,17 +710,17 @@ public class MPerf extends ReceiverAdapter {
         }
 
         public int size() {
-            return Util.size(time) + Util.size(msgs);
+            return Bits.size(time) + Bits.size(msgs);
         }
 
         public void writeTo(DataOutput out) throws Exception {
-            Util.writeLong(time, out);
-            Util.writeLong(msgs, out);
+            Bits.writeLong(time,out);
+            Bits.writeLong(msgs,out);
         }
 
         public void readFrom(DataInput in) throws Exception {
-            time=Util.readLong(in);
-            msgs=Util.readLong(in);
+            time=Bits.readLong(in);
+            msgs=Bits.readLong(in);
         }
 
         public String toString() {
@@ -748,20 +751,41 @@ public class MPerf extends ReceiverAdapter {
         public int size() {
             int retval=Global.BYTE_SIZE;
             if(type == DATA)
-                retval+=Util.size(seqno);
+                retval+=Bits.size(seqno);
             return retval;
         }
 
         public void writeTo(DataOutput out) throws Exception {
             out.writeByte(type);
             if(type == DATA)
-                Util.writeLong(seqno, out);
+                Bits.writeLong(seqno, out);
         }
 
         public void readFrom(DataInput in) throws Exception {
             type=in.readByte();
             if(type == DATA)
-                seqno=Util.readLong(in);
+                seqno=Bits.readLong(in);
+        }
+
+        public String toString() {
+            return typeToString(type) + " " +  (seqno > 0? seqno : "");
+        }
+
+        protected static String typeToString(byte type) {
+            switch(type) {
+                case DATA:          return "DATA";
+                case START_SENDING: return "START_SENDING";
+                case SENDING_DONE:  return "SENDING_DONE";
+                case RESULT:        return "RESULT";
+                case CLEAR_RESULTS: return "CLEAR_RESULTS";
+                case CONFIG_CHANGE: return "CONFIG_CHANGE";
+                case CONFIG_REQ:    return "CONFIG_REQ";
+                case CONFIG_RSP:    return "CONFIG_RSP";
+                case EXIT:          return "EXIT";
+                case NEW_CONFIG:    return "NEW_CONFIG";
+                case ACK:           return "ACK";
+                default:            return "n/a";
+            }
         }
     }
 

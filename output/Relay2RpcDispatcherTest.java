@@ -5,10 +5,7 @@ import org.jgroups.blocks.MethodCall;
 import org.jgroups.blocks.RequestOptions;
 import org.jgroups.blocks.ResponseMode;
 import org.jgroups.blocks.RpcDispatcher;
-import org.jgroups.protocols.FORWARD_TO_COORD;
-import org.jgroups.protocols.PING;
-import org.jgroups.protocols.SHARED_LOOPBACK;
-import org.jgroups.protocols.UNICAST3;
+import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.relay.RELAY2;
@@ -30,7 +27,7 @@ import java.util.List;
  * @author Bela Ban
  * @since 3.2
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class Relay2RpcDispatcherTest {
     protected JChannel a, b;  			// members in site "lon"
     protected JChannel x, y;  			// members in site "sfo
@@ -84,14 +81,15 @@ public class Relay2RpcDispatcherTest {
     	b.connect(LON_CLUSTER);
     	rpca.start();
     	rpcb.start();
-    	Util.waitUntilAllChannelsHaveSameSize(30000, 500, a, b);
+    	Util.waitUntilAllChannelsHaveSameSize(30000, 1000, a, b);
     	
     	x.connect(SFO_CLUSTER);
     	y.connect(SFO_CLUSTER);
     	rpcx.start();
     	rpcy.start();
-        Util.waitUntilAllChannelsHaveSameSize(30000, 500, x, y);
-        
+        Util.waitUntilAllChannelsHaveSameSize(30000, 1000, x, y);
+
+        assert a.getView().size() == 2;
         assert x.getView().size() == 2;
 
         RELAY2 ar=(RELAY2)a.getProtocolStack().findProtocol(RELAY2.class);
@@ -124,24 +122,25 @@ public class Relay2RpcDispatcherTest {
         b.send(sm_sfo, 0);
         checkMsgDelivery(xl);
         
-        System.out.println("B: sending message to all");
+        System.out.println("B: sending message to all members in both sites");
         b.send(null, 0);
         checkMsgDelivery(xl, yl, al, bl);
         
         MethodCall call=new MethodCall(ServerObject.class.getMethod("foo"));
-        
         System.out.println("B: call foo method on A");
         Object rsp = rpcb.callRemoteMethod(a.getAddress(), call, new RequestOptions(ResponseMode.GET_ALL,5000));
         System.out.println("RSP is: " + rsp );
         
         
         System.out.println("B: call foo method on SFO master site");
-        rsp = rpcb.callRemoteMethod(sm_sfo, call, new RequestOptions(ResponseMode.GET_ALL,5000));
+        rsp = rpcb.callRemoteMethod(sm_sfo, call, new RequestOptions(ResponseMode.GET_ALL,15000));
         System.out.println("RSP is: " + rsp );
         
-        System.out.println("B: call foo method on all members dest = null");
+        System.out.println("B: call foo method on all members in site LON");
         RspList<Integer> rsps = rpcb.callRemoteMethods(null, call, new RequestOptions(ResponseMode.GET_ALL,5000));
         System.out.println("RSPs are: \n" + rsps);
+        assert rsps.size() == 2;
+        assert rsps.containsKey(a.getAddress()) && rsps.containsKey(b.getAddress());
         
         View bridge_view=xr.getBridgeView(BRIDGE_CLUSTER);
         System.out.println("bridge_view = " + bridge_view);
@@ -168,7 +167,8 @@ public class Relay2RpcDispatcherTest {
     
     protected JChannel createNode(String site_name, String node_name) throws Exception {
     	JChannel ch=new JChannel(new SHARED_LOOPBACK(),
-    			new PING().setValue("timeout", 300).setValue("num_initial_members", 2),
+    			new SHARED_LOOPBACK_PING(),
+                new MERGE3().setValue("max_interval", 3000).setValue("min_interval", 1000),
     			new NAKACK2(),
     			new UNICAST3(),
     			new GMS().setValue("print_local_addr", false),
@@ -186,7 +186,6 @@ public class Relay2RpcDispatcherTest {
     		this.i=i;
     	}
     	public int foo() {
-    		System.out.println("<< foo method invoked on " + ch.getName());
     		return i;}
     	
     	public static long sleep(long timeout) {
@@ -214,7 +213,7 @@ public class Relay2RpcDispatcherTest {
     protected static Protocol[] createBridgeStack() {
         return new Protocol[]{
           new SHARED_LOOPBACK(),
-          new PING().setValue("timeout", 500).setValue("num_initial_members", 2),
+          new SHARED_LOOPBACK_PING(),
           new NAKACK2(),
           new UNICAST3(),
           new GMS().setValue("print_local_addr", false)

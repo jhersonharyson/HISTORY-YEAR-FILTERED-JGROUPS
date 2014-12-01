@@ -20,7 +20,7 @@ import org.testng.annotations.Test;
  * Tests the flow control (FC and MFC) protocols
  * @author Bela Ban
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class FCTest {
     JChannel         ch;
     static final int SIZE=1000; // bytes
@@ -40,8 +40,8 @@ public class FCTest {
         Protocol flow_control_prot=flow_control_class.newInstance();
         flow_control_prot.setValue("min_credits", 1000).setValue("max_credits", 10000).setValue("max_block_time", 1000);
 
-        ch=new JChannel(new SHARED_LOOPBACK().setValue("thread_pool_rejection_policy", "run").setValue("loopback", true),
-                        new PING(),
+        ch=new JChannel(new SHARED_LOOPBACK().setValue("thread_pool_rejection_policy", "run"),
+                        new SHARED_LOOPBACK_PING(),
                         new NAKACK2().setValue("use_mcast_xmit", false),
                         new UNICAST3(),
                         new STABLE().setValue("max_bytes", 50000),

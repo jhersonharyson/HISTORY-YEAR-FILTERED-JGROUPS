@@ -7,6 +7,7 @@ import org.jgroups.blocks.MethodCall;
 import org.jgroups.conf.ConfiguratorFactory;
 import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.conf.ProtocolStackConfigurator;
+import org.jgroups.jmx.ResourceDMBean;
 import org.jgroups.protocols.TP;
 import org.jgroups.stack.*;
 import org.jgroups.util.*;
@@ -40,7 +41,7 @@ public class JChannel extends Channel {
     /*the address of this JChannel instance*/
     protected Address                               local_addr;
 
-    protected AddressGenerator                      address_generator;
+    protected List<AddressGenerator>                address_generators;
 
     protected String                                name;
 
@@ -227,9 +228,6 @@ public class JChannel extends Channel {
 
     public void enableStats(boolean stats) {this.stats=stats;}
 
-    @ManagedAttribute public boolean isOpen() {return !(state == State.CLOSED);}
-    @ManagedAttribute public boolean isConnected() {return state == State.CONNECTED;}
-
     @ManagedOperation
     public void resetStats()          {sent_msgs=received_msgs=sent_bytes=received_bytes=0;}
 
@@ -300,9 +298,9 @@ public class JChannel extends Channel {
     
     /**
      * Connects this channel to a group and gets a state from a specified state provider.<p/>
-     * This method invokes <code>connect()<code> and then <code>getState<code>.<p/>
+     * This method invokes <code>connect()</code> and then <code>getState</code>.<p/>
      * If the FLUSH protocol is in the channel's stack definition, only one flush round is executed for both connecting and
-     * fetching the state rather than two flushes if we invoke <code>connect<code> and <code>getState<code> in succession.
+     * fetching the state rather than two flushes if we invoke <code>connect</code> and <code>getState</code> in succession.
      * <p/>
      * If the channel is already connected, an error message will be printed to the error log.
      * If the channel is closed a ChannelClosed exception will be thrown.
@@ -482,11 +480,23 @@ public class JChannel extends Channel {
     public String getClusterName() {return state == State.CONNECTED? cluster_name : null;}
 
     /**
-     * Returns the current {@link AddressGenerator}, or null if none is set
+     * Returns the first {@link AddressGenerator} in the list, or null if none is set
      * @return
      * @since 2.12
+     * @deprecated Doesn't make any sense as there's list of address generators, will be removed in 4.0
      */
-    public AddressGenerator getAddressGenerator() {return address_generator;}
+    @Deprecated
+    public AddressGenerator getAddressGenerator() {
+        return (address_generators == null || address_generators.isEmpty())? null : address_generators.get(0);
+    }
+
+    /**
+     * @deprecated Use {@link #addAddressGenerator(org.jgroups.stack.AddressGenerator)} instead
+     */
+    @Deprecated
+    public void setAddressGenerator(AddressGenerator address_generator) {
+        addAddressGenerator(address_generator);
+    }
 
     /**
      * Sets the new {@link AddressGenerator}. New addresses will be generated using the new generator. This
@@ -494,7 +504,17 @@ public class JChannel extends Channel {
      * @param address_generator
      * @since 2.12
      */
-    public void setAddressGenerator(AddressGenerator address_generator) {this.address_generator=address_generator;}
+    public void addAddressGenerator(AddressGenerator address_generator) {
+        if(address_generator == null)
+            return;
+        if(address_generators == null)
+            address_generators=new ArrayList<AddressGenerator>(3);
+        address_generators.add(address_generator);
+    }
+
+    public boolean removeAddressGenerator(AddressGenerator address_generator) {
+        return address_generator != null && address_generators != null && address_generators.remove(address_generator);
+    }
 
 
     public void getState(Address target, long timeout) throws Exception {
@@ -555,7 +575,7 @@ public class JChannel extends Channel {
         if(target == null)
             target=determineCoordinator();
         if(target != null && local_addr != null && target.equals(local_addr)) {
-            log.trace("cannot get state from myself (" + target + "): probably the first member");
+            log.trace(local_addr + ": cannot get state from myself (" + target + "): probably the first member");
             return;
         }
 
@@ -575,13 +595,16 @@ public class JChannel extends Channel {
 
         state_promise.reset();
         StateTransferInfo state_info=new StateTransferInfo(target, timeout);
+        long start=System.currentTimeMillis();
         down(new Event(Event.GET_STATE, state_info));
         StateTransferResult result=state_promise.getResult(state_info.timeout);
 
         if(initiateFlush)
             stopFlush();
 
-        if(result != null && result.hasException())
+        if(result == null)
+            throw new StateTransferException("timeout during state transfer (" + (System.currentTimeMillis() - start) + "ms)");
+        if(result.hasException())
             throw new StateTransferException("state transfer failed", result.getException());
     }
 
@@ -649,12 +672,14 @@ public class JChannel extends Channel {
                     }
                 }
 
-                byte[] tmp_state=result.getBuffer();
                 if(receiver != null) {
                     try {
-                        ByteArrayInputStream input=new ByteArrayInputStream(tmp_state);
-                        receiver.setState(input);
-                        state_promise.setResult(new StateTransferResult());
+                        if(result.hasBuffer()) {
+                            byte[] tmp_state=result.getBuffer();
+                            ByteArrayInputStream input=new ByteArrayInputStream(tmp_state);
+                            receiver.setState(input);
+                        }
+                        state_promise.setResult(result);
                     }
                     catch(Throwable t) {
                         state_promise.setResult(new StateTransferResult(t));
@@ -819,19 +844,15 @@ public class JChannel extends Channel {
         for(ProtocolConfiguration config: configs)
             config.substituteVariables();  // replace vars with system props
 
-        synchronized(Channel.class) {
-            prot_stack=new ProtocolStack(this);
-            prot_stack.setup(configs); // Setup protocol stack (creates protocol, calls init() on them)
-        }
+        prot_stack=new ProtocolStack(this);
+        prot_stack.setup(configs); // Setup protocol stack (creates protocol, calls init() on them)
     }
 
     protected final void init(JChannel ch) throws Exception {
         if(ch == null)
             throw new IllegalArgumentException("channel is null");
-        synchronized(JChannel.class) {
-            prot_stack=new ProtocolStack(this);
-            prot_stack.setup(ch.getProtocolStack()); // Setup protocol stack (creates protocol, calls init() on them)
-        }
+        prot_stack=new ProtocolStack(this);
+        prot_stack.setup(ch.getProtocolStack()); // Setup protocol stack (creates protocol, calls init() on them)
     }
 
 
@@ -878,7 +899,7 @@ public class JChannel extends Channel {
      */
     protected void setAddress() {
         Address old_addr=local_addr;
-        local_addr=address_generator != null? address_generator.generateAddress() : UUID.randomUUID();
+        local_addr=generateAddress();
         if(old_addr != null)
             down(new Event(Event.REMOVE_ADDRESS, old_addr));
         if(name == null || name.isEmpty()) // generate a logical name if not set
@@ -890,6 +911,36 @@ public class JChannel extends Channel {
         down(evt);
         if(up_handler != null)
             up_handler.up(evt);
+    }
+
+    protected Address generateAddress() {
+        if(address_generators == null || address_generators.isEmpty())
+            return UUID.randomUUID();
+        if(address_generators.size() == 1)
+            return address_generators.get(0).generateAddress();
+
+        // at this point we have multiple AddressGenerators installed
+        Address[] addrs=new Address[address_generators.size()];
+        for(int i=0; i < addrs.length; i++)
+            addrs[i]=address_generators.get(i).generateAddress();
+
+        for(int i=0; i < addrs.length; i++) {
+            if(!(addrs[i] instanceof ExtendedUUID)) {
+                log.error("address generator %s does not subclass %s which is required if multiple address generators " +
+                            "are installed, removing it", addrs[i].getClass().getSimpleName(), ExtendedUUID.class.getSimpleName());
+                addrs[i]=null;
+            }
+        }
+        ExtendedUUID uuid=null;
+        for(int i=0; i < addrs.length; i++) { // we only have ExtendedUUIDs in addrs
+            if(addrs[i] != null) {
+                if(uuid == null)
+                    uuid=(ExtendedUUID)addrs[i];
+                else
+                    uuid.addContents((ExtendedUUID)addrs[i]);
+            }
+        }
+        return uuid != null? uuid : UUID.randomUUID();
     }
 
 
@@ -1038,6 +1089,10 @@ public class JChannel extends Channel {
                     handleJmx(map, key);
                     continue;
                 }
+                if(key.startsWith("reset-stats")) {
+                    resetAllStats();
+                    continue;
+                }
                 if(key.startsWith("invoke") || key.startsWith("op")) {
                     int index=key.indexOf("=");
                     if(index != -1) {
@@ -1064,7 +1119,14 @@ public class JChannel extends Channel {
         }
 
         public String[] supportedKeys() {
-            return new String[]{"jmx", "invoke=<operation>[<args>]", "\nop=<operation>[<args>]"};
+            return new String[]{"reset-stats", "jmx", "invoke=<operation>[<args>]", "\nop=<operation>[<args>]"};
+        }
+
+        protected void resetAllStats() {
+            List<Protocol> prots=getProtocolStack().getProtocols();
+            for(Protocol prot: prots)
+                prot.resetStatistics();
+            resetStats();
         }
 
         protected void handleJmx(Map<String, String> map, String input) {
@@ -1090,22 +1152,49 @@ public class JChannel extends Channel {
                             Protocol prot=prot_stack.findProtocol(protocol_name);
                             Field field=prot != null? Util.getField(prot.getClass(), attrname) : null;
                             if(field != null) {
-                                Object value=MethodCall.convert(attrvalue, field.getType());
+                                Object value=MethodCall.convert(attrvalue,field.getType());
                                   if(value != null)
                                       prot.setValue(attrname, value);
                             }
-                            else
-                                log.warn(Util.getMessage("FieldNotFound"), attrname, protocol_name);
+                            else {
+                                // try to find a setter for X, e.g. x(type-of-x) or setX(type-of-x)
+                                ResourceDMBean.Accessor setter=ResourceDMBean.findSetter(prot, attrname);  // Util.getSetter(prot.getClass(), attrname);
+                                if(setter != null) {
+                                    try {
+                                        Class<?> type=setter instanceof ResourceDMBean.FieldAccessor?
+                                          ((ResourceDMBean.FieldAccessor)setter).getField().getType() :
+                                          setter instanceof ResourceDMBean.MethodAccessor?
+                                            ((ResourceDMBean.MethodAccessor)setter).getMethod().getParameterTypes()[0].getClass() : null;
+                                        Object converted_value=MethodCall.convert(attrvalue, type);
+                                        setter.invoke(converted_value);
+                                    }
+                                    catch(Exception e) {
+                                        log.error("unable to invoke %s() on %s: %s", setter, protocol_name, e);
+                                    }
+                                }
+                                else
+                                    log.warn(Util.getMessage("FieldNotFound"), attrname, protocol_name);
+                            }
+
                             it.remove();
                         }
                     }
                 }
                 tmp_stats=dumpStats(protocol_name, list);
+                for(Map.Entry<String,Object> entry: tmp_stats.entrySet()) {
+                    Map<String,Object> tmp_map=(Map<String,Object>)entry.getValue();
+                    String key=entry.getKey();
+                    map.put(key, tmp_map != null? tmp_map.toString() : null);
+                }
             }
-            else
+            else {
                 tmp_stats=dumpStats();
-
-            map.put("jmx", tmp_stats != null? Util.mapToString(tmp_stats) : "null");
+                for(Map.Entry<String,Object> entry: tmp_stats.entrySet()) {
+                    Map<String,Object> tmp_map=(Map<String,Object>)entry.getValue();
+                    String key=entry.getKey();
+                    map.put(key, tmp_map != null? tmp_map.toString() : null);
+                }
+            }
         }
 
         /**

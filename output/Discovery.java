@@ -5,18 +5,21 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
-import org.jgroups.protocols.pbcast.JoinRsp;
+import org.jgroups.conf.ConfiguratorFactory;
+import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
 import org.jgroups.util.UUID;
 
-import java.io.InterruptedIOException;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 
 /**
- * The Discovery protocol retrieves the initial membership (used by GMS and MERGE2) by sending discovery requests.
+ * The Discovery protocol retrieves the initial membership (used by GMS and MERGE3) by sending discovery requests.
  * We do this in subclasses of Discovery, e.g. by mcasting a discovery request ({@link PING}) or, if gossiping is enabled,
  * by contacting the GossipRouter ({@link TCPGOSSIP}).<p/>
  * The responses should allow us to determine the coordinator which we have to contact, e.g. in case we want to join
@@ -32,39 +35,59 @@ public abstract class Discovery extends Protocol {
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
 
-    @Property(description="Timeout to wait for the initial members")
-    protected long    timeout=3000;
+    @Deprecated
+    @Property(description="Timeout to wait for the initial members",deprecatedMessage="GMS.join_timeout should be used instead")
+    protected long                       timeout=3000;
 
-    @Property(description="Minimum number of initial members to get a response from")
-    protected int     num_initial_members=10;
+    @Deprecated
+    @Property(description="Minimum number of initial members to get a response from",deprecatedMessage="will be ignored")
+    protected int                        num_initial_members=10;
 
     @Deprecated
     @Property(description="Minimum number of server responses (PingData.isServer()=true). If this value is " +
             "greater than 0, we'll ignore num_initial_members",deprecatedMessage="not used anymore")
-    protected int     num_initial_srv_members=0;
+    protected int                        num_initial_srv_members;
 
     @Property(description="Return from the discovery phase as soon as we have 1 coordinator response")
-    protected boolean break_on_coord_rsp=true;
+    protected boolean                    break_on_coord_rsp=true;
 
     @Property(description="Whether or not to return the entire logical-physical address cache mappings on a " +
       "discovery request, or not.")
-    protected boolean return_entire_cache=false;
+    protected boolean                    return_entire_cache=false;
 
     @Property(description="If greater than 0, we'll wait a random number of milliseconds in range [0..stagger_timeout] " +
       "before sending a discovery response. This prevents traffic spikes in large clusters when everyone sends their " +
       "discovery response at the same time")
-    protected long    stagger_timeout=0;
+    protected long                       stagger_timeout;
 
     @Property(description="Always sends a discovery response, no matter what",writable=true)
-    protected boolean force_sending_discovery_rsps=true;
+    protected boolean                    force_sending_discovery_rsps=true;
 
 
     @Property(description="If a persistent disk cache (PDC) is present, combine the discovery results with the " +
       "contents of the disk cache before returning the results")
-    protected boolean use_disk_cache=false;
+    protected boolean                    use_disk_cache=false;
 
-    @Property(description="When sending a discovery request, always send the physical address and logical name too")
-    protected boolean always_send_physical_addr_with_discovery_request=false;
+    @Deprecated
+    @Property(description="When sending a discovery request, always send the physical address and logical name too",
+    deprecatedMessage="ignored")
+    protected boolean                    always_send_physical_addr_with_discovery_request=true;
+
+    @Property(description="Max size of the member list shipped with a discovery request. If we have more, the " +
+      "mbrs field in the discovery request header is nulled and members return the entire membership, " +
+      "not individual members")
+    protected int                        max_members_in_discovery_request=500;
+
+    @Property(description="Expiry time of discovery responses in ms")
+    protected long                       discovery_rsp_expiry_time=60000;
+
+    @Property(description="If true then the discovery is done on a separate timer thread. Should be set to true when " +
+      "discovery is blocking and/or takes more than a few milliseconds")
+    protected boolean                    async_discovery=false;
+
+    @Property(description="When a new node joins, and we have a static discovery protocol (TCPPING), then send the " +
+      "contents of the discovery cache to new and existing members if true (and we're the coord). Addresses JGRP-1903")
+    protected boolean                    send_cache_on_join=false;
 
 
     @ManagedOperation(description="Sets force_sending_discovery_rsps")
@@ -76,26 +99,24 @@ public abstract class Discovery extends Protocol {
 
 
     @ManagedAttribute(description="Total number of discovery requests sent ")
-    protected int num_discovery_requests=0;
-
-    /** The largest cluster size found so far (gets reset on stop()) */
-    @ManagedAttribute
-    private int max_found_members=0;
-
+    protected int                        num_discovery_requests;
 
     /* --------------------------------------------- Fields ------------------------------------------------------ */
 
-    protected volatile boolean      is_server=false;
-    protected volatile boolean      is_leaving=false;
-    protected TimeScheduler         timer=null;
-    protected View                  view;
-    protected final List<Address>   members=new ArrayList<Address>(11);
+    protected volatile boolean           is_server=false;
+    protected volatile boolean           is_leaving=false;
+    protected TimeScheduler              timer;
+    protected View                       view;
+    protected final List<Address>        members=new ArrayList<Address>(11);
     @ManagedAttribute(description="Whether this member is the current coordinator")
-    protected boolean               is_coord;
-    protected Address               local_addr=null;
-    protected Address               current_coord;
-    protected String                group_addr;
-    protected final Set<Responses>  ping_responses=new HashSet<Responses>();
+    protected boolean                    is_coord=false;
+    protected Address                    local_addr=null;
+    protected Address                    current_coord;
+    protected String                     cluster_name;
+    protected final Map<Long,Responses>  ping_responses=new HashMap<Long,Responses>();
+    @ManagedAttribute(description="Whether the transport supports multicasting")
+    protected boolean                    transport_supports_multicasting=true;
+    protected static final byte[]        WHITESPACE=" \t".getBytes();
 
 
 
@@ -105,25 +126,8 @@ public abstract class Discovery extends Protocol {
             throw new Exception("timer cannot be retrieved from protocol stack");
         if(stagger_timeout < 0)
             throw new IllegalArgumentException("stagger_timeout cannot be negative");
-        if(stagger_timeout > timeout) {
-            log.debug("stagger_timeout (" + stagger_timeout + ") was greater than timeout (" + timeout +
-                        "); setting it to " + timeout + " ms");
-            stagger_timeout=timeout;
-        }
+        transport_supports_multicasting=getTransport().supportsMulticasting();
     }
-
-    /**
-     * Grab all current cluster members
-     * @return A list of the cluster members (usually IpAddresses), or null if the transport is multicast-enabled.
-     *         Returns an empty list if no cluster members could be found.
-     * @param cluster_name
-     */
-    public abstract Collection<PhysicalAddress> fetchClusterMembers(String cluster_name);
-
-    /** Whether or not to send each discovery request on a separate (timer) thread. If disabled,
-     * a discovery request will be sent to all members fetched by {@link #fetchClusterMembers(String)} sequentially */
-    public abstract boolean sendDiscoveryRequestsInParallel();
-
 
     public abstract boolean isDynamic();
 
@@ -134,19 +138,23 @@ public abstract class Discovery extends Protocol {
     public void handleConnect() {
     }
 
-    public void discoveryRequestReceived(Address sender, String logical_name, Collection<PhysicalAddress> physical_addrs) {
+    public void discoveryRequestReceived(Address sender, String logical_name, PhysicalAddress physical_addr) {
 
     }
 
     public long      getTimeout()                       {return timeout;}
     public void      setTimeout(long timeout)           {this.timeout=timeout;}
-    public int       getNumInitialMembers()             {return num_initial_members;}
-    public void      setNumInitialMembers(int num)      {this.num_initial_members=num;}
+    @Deprecated
+    public int       getNumInitialMembers()             {return -1;}
+    @Deprecated
+    public void      setNumInitialMembers(int num)      {}
     public int       getNumberOfDiscoveryRequestsSent() {return num_discovery_requests;}
     public long      timeout()                          {return timeout;}
     public Discovery timeout(long timeout)              {this.timeout=timeout; return this;}
-    public long      numInitialMembers()                {return num_initial_members;}
-    public Discovery numInitialMembers(int num)         {this.num_initial_members=num; return this;}
+    @Deprecated
+    public long      numInitialMembers()                {return -1;}
+    @Deprecated
+    public Discovery numInitialMembers(int num)         {return this;}
     public boolean   breakOnCoordResponse()             {return break_on_coord_rsp;}
     public Discovery breakOnCoordResponse(boolean flag) {break_on_coord_rsp=flag; return this;}
     public boolean   returnEntireCache()                {return return_entire_cache;}
@@ -176,12 +184,17 @@ public abstract class Discovery extends Protocol {
         return retval instanceof Boolean && (Boolean)retval;
     }
 
+    @ManagedOperation(description="Sends information about my cache to everyone but myself")
+    public void sendCacheInformation() {
+        List<Address> current_members=null;
+        synchronized(members) {
+            current_members=new ArrayList<Address>(members);
+        }
+        disseminateDiscoveryInformation(current_members, null, current_members);
+    }
+
     public List<Integer> providedUpServices() {
-        List<Integer> ret=new ArrayList<Integer>(3);
-        ret.add(Event.FIND_INITIAL_MBRS);
-        ret.add(Event.FIND_ALL_VIEWS);
-        ret.add(Event.GET_PHYSICAL_ADDRESS);
-        return ret;
+        return Arrays.asList(Event.FIND_INITIAL_MBRS, Event.GET_PHYSICAL_ADDRESS, Event.FIND_MBRS);
     }
 
     public void resetStats() {
@@ -195,183 +208,82 @@ public abstract class Discovery extends Protocol {
 
     public void stop() {
         is_server=false;
-        max_found_members=0;
     }
 
 
     /**
-     * Finds initial members
-     * @param promise
-     * @return
+     * Fetches information (e.g. physical address, logical name) for the given member addresses. Needs to add responses
+     * to the {@link org.jgroups.util.Responses} object. If {@link #async_discovery} is true, this method will be called
+     * in a separate thread, otherwise the caller's thread will be used.
+     * @param members A list of logical addresses (typically {@link org.jgroups.util.UUID}s). If null, then information
+     *                for all members is fetched
+     * @param initial_discovery Set to true if this is for the initial membership discovery. Some protocols (e.g.
+     *                          file based ones) may return only the information for the coordinator(s).
+     * @param responses The list to which responses should be added
      */
-    public List<PingData> findInitialMembers(Promise<JoinRsp> promise) {
-        return findMembers(promise, num_initial_members, break_on_coord_rsp, null);
-    }
+    protected abstract void findMembers(List<Address> members, boolean initial_discovery, Responses responses);
 
-    public List<PingData> findAllViews(Promise<JoinRsp> promise) {
-        int num_expected_mbrs=Math.max(max_found_members, Math.max(num_initial_members, view != null? view.size() : num_initial_members));
-        max_found_members=Math.max(max_found_members, num_expected_mbrs);
-        return findMembers(promise, num_expected_mbrs, false, getViewId());
-    }
-
-    protected List<PingData> findMembers(Promise<JoinRsp> promise, int num_expected_rsps,
-                                         boolean break_on_coord, ViewId view_id) {
+    public Responses findMembers(final List<Address> members, final boolean initial_discovery, boolean async) {
         num_discovery_requests++;
-
-        final Responses rsps=new Responses(num_expected_rsps, break_on_coord, promise);
+        int num_expected=members != null? members.size() : 0;
+        int capacity=members != null? members.size() : 16;
+        final Responses rsps=new Responses(num_expected, initial_discovery && break_on_coord_rsp, capacity);
         synchronized(ping_responses) {
-            ping_responses.add(rsps);
+            ping_responses.put(System.nanoTime(), rsps);
         }
-
-        try {
-            sendDiscoveryRequest(group_addr, promise, view_id);
+        if(async || async_discovery) {
+            timer.execute(new Runnable() {
+                public void run() {findMembers(members, initial_discovery, rsps);}
+            });
         }
-        catch(InterruptedIOException ie) {
-            ;
-        }
-        catch(InterruptedException ex) {
-            ;
-        }
-        catch(Throwable ex) {
-            if(log.isErrorEnabled())
-                log.error("failed sending discovery request", ex);
-        }
-
-        try {
-            return rsps.get(timeout);
-        }
-        catch(Exception e) {
-            return new LinkedList<PingData>();
-        }
-        finally {
-            synchronized(ping_responses) {
-                ping_responses.remove(rsps);
-            }
-        }
+        else
+            findMembers(members, initial_discovery, rsps);
+        return rsps;
     }
-
-    public void sendDiscoveryRequest(String cluster_name, Promise promise, ViewId view_id) throws Exception {
-        PingData data=null;
-        PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
-
-        // https://issues.jboss.org/browse/JGRP-1670
-        if(view_id == null || always_send_physical_addr_with_discovery_request)
-            data=new PingData(local_addr, null, false, UUID.get(local_addr), physical_addr != null? Arrays.asList(physical_addr) : null);
-
-        PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ).clusterName(cluster_name).viewId(view_id);
-
-        Collection<PhysicalAddress> cluster_members=fetchClusterMembers(cluster_name);
-        if(cluster_members == null) {
-            // message needs to have DONT_BUNDLE flag: if A sends message M to B, and we need to fetch B's physical
-            // address, then the bundler thread blocks until the discovery request has returned. However, we cannot send
-            // the discovery *request* until the bundler thread has returned from sending M
-            Message msg=new Message(null).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
-              .putHeader(getId(), hdr).setBuffer(marshal(data));
-            sendMcastDiscoveryRequest(msg);
-        }
-        else {
-            if(use_disk_cache) {
-                // this only makes sense if we have PDC below us
-                Collection<PhysicalAddress> list=(Collection<PhysicalAddress>)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESSES));
-                if(list != null)
-                    for(PhysicalAddress phys_addr: list)
-                        if(!cluster_members.contains(phys_addr))
-                            cluster_members.add(phys_addr);
-            }
-
-            if(cluster_members.isEmpty()) { // if we don't find any members, return immediately
-                if(promise != null)
-                    promise.setResult(null);
-            }
-            else {
-                for(final Address addr: cluster_members) {
-                    if(physical_addr != null && addr.equals(physical_addr)) // no need to send the request to myself
-                        continue;
-                    // the message needs to be DONT_BUNDLE, see explanation above
-                    final Message msg=new Message(addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
-                      .putHeader(this.id, hdr).setBuffer(marshal(data));
-                    if(log.isTraceEnabled())
-                        log.trace(local_addr + ": sending discovery request to " + msg.getDest());
-                    if(!sendDiscoveryRequestsInParallel()) {
-                        down_prot.down(new Event(Event.MSG, msg));
-                    }
-                    else {
-                        timer.execute(new Runnable() {
-                            public void run() {
-                                try {
-                                    down_prot.down(new Event(Event.MSG, msg));
-                                }
-                                catch(Exception ex){
-                                    if(log.isErrorEnabled())
-                                        log.error(local_addr + ": failed sending discovery request to " + addr + ": " +  ex);
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    protected void sendMcastDiscoveryRequest(Message discovery_request) {
-        down_prot.down(new Event(Event.MSG, discovery_request));
-    }
-
 
 
     @ManagedOperation(description="Runs the discovery protocol to find initial members")
     public String findInitialMembersAsString() {
-      List<PingData> results=findInitialMembers(null);
-        if(results == null || results.isEmpty()) return "<empty>";
+        Responses rsps=findMembers(null, false, false);
+        if(!rsps.isDone())
+            rsps.waitFor(300);
+        if(rsps.isEmpty()) return "<empty>";
         StringBuilder sb=new StringBuilder();
-        for(PingData rsp: results) {
+        for(PingData rsp: rsps)
             sb.append(rsp).append("\n");
-        }
         return sb.toString();
     }
 
 
-    @ManagedOperation(description="Runs the discovery protocol to find all views")
-    public String findAllViewsAsString() {
-        List<PingData> rsps=findAllViews(null);
-        if(rsps == null || rsps.isEmpty()) return "<empty>";
-        StringBuilder sb=new StringBuilder();
-        for(PingData data: rsps) {
-            View v=data.getView();
-            if(v !=  null)
-                sb.append(v).append("\n");
-        }
-        return sb.toString();
+    @ManagedOperation(description="Reads logical-physical address mappings and logical name mappings from a " +
+      "file (or URL) and adds them to the local caches")
+    public void addToCache(String filename) throws Exception {
+        InputStream in=ConfiguratorFactory.getConfigStream(filename);
+        List<PingData> list=read(in);
+        if(list != null)
+            for(PingData data: list)
+                addDiscoveryResponseToCaches(data.getAddress(), data.getLogicalName(), data.getPhysicalAddr());
     }
 
+    @ManagedOperation(description="Reads data from local caches and dumps them to a file")
+    public void dumpCache(String output_filename) throws Exception {
+        Map<Address,PhysicalAddress> cache_contents=
+          (Map<Address,PhysicalAddress>)down_prot.down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS, false));
 
-    /**
-     * An event was received from the layer below. Usually the current layer will want to examine
-     * the event type and - depending on its type - perform some computation
-     * (e.g. removing headers from a MSG event type, or updating the internal membership list
-     * when receiving a VIEW_CHANGE event).
-     * Finally the event is either a) discarded, or b) an event is sent down
-     * the stack using <code>PassDown</code> or c) the event (or another event) is sent up
-     * the stack using <code>PassUp</code>.
-     * <p/>
-     * For the PING protocol, the Up operation does the following things.
-     * 1. If the event is a Event.MSG then PING will inspect the message header.
-     * If the header is null, PING simply passes up the event
-     * If the header is PingHeader.GET_MBRS_REQ then the PING protocol
-     * will PassDown a PingRequest message
-     * If the header is PingHeader.GET_MBRS_RSP we will add the message to the initial members
-     * vector and wake up any waiting threads.
-     * 2. If the event is Event.SET_LOCAL_ADDR we will simple set the local address of this protocol
-     * 3. For all other messages we simple pass it up to the protocol above
-     *
-     * @param evt - the event that has been sent from the layer below
-     */
+        List<PingData> list=new ArrayList<PingData>(cache_contents.size());
+        for(Map.Entry<Address,PhysicalAddress> entry: cache_contents.entrySet()) {
+            Address         addr=entry.getKey();
+            PhysicalAddress phys_addr=entry.getValue();
+            PingData data=new PingData(addr, true, UUID.get(addr), phys_addr).coord(addr.equals(local_addr));
+            list.add(data);
+        }
+        OutputStream out=new FileOutputStream(output_filename);
+        write(list, out);
+    }
 
     @SuppressWarnings("unchecked")
     public Object up(Event evt) {
-
         switch(evt.getType()) {
-
             case Event.MSG:
                 Message msg=(Message)evt.getArg();
                 PingHeader hdr=(PingHeader)msg.getHeader(this.id);
@@ -382,68 +294,30 @@ public abstract class Discovery extends Protocol {
                     return null; // prevents merging back a leaving member (https://issues.jboss.org/browse/JGRP-1336)
 
                 PingData data=readPingData(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-                Address logical_addr=data != null? data.getAddress() : null;
+                Address logical_addr=data != null? data.getAddress() : msg.src();
 
                 switch(hdr.type) {
 
                     case PingHeader.GET_MBRS_REQ:   // return Rsp(local_addr, coord)
-                        if(group_addr == null || hdr.cluster_name == null) {
-                            if(log.isWarnEnabled())
-                                log.warn("group_addr (" + group_addr + ") or cluster_name of header (" + hdr.cluster_name
-                                        + ") is null; passing up discovery request from " + msg.getSrc() + ", but this should not" +
-                                        " be the case");
+                        if(cluster_name == null || hdr.cluster_name == null) {
+                            log.warn("cluster_name (%s) or cluster_name of header (%s) is null; passing up discovery " +
+                                       "request from %s, but this should not be the case", cluster_name, hdr.cluster_name, msg.src());
                         }
                         else {
-                            if(!group_addr.equals(hdr.cluster_name)) {
-                                if(log.isWarnEnabled())
-                                    log.warn(local_addr + ": discarding discovery request for cluster '" + hdr.cluster_name + "' from " +
-                                            msg.getSrc() + "; our cluster name is '" + group_addr + "'. " +
-                                            "Please separate your clusters cleanly.");
+                            if(!cluster_name.equals(hdr.cluster_name)) {
+                                log.warn("%s: discarding discovery request for cluster '%s' from %s; " +
+                                           "our cluster name is '%s'. Please separate your clusters properly",
+                                         logical_addr, hdr.cluster_name, msg.src(), cluster_name);
                                 return null;
                             }
                         }
 
                         // add physical address and logical name of the discovery sender (if available) to the cache
                         if(data != null) {
-                            if(logical_addr == null)
-                                logical_addr=msg.getSrc();
-                            Collection<PhysicalAddress> physical_addrs=data.getPhysicalAddrs();
-                            PhysicalAddress physical_addr=physical_addrs != null && !physical_addrs.isEmpty()? physical_addrs.iterator().next() : null;
-                            if(logical_addr != null && data.getLogicalName() != null)
-                                UUID.add(logical_addr, data.getLogicalName());
-                            if(logical_addr != null && physical_addr != null)
-                                down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<Address,PhysicalAddress>(logical_addr, physical_addr)));
-                            discoveryRequestReceived(msg.getSrc(), data.getLogicalName(), physical_addrs);
-
-                            synchronized(ping_responses) {
-                                for(Responses response: ping_responses) {
-                                    response.addResponse(data, false);
-                                }
-                            }
+                            addDiscoveryResponseToCaches(logical_addr, data.getLogicalName(), data.getPhysicalAddr());
+                            discoveryRequestReceived(msg.getSrc(), data.getLogicalName(), data.getPhysicalAddr());
+                            addResponse(data, false);
                         }
-
-                        if(hdr.view_id != null) {
-                            // If the discovery request is merge-triggered, and the ViewId shipped with it
-                            // is the same as ours, we don't respond (JGRP-1315).
-                            ViewId my_view_id=view != null? view.getViewId() : null;
-                            if(my_view_id != null && my_view_id.equals(hdr.view_id))
-                                return null;
-
-                            boolean send_discovery_rsp=force_sending_discovery_rsps || is_coord
-                              || current_coord == null || current_coord.equals(msg.getSrc());
-                            if(!send_discovery_rsp) {
-                                if(log.isTraceEnabled())
-                                    log.trace(local_addr + ": suppressing discovery response as I'm not a coordinator and the " +
-                                                "discovery request was not sent by a coordinator");
-                                return null;
-                            }
-                            if(isMergeRunning()) {
-                                if(log.isTraceEnabled())
-                                    log.trace(local_addr + ": suppressing discovery response as a merge is in progress");
-                                return null;
-                            }
-                        }
-
 
                         if(return_entire_cache) {
                             Map<Address,PhysicalAddress> cache=(Map<Address,PhysicalAddress>)down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS));
@@ -451,112 +325,67 @@ public abstract class Discovery extends Protocol {
                                 for(Map.Entry<Address,PhysicalAddress> entry: cache.entrySet()) {
                                     Address addr=entry.getKey();
                                     // JGRP-1492: only return our own address, and addresses in view.
-                                    if (addr.equals(local_addr) || members.contains(addr)) {
+                                    if(addr.equals(local_addr) || members.contains(addr)) {
                                         PhysicalAddress physical_addr=entry.getValue();
-                                        sendDiscoveryResponse(addr, Arrays.asList(physical_addr), is_server,
-                                                              hdr.view_id != null, UUID.get(addr), msg.getSrc());
+                                        sendDiscoveryResponse(addr, physical_addr, UUID.get(addr), msg.getSrc(), isCoord(addr));
                                     }
                                 }
                             }
+                            return null;
                         }
-                        else {
-                            List<PhysicalAddress> physical_addrs=hdr.view_id != null? null :
-                              Arrays.asList((PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr)));
-                            sendDiscoveryResponse(local_addr, physical_addrs, is_server, hdr.view_id != null,
-                                                  UUID.get(local_addr), msg.getSrc());
+
+                        // Only send a response if hdr.mbrs is not empty and contains myself. Otherwise always send my info
+                        Collection<? extends Address> mbrs=data != null? data.mbrs() : null;
+                        boolean send_response=mbrs == null || mbrs.contains(local_addr);
+                        if(send_response) {
+                            PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
+                            sendDiscoveryResponse(local_addr, physical_addr, UUID.get(local_addr), msg.getSrc(), is_coord);
                         }
                         return null;
 
-                    case PingHeader.GET_MBRS_RSP:   // add response to vector and notify waiting thread
+                    case PingHeader.GET_MBRS_RSP:
                         // add physical address (if available) to transport's cache
                         if(data != null) {
-                            Address response_sender=msg.getSrc();
-                            if(logical_addr == null)
-                                logical_addr=msg.getSrc();
-                            Collection<PhysicalAddress> addrs=data.getPhysicalAddrs();
-                            PhysicalAddress physical_addr=addrs != null && !addrs.isEmpty()?
-                                    addrs.iterator().next() : null;
-                            if(logical_addr != null && data.getLogicalName() != null)
-                                UUID.add(logical_addr, data.getLogicalName());
-                            if(logical_addr != null && physical_addr != null)
-                                down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<Address,PhysicalAddress>(logical_addr, physical_addr)));
-
-                            if(log.isTraceEnabled())
-                                log.trace(local_addr + ": received GET_MBRS_RSP from " + response_sender + ": " + data);
-                            boolean overwrite=logical_addr != null && logical_addr.equals(response_sender);
-                            synchronized(ping_responses) {
-                                for(Responses response: ping_responses) {
-                                    response.addResponse(data, overwrite);
-                                }
-                            }
+                            log.trace("%s: received GET_MBRS_RSP from %s: %s", local_addr, msg.src(), data);
+                            handleDiscoveryResponse(data, msg.src());
                         }
                         return null;
 
                     default:
-                        if(log.isWarnEnabled()) log.warn("got PING header with unknown type (" + hdr.type + ')');
+                        log.warn("got PING header with unknown type %d", hdr.type);
                         return null;
                 }
 
-
-            case Event.GET_PHYSICAL_ADDRESS:
-                try {
-                    sendDiscoveryRequest(group_addr, null, null);
-                }
-                catch(InterruptedIOException ie) {
-                    if(log.isWarnEnabled()){
-                        log.warn("Discovery request for cluster " + group_addr + " interrupted");
-                    }
-                    Thread.currentThread().interrupt();
-                }
-                catch(Exception ex) {
-                    if(log.isErrorEnabled())
-                        log.error("failed sending discovery request", ex);
-                }
-                return null;
-
-
-            case Event.FIND_INITIAL_MBRS:      // sent by transport
-                return findInitialMembers(null);
+            case Event.FIND_MBRS:
+                return findMembers((List<Address>)evt.getArg(), false, true); // this is done asynchronously
         }
 
         return up_prot.up(evt);
     }
 
 
+    protected void handleDiscoveryResponse(PingData data, Address sender) {
+        // add physical address (if available) to transport's cache
+        Address logical_addr=data.getAddress() != null? data.getAddress() : sender;
+        addDiscoveryResponseToCaches(logical_addr, data.getLogicalName(), data.getPhysicalAddr());
+        boolean overwrite=logical_addr != null && logical_addr.equals(sender);
+        addResponse(data, overwrite);
+    }
 
-    /**
-     * An event is to be sent down the stack. The layer may want to examine its type and perform
-     * some action on it, depending on the event's type. If the event is a message MSG, then
-     * the layer may need to add a header to it (or do nothing at all) before sending it down
-     * the stack using <code>PassDown</code>. In case of a GET_ADDRESS event (which tries to
-     * retrieve the stack's address from one of the bottom layers), the layer may need to send
-     * a new response event back up the stack using <code>up_prot.up()</code>.
-     * The PING protocol is interested in several different down events,
-     * Event.FIND_INITIAL_MBRS - sent by the GMS layer and expecting a GET_MBRS_OK
-     * Event.TMP_VIEW and Event.VIEW_CHANGE - a view change event
-     * Event.BECOME_SERVER - called after client has joined and is fully working group member
-     * Event.CONNECT, Event.DISCONNECT.
-     */
+
     @SuppressWarnings("unchecked")
     public Object down(Event evt) {
-
         switch(evt.getType()) {
-
             case Event.FIND_INITIAL_MBRS:      // sent by GMS layer
-            case Event.FIND_ALL_VIEWS:
-                // sends the GET_MBRS_REQ to all members, waits 'timeout' ms or until 'num_initial_members' have been retrieved
-                long start=System.currentTimeMillis();
-                boolean find_all_views=evt.getType() == Event.FIND_ALL_VIEWS;
-                Promise<JoinRsp> promise=(Promise<JoinRsp>)evt.getArg();
-                List<PingData> rsps=find_all_views? findAllViews(promise) : findInitialMembers(promise);
-                long diff=System.currentTimeMillis() - start;
-                if(log.isTraceEnabled())
-                    log.trace(local_addr + ": discovery took "+ diff + " ms: responses: " + Util.printPingData(rsps));
-                return rsps;
+                return findMembers(null, true, false); // triggered by JOIN process (ClientGmsImpl)
 
-            case Event.TMP_VIEW:
+            case Event.FIND_MBRS:
+                return findMembers((List<Address>)evt.getArg(), false, false); // triggered by MERGE2/MERGE3
+
+            // case Event.TMP_VIEW:
             case Event.VIEW_CHANGE:
                 List<Address> tmp;
+                View old_view=view;
                 view=(View)evt.getArg();
                 if((tmp=view.getMembers()) != null) {
                     synchronized(members) {
@@ -566,8 +395,17 @@ public abstract class Discovery extends Protocol {
                 }
                 current_coord=!members.isEmpty()? members.get(0) : null;
                 is_coord=current_coord != null && local_addr != null && current_coord.equals(local_addr);
-
-                return down_prot.down(evt);
+                Object retval=down_prot.down(evt);
+                if(send_cache_on_join && !isDynamic() && is_coord) {
+                    List<Address> curr_mbrs, left_mbrs, new_mbrs;
+                    synchronized(members) {
+                        curr_mbrs=new ArrayList<Address>(members);
+                        left_mbrs=old_view != null? Util.leftMembers(old_view.getMembers(), members) : null;
+                        new_mbrs=old_view != null? Util.newMembers(old_view.getMembers(), members) : null;
+                    }
+                    startCacheDissemination(curr_mbrs, left_mbrs, new_mbrs); // separate task
+                }
+                return retval;
 
             case Event.BECOME_SERVER: // called after client has joined and is fully working group member
                 down_prot.down(evt);
@@ -583,7 +421,7 @@ public abstract class Discovery extends Protocol {
             case Event.CONNECT_USE_FLUSH:
             case Event.CONNECT_WITH_STATE_TRANSFER_USE_FLUSH:
                 is_leaving=false;
-                group_addr=(String)evt.getArg();
+                cluster_name=(String)evt.getArg();
                 Object ret=down_prot.down(evt);
                 handleConnect();
                 return ret;
@@ -602,6 +440,99 @@ public abstract class Discovery extends Protocol {
 
     /* -------------------------- Private methods ---------------------------- */
 
+    protected List<PingData> read(InputStream in) {
+        List<PingData> retval=null;
+        try {
+            while(true) {
+                try {
+                    String name_str=Util.readToken(in);
+                    String uuid_str=Util.readToken(in);
+                    String addr_str=Util.readToken(in);
+                    String coord_str=Util.readToken(in);
+                    if(name_str == null || uuid_str == null || addr_str == null || coord_str == null)
+                        break;
+
+                    UUID uuid=null;
+                    try {
+                        long tmp=Long.valueOf(uuid_str);
+                        uuid=new UUID(0, tmp);
+                    }
+                    catch(Throwable t) {
+                        uuid=UUID.fromString(uuid_str);
+                    }
+
+                    PhysicalAddress phys_addr=new IpAddress(addr_str);
+                    boolean is_coordinator=coord_str.trim().equals("T") || coord_str.trim().equals("t");
+
+                    if(retval == null)
+                        retval=new ArrayList<PingData>();
+                    retval.add(new PingData(uuid, true, name_str, phys_addr).coord(is_coordinator));
+                }
+                catch(Throwable t) {
+                    log.error("failed reading line of input stream", t);
+                }
+            }
+            return retval;
+        }
+        finally {
+            Util.close(in);
+        }
+    }
+
+    protected void write(List<PingData> list, OutputStream out) throws Exception {
+        try {
+            for(PingData data: list) {
+                String  logical_name=data.getLogicalName();
+                Address addr=data.getAddress();
+                PhysicalAddress phys_addr=data.getPhysicalAddr();
+                if(logical_name == null || addr == null || phys_addr == null)
+                    continue;
+                out.write(logical_name.getBytes());
+                out.write(WHITESPACE);
+
+                out.write(addressAsString(addr).getBytes());
+                out.write(WHITESPACE);
+
+                out.write(phys_addr.toString().getBytes());
+                out.write(WHITESPACE);
+
+                out.write(data.isCoord()? "T\n".getBytes() : "F\n".getBytes());
+            }
+        }
+        finally {
+            Util.close(out);
+        }
+    }
+
+    protected void addResponse(PingData rsp, boolean overwrite) {
+        synchronized(ping_responses) {
+            for(Iterator<Map.Entry<Long,Responses>> it=ping_responses.entrySet().iterator(); it.hasNext();) {
+                Map.Entry<Long,Responses> entry=it.next();
+                long timestamp=entry.getKey();
+                Responses rsps=entry.getValue();
+                rsps.addResponse(rsp, overwrite);
+                if(rsps.isDone() || TimeUnit.MILLISECONDS.convert(System.nanoTime() - timestamp, TimeUnit.NANOSECONDS) > discovery_rsp_expiry_time) {
+                    it.remove();
+                    rsps.done();
+                }
+            }
+        }
+    }
+
+
+    protected boolean addDiscoveryResponseToCaches(Address mbr, String logical_name, PhysicalAddress physical_addr) {
+        if(mbr == null)
+            return false;
+        if(logical_name != null)
+            UUID.add(mbr, logical_name);
+        if(physical_addr != null)
+            return (Boolean)down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<Address,PhysicalAddress>(mbr, physical_addr)));
+        return false;
+    }
+
+    protected synchronized void startCacheDissemination(List<Address> curr_mbrs, List<Address> left_mbrs, List<Address> new_mbrs) {
+        timer.execute(new DiscoveryCacheDisseminationTask(curr_mbrs,left_mbrs,new_mbrs));
+    }
 
 
     /**
@@ -610,24 +541,18 @@ public abstract class Discovery extends Protocol {
      * @return
      */
     protected byte[] serializeWithoutView(PingData data) {
-        final PingData clone = new PingData(data.getAddress(), null, data.isServer(), data.getLogicalName(),  data.getPhysicalAddrs());
+        final PingData clone = new PingData(data.getAddress(), data.isServer(), data.getLogicalName(), data.getPhysicalAddr()).coord(data.isCoord());
         try {
             return Util.streamableToByteBuffer(clone);
         }
         catch(Exception e) {
-            log.error("Error", e);
+            log.error("error serializing PingData", e);
             return null;
         }
     }
 
-    protected PingData deserialize(final byte[] data) {
-        try {
-            return (PingData)Util.streamableFromByteBuffer(PingData.class, data);
-        }
-        catch(Exception e) {
-            log.error("Error", e);
-            return null;
-        }
+    protected static PingData deserialize(final byte[] data) throws Exception {
+        return (PingData)Util.streamableFromByteBuffer(PingData.class, data);
     }
 
     public static Buffer marshal(PingData data) {
@@ -644,12 +569,10 @@ public abstract class Discovery extends Protocol {
         }
     }
 
-    protected void sendDiscoveryResponse(Address logical_addr, List<PhysicalAddress> physical_addrs,
-                                         boolean is_server, boolean return_view_only, String logical_name, final Address sender) {
-        final PingData data=return_view_only? new PingData(logical_addr, view, is_server, null, null)
-          : new PingData(logical_addr, null, view != null? view.getViewId() : null, is_server, logical_name, physical_addrs);
-
-        final Message rsp_msg=new Message(sender).setFlag(Message.Flag.INTERNAL)
+    protected void sendDiscoveryResponse(Address logical_addr, PhysicalAddress physical_addr,
+                                         String logical_name, final Address sender, boolean coord) {
+        final PingData data=new PingData(logical_addr, is_server, logical_name, physical_addr).coord(coord);
+        final Message rsp_msg=new Message(sender).setFlag(Message.Flag.INTERNAL, Message.Flag.OOB, Message.Flag.DONT_BUNDLE)
           .putHeader(this.id, new PingHeader(PingHeader.GET_MBRS_RSP)).setBuffer(marshal(data));
 
         if(stagger_timeout > 0) {
@@ -659,98 +582,81 @@ public abstract class Discovery extends Protocol {
               : stagger_timeout * rank / view_size - (stagger_timeout / view_size);
             timer.schedule(new Runnable() {
                 public void run() {
-                    if(log.isTraceEnabled())
-                        log.trace(local_addr + ": received GET_MBRS_REQ from " + sender + ", sending staggered response " + data);
+                    log.trace("%s: received GET_MBRS_REQ from %s, sending staggered response %s", local_addr, sender, data);
                     down_prot.down(new Event(Event.MSG, rsp_msg));
                 }
             }, sleep_time, TimeUnit.MILLISECONDS);
             return;
         }
 
-        if(log.isTraceEnabled())
-            log.trace(local_addr + ": received GET_MBRS_REQ from " + sender + ", sending response " + data);
+        log.trace("%s: received GET_MBRS_REQ from %s, sending response %s", local_addr, sender, data);
         down_prot.down(new Event(Event.MSG, rsp_msg));
     }
 
-
-
-    protected static class Responses {
-        final Promise<JoinRsp>  promise;
-        final List<PingData>    ping_rsps=new ArrayList<PingData>();
-        final int               num_expected_rsps;
-        final boolean           break_on_coord_rsp;
-
-        protected Responses(int num_expected_rsps, boolean break_on_coord_rsp, Promise<JoinRsp> promise) {
-            this.num_expected_rsps=num_expected_rsps;
-            this.break_on_coord_rsp=break_on_coord_rsp;
-            this.promise=promise != null? promise : new Promise<JoinRsp>();
-        }
-
-        public void addResponse(PingData rsp) {
-            addResponse(rsp, false);
-        }
-
-        public void addResponse(PingData rsp, boolean overwrite) {
-            if(rsp == null)
-                return;
-            promise.getLock().lock();
-            try {
-                if(overwrite)
-                    ping_rsps.remove(rsp);
-
-                // https://jira.jboss.org/jira/browse/JGRP-1179
-                int index=ping_rsps.indexOf(rsp);
-                if(index == -1) {
-                    ping_rsps.add(rsp);
-                    promise.getCond().signalAll();
-                }
-                else if(rsp.isCoord()) {
-                    PingData pr=ping_rsps.get(index);
-
-                    // Check if the already existing element is not server
-                    if(!pr.isCoord()) {
-                        ping_rsps.set(index, rsp);
-                        promise.getCond().signalAll();
-                    }
-                }
-            }
-            finally {
-                promise.getLock().unlock();
-            }
-        }
-
-        public List<PingData> get(long timeout) throws InterruptedException{
-            long start_time=System.currentTimeMillis(), time_to_wait=timeout;
-
-            promise.getLock().lock();
-            try {
-                while(time_to_wait > 0 && !promise.hasResult()) {
-                    if(ping_rsps.size() >= num_expected_rsps && (break_on_coord_rsp && containsCoordinatorResponse(ping_rsps)))
-                        return new LinkedList<PingData>(ping_rsps);
-
-                    if(break_on_coord_rsp &&  containsCoordinatorResponse(ping_rsps))
-                        return new LinkedList<PingData>(ping_rsps);
-
-                    promise.getCond().await(time_to_wait, TimeUnit.MILLISECONDS);
-                    time_to_wait=timeout - (System.currentTimeMillis() - start_time);
-                }
-                return new LinkedList<PingData>(ping_rsps);
-            }
-            finally {
-                promise.getLock().unlock();
-            }
-        }
-
-
-        private static boolean containsCoordinatorResponse(Collection<PingData> rsps) {
-            if(rsps == null || rsps.isEmpty())
-                return false;
-            for(PingData rsp: rsps) {
-                if(rsp.isCoord())
-                    return true;
-            }
-            return false;
-        }
-
+    protected static String addressAsString(Address address) {
+        if(address == null)
+            return "";
+        if(address instanceof UUID)
+            return ((UUID) address).toStringLong();
+        return address.toString();
     }
+
+    protected boolean isCoord(Address member) {return member.equals(current_coord);}
+
+    /** Disseminates cache information (UUID/IP adddress/port/name) to the given members
+     * @param current_mbrs The current members. Guaranteed to be non-null. This is a copy and can be modified.
+     * @param left_mbrs The members which left. These are excluded from dissemination. Can be null if no members left
+     * @param new_mbrs The new members that we need to disseminate the information to. Will be all members if null.
+     */
+    protected void disseminateDiscoveryInformation(List current_mbrs, List<Address> left_mbrs, List<Address> new_mbrs) {
+        if(new_mbrs == null || new_mbrs.isEmpty())
+            return;
+
+        if(local_addr != null)
+            current_mbrs.remove(local_addr);
+        if(left_mbrs != null)
+            current_mbrs.removeAll(left_mbrs);
+
+        // 1. Send information about <everyone - self - left_mbrs> to new_mbrs
+        Set<Address> info=new HashSet<Address>(current_mbrs);
+        for(Address addr : info) {
+            PhysicalAddress phys_addr=(PhysicalAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS,addr));
+            if(phys_addr == null)
+                continue;
+            boolean is_coordinator=isCoord(addr);
+            for(Address target : new_mbrs)
+                sendDiscoveryResponse(addr,phys_addr,UUID.get(addr),target,is_coordinator);
+        }
+
+        // 2. Send information about new_mbrs to <everyone - self - left_mbrs - new_mbrs>
+        Set<Address> targets=new HashSet<Address>(current_mbrs);
+        targets.removeAll(new_mbrs);
+
+        if(!targets.isEmpty()) {
+            for(Address addr : new_mbrs) {
+                PhysicalAddress phys_addr=(PhysicalAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS,addr));
+                if(phys_addr == null)
+                    continue;
+                boolean is_coordinator=isCoord(addr);
+                for(Address target : targets)
+                    sendDiscoveryResponse(addr,phys_addr,UUID.get(addr),target,is_coordinator);
+            }
+        }
+    }
+
+
+    protected class DiscoveryCacheDisseminationTask implements Runnable {
+        protected final List<Address> curr_mbrs, left_mbrs, new_mbrs;
+
+        public DiscoveryCacheDisseminationTask(List<Address> curr_mbrs,List<Address> left_mbrs,List<Address> new_mbrs) {
+            this.curr_mbrs=curr_mbrs;
+            this.left_mbrs=left_mbrs;
+            this.new_mbrs=new_mbrs;
+        }
+
+        public void run() {
+            disseminateDiscoveryInformation(curr_mbrs, left_mbrs, new_mbrs);
+        }
+    }
+
 }

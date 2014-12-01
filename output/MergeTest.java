@@ -2,7 +2,6 @@ package org.jgroups.tests;
 
 import org.jgroups.*;
 import org.jgroups.protocols.DISCARD;
-import org.jgroups.protocols.MERGE2;
 import org.jgroups.protocols.MERGE3;
 import org.jgroups.protocols.TP;
 import org.jgroups.protocols.pbcast.GMS;
@@ -22,11 +21,12 @@ import java.util.Map;
  * 
  * @author vlada
  */
-@Test(groups=Global.STACK_DEPENDENT,sequential=true)
+@Test(groups=Global.STACK_DEPENDENT,singleThreaded=true)
 public class MergeTest extends ChannelTestBase {
     protected JChannel[] channels=null;
 
     @AfterMethod protected void destroy() {
+        level("warn", channels);
         for(JChannel ch: channels)
             try {
                 Util.shutdown(ch);
@@ -74,7 +74,14 @@ public class MergeTest extends ChannelTestBase {
 
     }
 
-    private JChannel[] createChannels(String cluster_name, String[] members) throws Exception {
+    protected static void level(String level, JChannel ... channels) {
+        for(JChannel ch: channels) {
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
+            gms.setLevel(level);
+        }
+    }
+
+    protected JChannel[] createChannels(String cluster_name, String[] members) throws Exception {
         JChannel[] retval=new JChannel[members.length];
         JChannel ch=null;
         for(int i=0; i < retval.length; i++) {
@@ -93,7 +100,7 @@ public class MergeTest extends ChannelTestBase {
             if(nakack != null)
                 nakack.setLogDiscardMessages(false);
 
-            stack.removeProtocol(MERGE2.class,MERGE3.class);
+            stack.removeProtocol(MERGE3.class);
 
             tmp.connect(cluster_name);
             retval[i]=tmp;

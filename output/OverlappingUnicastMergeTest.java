@@ -17,7 +17,7 @@ import java.util.Set;
  * Related JIRA: https://jira.jboss.org/jira/browse/JGRP-940
  * @author Bela Ban
  */
-@Test(groups=Global.STACK_DEPENDENT,sequential=true)
+@Test(groups=Global.STACK_DEPENDENT,singleThreaded=true)
 public class OverlappingUnicastMergeTest extends ChannelTestBase {
     private JChannel a, b, c;
     private MyReceiver ra, rb, rc;
@@ -59,7 +59,7 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
      * are executed:
      * <ol>
      * <li/>Group is {A,B,C}, A is the coordinator
-     * <li/>MERGE2 is removed from all members
+     * <li/>MERGE3 is removed from all members
      * <li/>VERIFY_SUSPECT is removed from all members
      * <li/>Everyone sends 5 unicast messages to everyone else
      * <li/>A VIEW(B,C) is injected into B and C
@@ -127,9 +127,8 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
         for(JChannel ch: channels) {
             Address addr=ch.getAddress();
             for(Address dest: mbrs) {
-                for(int i=1; i <= num_msgs; i++) {
-                    ch.send(dest, "unicast msg #" + i + " from " + addr);
-                }
+                for(int i=1; i <= num_msgs; i++)
+                    ch.send(dest, addr + ":" + i);
             }
         }
         int total_msgs=num_msgs * channels.length;
@@ -173,9 +172,7 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
     private static void modifyConfigs(JChannel ... channels) throws Exception {
         for(JChannel ch: channels) {
             ProtocolStack stack=ch.getProtocolStack();
-            stack.removeProtocol("MERGE2");
-            stack.removeProtocol("VERIFY_SUSPECT");
-            stack.removeProtocol("FC");
+            stack.removeProtocols("MERGE3", "VERIFY_SUSPECT", "FC", "UFC", "MFC");
         }
     }
 
@@ -192,8 +189,11 @@ public class OverlappingUnicastMergeTest extends ChannelTestBase {
         public void receive(Message msg) {
             Address dest=msg.getDest();
             boolean mcast=dest == null;
-            if(!mcast)
-                ucasts.add(msg);
+            if(!mcast) {
+                synchronized(ucasts) {
+                    ucasts.add(msg);
+                }
+            }
         }
 
         public void viewAccepted(View new_view) {

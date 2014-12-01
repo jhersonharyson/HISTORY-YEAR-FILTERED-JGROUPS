@@ -4,15 +4,17 @@ import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.PhysicalAddress;
 import org.jgroups.View;
+import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.Property;
+import org.jgroups.util.Responses;
 import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
 
 import java.io.*;
-import java.nio.channels.FileChannel;
-import java.util.*;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 
 
 /**
@@ -23,7 +25,7 @@ import java.util.concurrent.TimeUnit;
  * @author Bela Ban
  */
 public class FILE_PING extends Discovery {
-    protected static final String SUFFIX=".node";
+    protected static final String SUFFIX=".list";
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
 
@@ -31,77 +33,100 @@ public class FILE_PING extends Discovery {
     @Property(description="The absolute path of the shared file")
     protected String location=File.separator + "tmp" + File.separator + "jgroups";
 
-    @Property(description="Interval (in milliseconds) at which the own Address is written. 0 disables it.")
+    @Deprecated @Property(description="Interval (in milliseconds) at which the own Address is written. 0 disables it.")
     protected long interval=60000;
+
+    @ManagedAttribute(description="Number of writes to the file system or cloud store")
+    protected int writes;
+
+    @ManagedAttribute(description="Number of reads from the file system or cloud store")
+    protected int reads;
 
 
     /* --------------------------------------------- Fields ------------------------------------------------------ */
-    protected File root_dir=null;
-    protected FilenameFilter filter;
-    private Future<?> writer_future;
+    protected File                        root_dir=null;
+    protected static final FilenameFilter filter=new FilenameFilter() {
+        public boolean accept(File dir, String name) {return name.endsWith(SUFFIX);}
+    };
+    protected volatile View               prev_view;
 
+    public boolean isDynamic() {return true;}
 
     public void init() throws Exception {
         super.init();
         createRootDir();
-    }
-
-    public void start() throws Exception {
-        super.start();
-        if(interval > 0)
-            writer_future=timer.scheduleWithFixedDelay(new WriterTask(), interval, interval, TimeUnit.MILLISECONDS);
-    }
-
-    public void stop() {
-        if(writer_future != null) {
-            writer_future.cancel(false);
-            writer_future=null;
-        }
-        super.stop();
-    }
-
-    public boolean isDynamic() {
-        return true;
-    }
-
-    public Collection<PhysicalAddress> fetchClusterMembers(String cluster_name) {
-        List<PingData> existing_mbrs=readAll(cluster_name);
-
-        PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
-        List<PhysicalAddress> physical_addrs=Arrays.asList(physical_addr);
-        PingData data=new PingData(local_addr, null, false, UUID.get(local_addr), physical_addrs);
-        writeToFile(data, cluster_name); // write my own data to file
-
-        // If we don't find any files, return immediately
-        if(existing_mbrs.isEmpty())
-            return Collections.emptyList();
-
-        Set<PhysicalAddress> retval=new HashSet<PhysicalAddress>();
-
-        for(PingData tmp: existing_mbrs) {
-            Collection<PhysicalAddress> dests=tmp != null? tmp.getPhysicalAddrs() : null;
-            if(dests == null)
-                continue;
-            for(final PhysicalAddress dest: dests) {
-                if(dest == null)
-                    continue;
-                retval.add(dest);
+        Runtime.getRuntime().addShutdownHook(new Thread() {
+            public void run() {
+                remove(cluster_name, local_addr);
             }
-        }
-
-        return retval;
+        });
     }
 
-    public boolean sendDiscoveryRequestsInParallel() {
-        return true;
-    }
 
+    public void resetStats() {
+        super.resetStats();
+        reads=writes=0;
+    }
 
     public Object down(Event evt) {
-        Object retval=super.down(evt);
-        if(evt.getType() == Event.VIEW_CHANGE)
-            handleView((View)evt.getArg());
-        return retval;
+        switch(evt.getType()) {
+            case Event.VIEW_CHANGE:
+                View old_view=view;
+                boolean previous_coord=is_coord;
+                Object retval=super.down(evt);
+                View new_view=(View)evt.getArg();
+                handleView(new_view, old_view, previous_coord != is_coord);
+                return retval;
+            case Event.DISCONNECT:
+                remove(cluster_name, local_addr);
+                break;
+        }
+        return super.down(evt);
+    }
+
+    public void findMembers(final List<Address> members, final boolean initial_discovery, Responses responses) {
+        try {
+            readAll(members, cluster_name, responses);
+            if(responses.isEmpty()) {
+                PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS,local_addr));
+                PingData coord_data=new PingData(local_addr, true, UUID.get(local_addr), physical_addr).coord(is_coord);
+                write(Arrays.asList(coord_data), cluster_name);
+                return;
+            }
+
+            PhysicalAddress phys_addr=(PhysicalAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
+            PingData data=responses.findResponseFrom(local_addr);
+            // the logical addr *and* IP address:port have to match
+            if(data != null && data.getPhysicalAddr().equals(phys_addr)) {
+                if(data.isCoord() && initial_discovery)
+                    responses.clear();
+                else
+                    ; // use case #1 if we have predefined files: most members join but are not coord
+            }
+            else {
+                sendDiscoveryResponse(local_addr, phys_addr, UUID.get(local_addr), null, false);
+            }
+        }
+        finally {
+            responses.done();
+        }
+    }
+
+
+
+    /** Only add the discovery response if the logical address is not present or the physical addrs are different */
+    protected boolean addDiscoveryResponseToCaches(Address mbr, String logical_name, PhysicalAddress physical_addr) {
+        PhysicalAddress phys_addr=(PhysicalAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, mbr));
+        boolean added=phys_addr == null || !phys_addr.equals(physical_addr);
+        super.addDiscoveryResponseToCaches(mbr, logical_name, physical_addr);
+        if(added && is_coord)
+            writeAll();
+        return added;
+    }
+
+    protected static String addressToFilename(Address mbr) {
+        String logical_name=UUID.get(mbr);
+        return addressAsString(mbr) + (logical_name != null? "." + logical_name + SUFFIX : SUFFIX);
     }
 
     protected void createRootDir() {
@@ -110,31 +135,20 @@ public class FILE_PING extends Discovery {
             if(!root_dir.isDirectory())
                 throw new IllegalArgumentException("location " + root_dir.getPath() + " is not a directory");
         }
-        else {
+        else
             root_dir.mkdirs();
-        }
         if(!root_dir.exists())
             throw new IllegalArgumentException("location " + root_dir.getPath() + " could not be accessed");
 
-        filter=new FilenameFilter() {
-            public boolean accept(File dir, String name) {
-                return name.endsWith(SUFFIX);
-            }
-        };
     }
 
     // remove all files which are not from the current members
-    protected void handleView(View view) {
-        Collection<Address> mbrs=view.getMembers();
-        boolean is_coordinator=!mbrs.isEmpty() && mbrs.iterator().next().equals(local_addr);
-        if(is_coordinator) {
-            List<PingData> data=readAll(group_addr);
-            for(PingData entry: data) {
-                Address addr=entry.getAddress();
-                if(addr != null && !mbrs.contains(addr)) {
-                    remove(group_addr, addr);
-                }
-            }
+    protected void handleView(View new_view, View old_view, boolean coord_changed) {
+        if(coord_changed) {
+            if(is_coord)
+                writeAll();
+            else
+                remove(cluster_name, local_addr);
         }
     }
 
@@ -146,133 +160,111 @@ public class FILE_PING extends Discovery {
         if(!dir.exists())
             return;
 
-        if(log.isDebugEnabled()) {
-        	log.debug("remove : "+clustername);
-        }
-        
-        String filename=addr instanceof UUID? ((UUID)addr).toStringLong() : addr.toString();
-        File file=new File(dir, filename + SUFFIX);
+        log.debug("remove %s", clustername);
+
+        String filename=addressToFilename(addr);
+        File file=new File(dir, filename);
         deleteFile(file);
     }
 
-    /**
-     * Reads all information from the given directory under clustername
-     * @return
-     */
-    protected synchronized List<PingData> readAll(String clustername) {
-        List<PingData> retval=new ArrayList<PingData>();
-        File dir=new File(root_dir,clustername);
+
+
+    protected void readAll(List<Address> members, String clustername, Responses responses) {
+        File dir=new File(root_dir, clustername);
         if(!dir.exists())
             dir.mkdir();
 
-        if(log.isDebugEnabled())
-            log.debug("reading all : " + clustername);
-        File[] files=dir.listFiles(filter);
-        if(files != null) {
-            for(File file: files) {
-                PingData data=null;
-                //implementing a simple spin lock doing a few attempts to read the file
-                //this is done since the file may be written in concurrency and may therefore not be readable
-                for(int i=0; i < 3; i++) {
-                    data=null;
-                    if(file.exists())
-                        data=readFile(file);
-                    if(data != null)
-                        break;
-                    else
-                        Util.sleep(100);
+        File[] files=dir.listFiles(filter); // finds all files ending with '.list'
+        for(File file: files) {
+            List<PingData> list=null;
+            // implementing a simple spin lock doing a few attempts to read the file
+            // this is done since the file may be written in concurrency and may therefore not be readable
+            for(int i=0; i < 3; i++) {
+                if(file.exists()) {
+                    try {
+                        if((list=read(file)) != null)
+                            break;
+                    }
+                    catch(Exception e) {
+                    }
                 }
+                Util.sleep(50);
+            }
 
-                if(data == null) {
-                    log.warn("failed parsing content in " + file.getAbsolutePath() + ": removing it from " + clustername);
-                    deleteFile(file);
-                }
-                else
-                    retval.add(data);
+            if(list == null) {
+                log.warn("failed reading " + file.getAbsolutePath());
+                continue;
+            }
+            for(PingData data: list) {
+                if(members == null || members.contains(data.getAddress()))
+                    responses.addResponse(data, true);
+                if(local_addr != null && !local_addr.equals(data.getAddress()))
+                    addDiscoveryResponseToCaches(data.getAddress(), data.getLogicalName(), data.getPhysicalAddr());
             }
         }
-        return retval;
     }
 
-    private synchronized PingData readFile(File file) {
-        PingData retval=null;
-        DataInputStream in=null;
+    // Format: [name] [UUID] [address:port] [coord (T or F)]. See doc/design/CloudBasedDiscovery.txt for details
+    protected List<PingData> read(File file) throws Exception {
+        return read(new FileInputStream(file));
+    }
 
+    @Override
+    protected List<PingData> read(InputStream in) {
         try {
-            in=new DataInputStream(new FileInputStream(file));
-            PingData tmp=new PingData();
-            tmp.readFrom(in);
-            return tmp;
-        }
-        catch(Exception e) {
-            log.debug("failed to read file : "+file.getAbsolutePath(), e);
+            return super.read(in);
         }
         finally {
-            Util.close(in);
+            reads++;
         }
-        return retval;
     }
 
-    protected synchronized void writeToFile(PingData data, String clustername) {
-        File dir=new File(root_dir,clustername);
+
+    /** Write information about all of the member to file (only if I'm the coord) */
+    protected void writeAll() {
+        Map<Address,PhysicalAddress> cache_contents=
+          (Map<Address,PhysicalAddress>)down_prot.down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS, false));
+
+        List<PingData> list=new ArrayList<PingData>(cache_contents.size());
+        for(Map.Entry<Address,PhysicalAddress> entry: cache_contents.entrySet()) {
+            Address         addr=entry.getKey();
+            PhysicalAddress phys_addr=entry.getValue();
+            PingData data=new PingData(addr, true, UUID.get(addr), phys_addr).coord(addr.equals(local_addr));
+            list.add(data);
+        }
+        write(list, cluster_name);
+    }
+
+    protected void write(List<PingData> list, String clustername) {
+        File dir=new File(root_dir, clustername);
         if(!dir.exists())
             dir.mkdir();
 
-        if(data == null) {
-            return;
-        }
+        String filename=addressToFilename(local_addr);
+        File destination=new File(dir, filename);
 
-        String filename=addressAsString(local_addr);
-
-        //first write all data to a temporary file
-        //this is because the writing can be very slow under some circumstances
-        File tmpFile=writeToTempFile(dir, data);
-        if(tmpFile == null)
-            return;
-
-        File destination=new File(dir, filename + SUFFIX);
         try {
-            //do a file move, this is much faster and could be considered atomic on most operating systems
-            FileChannel src_ch=new FileInputStream(tmpFile).getChannel();
-            FileChannel dest_ch=new FileOutputStream(destination).getChannel();
-            src_ch.transferTo(0,src_ch.size(),dest_ch);
-            src_ch.close();
-            dest_ch.close();
-            if(log.isTraceEnabled())
-                log.trace("Moved: " + tmpFile.getName() + "->" + destination.getName());
+            write(list, new FileOutputStream(destination));
         }
-        catch(IOException ioe) {
-            log.error("attempt to move failed at " + clustername + " : " + tmpFile.getName() + "->" + destination.getName(),ioe);
+        catch(Exception ioe) {
+            log.error("attempt to write data failed at " + clustername + " : " + destination.getName(), ioe);
+            deleteFile(destination);
+        }
+    }
+
+
+    protected void write(List<PingData> list, OutputStream out) throws Exception {
+        try {
+            super.write(list, out);
         }
         finally {
-            deleteFile(tmpFile);
+            writes++;
         }
     }
 
-    protected class WriterTask implements Runnable {
-        public void run() {
-            PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
-            List<PhysicalAddress> physical_addrs=Arrays.asList(physical_addr);
-            PingData data=new PingData(local_addr, null, false, UUID.get(local_addr), physical_addrs);
-            writeToFile(data, group_addr);
-        }
-    }
-    
-    protected static String addressAsString(Address address) {
-        if(address == null)
-            return "";
-        if(address instanceof UUID)
-            return ((UUID) address).toStringLong();
-        return address.toString();
-    }
 
-    /**
-     * Attempts to delete the provided file.<br>
-     * Logging is performed on the result
-     * @param file
-     * @return
-     */
-    private boolean deleteFile(File file) {
+
+    protected boolean deleteFile(File file) {
         boolean result = true;
         if(log.isTraceEnabled())
             log.trace("Attempting to delete file : "+file.getAbsolutePath());
@@ -280,44 +272,13 @@ public class FILE_PING extends Discovery {
         if(file != null && file.exists()) {
             try {
                 result=file.delete();
-                if(log.isTraceEnabled())
-                    log.trace("Deleted file result: "+file.getAbsolutePath() +" : "+result);
+                log.trace("Deleted file result: "+file.getAbsolutePath() +" : "+result);
             }
             catch(Throwable e) {
                 log.error("Failed to delete file: " + file.getAbsolutePath(), e);
             }
         }
         return result;
-    }
-       
-
-    /**
-     * Writes the data to a temporary file.<br>
-     * The file is stored in the same directory as the other cluster files but is given the <tt>.tmp</tmp> suffix 
-     * @param dir The cluster file dir
-     * @param data the data to write
-     * @return
-     */
-    private File writeToTempFile(File dir, PingData data) {
-        DataOutputStream out=null;
-               
-        String filename=addressAsString(local_addr);
-        File file=new File(dir, filename + ".tmp");
-                
-        try {
-            out=new DataOutputStream(new FileOutputStream(file));
-            data.writeTo(out);
-            Util.close(out);
-            if(log.isTraceEnabled())
-                log.trace("Stored temporary file: "+file.getAbsolutePath());            	
-        }
-        catch(Exception e) {
-            Util.close(out);
-        	log.error("Failed to write temporary file: "+file.getAbsolutePath(), e);
-        	deleteFile(file);
-        	return null;
-        }
-		return file;
     }
 
 

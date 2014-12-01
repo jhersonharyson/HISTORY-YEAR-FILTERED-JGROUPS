@@ -156,12 +156,6 @@ public class RpcDispatcher extends MessageDispatcher {
         else
             msg.setBuffer((byte[])buf);
 
-        if(options != null) {
-            msg.setFlag(options.getFlags());
-            if(options.getScope() > 0)
-                msg.setScope(options.getScope());
-        }
-
         RspList<T> retval=super.castMessage(dests, msg, options);
         if(log.isTraceEnabled()) log.trace("responses: " + retval);
         return retval;
@@ -182,7 +176,7 @@ public class RpcDispatcher extends MessageDispatcher {
     public <T> NotifyingFuture<RspList<T>> callRemoteMethodsWithFuture(Collection<Address> dests,
                                                                        MethodCall method_call,
                                                                        RequestOptions options,
-                                                                       FutureListener<T> listener) throws Exception {
+                                                                       FutureListener<RspList<T>> listener) throws Exception {
         if(dests != null && dests.isEmpty()) { // don't send if dest list is empty
             if(log.isTraceEnabled())
                 log.trace(new StringBuilder("destination list of ").append(method_call.getName()).
@@ -201,12 +195,7 @@ public class RpcDispatcher extends MessageDispatcher {
             msg.setBuffer((Buffer)buf);
         else
             msg.setBuffer((byte[])buf);
-        if(options != null) {
-            msg.setFlag(options.getFlags());
-            if(options.getScope() > 0)
-                msg.setScope(options.getScope());
-        }
-        
+
         NotifyingFuture<RspList<T>>  retval=super.castMessageWithFuture(dests, msg, options, listener);
         if(log.isTraceEnabled()) log.trace("responses: " + retval);
         return retval;
@@ -265,13 +254,8 @@ public class RpcDispatcher extends MessageDispatcher {
             msg.setBuffer((Buffer)buf);
         else
             msg.setBuffer((byte[])buf);
-        if(options != null) {
-            msg.setFlag(options.getFlags());
-            if(options.getScope() > 0)
-                msg.setScope(options.getScope());
-        }
 
-        T retval=(T)super.sendMessage(msg, options);
+        T retval=super.sendMessage(msg, options);
         if(log.isTraceEnabled()) log.trace("retval: " + retval);
         return retval;
     }
@@ -298,11 +282,7 @@ public class RpcDispatcher extends MessageDispatcher {
             msg.setBuffer((Buffer)buf);
         else
             msg.setBuffer((byte[])buf);
-        if(options != null) {
-            msg.setFlag(options.getFlags());
-            if(options.getScope() > 0)
-                msg.setScope(options.getScope());
-        }
+
         return super.sendMessageWithFuture(msg, options, listener);
     }
 
@@ -342,7 +322,7 @@ public class RpcDispatcher extends MessageDispatcher {
         }
 
         Object body=req_marshaller != null?
-          req_marshaller.objectFromBuffer(req.getBuffer(), req.getOffset(), req.getLength()) : req.getObject();
+          req_marshaller.objectFromBuffer(req.getRawBuffer(), req.getOffset(), req.getLength()) : req.getObject();
 
         if(!(body instanceof MethodCall))
             throw new IllegalArgumentException("message does not contain a MethodCall object") ;

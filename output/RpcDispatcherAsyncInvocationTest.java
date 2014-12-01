@@ -4,10 +4,7 @@ import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.Message;
 import org.jgroups.blocks.*;
-import org.jgroups.protocols.PING;
-import org.jgroups.protocols.SHARED_LOOPBACK;
-import org.jgroups.protocols.TP;
-import org.jgroups.protocols.UNICAST3;
+import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.stack.Protocol;
@@ -27,13 +24,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author Bela Ban
  * @since  3.3
  */
-@Test(groups=Global.TIME_SENSITIVE,sequential=true)
+@Test(groups=Global.TIME_SENSITIVE,singleThreaded=true)
 public class RpcDispatcherAsyncInvocationTest {
     protected JChannel            a, b;
     protected RpcDispatcher       disp1, disp2;
     protected final AtomicInteger count=new AtomicInteger(0);
     protected Method              incr_method;
 
+    @Test(enabled=false)
     public int incr() {
         Util.sleep(500);
         return count.incrementAndGet();
@@ -130,7 +128,7 @@ public class RpcDispatcherAsyncInvocationTest {
         transport.setOOBThreadPoolQueueEnabled(false);
         return new JChannel(new Protocol[]{
           transport,
-          new PING().setValue("timeout", 500),
+          new SHARED_LOOPBACK_PING(),
           new NAKACK2(),
           new UNICAST3(),
           new GMS()

@@ -13,10 +13,11 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.io.*;
+import java.lang.reflect.InvocationTargetException;
 import java.util.Iterator;
 import java.util.List;
 
-@Test(groups=Global.STACK_DEPENDENT,sequential=true)
+@Test(groups=Global.STACK_DEPENDENT,singleThreaded=true)
 public class RpcDispatcherSerializationTest extends ChannelTestBase {
     private JChannel channel, channel2;
     private RpcDispatcher disp, disp2;
@@ -65,7 +66,9 @@ public class RpcDispatcherSerializationTest extends ChannelTestBase {
         assert members.size() == rsps.size() : "expected " + members.size() + " responses, but got " + rsps + " (" + rsps.size() + ")";
 
         for(Rsp rsp: rsps.values()) {
-            assert rsp.getException() instanceof NoSuchMethodException : "exception is " + rsp.getException();
+            assert rsp.getException() instanceof InvocationTargetException;
+            Throwable cause=rsp.getException().getCause();
+            assert cause instanceof NoSuchMethodException;
         }
     }
 

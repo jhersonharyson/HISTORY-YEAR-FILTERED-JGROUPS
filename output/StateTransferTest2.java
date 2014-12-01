@@ -1,29 +1,32 @@
 package org.jgroups.tests;
 
-import org.jgroups.*;
+import org.jgroups.Global;
+import org.jgroups.JChannel;
+import org.jgroups.ReceiverAdapter;
+import org.jgroups.StateTransferException;
 import org.jgroups.protocols.pbcast.*;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
+import org.jgroups.util.ArrayIterator;
 import org.jgroups.util.Util;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import java.io.*;
 import java.util.Iterator;
-import java.util.NoSuchElementException;
 
 /**
  * Tests state transfer API (including exception handling)
  * @author Bela Ban
  */
-@Test(groups=Global.STACK_DEPENDENT,sequential=true)
+@Test(groups={Global.STACK_DEPENDENT,Global.EAP_EXCLUDED},singleThreaded=true)
 public class StateTransferTest2 extends ChannelTestBase {
     JChannel c1, c2;
 
 
     @DataProvider(name="createChannels")
     protected Iterator<Class<?>[]> createChannels() {
-        return new MyIterator(new Class<?>[]{STATE_TRANSFER.class, STATE.class, STATE_SOCK.class});
+        return new ArrayIterator<Class<?>[]>(new Class<?>[][]{{STATE_TRANSFER.class}, {STATE.class}, {STATE_SOCK.class}});
     }
 
 
@@ -35,7 +38,7 @@ public class StateTransferTest2 extends ChannelTestBase {
             StateHandler sh1=new StateHandler("Bela", false, false), sh2=new StateHandler(null, false, false);
             c1.setReceiver(sh1);
             c2.setReceiver(sh2);
-            c2.getState(null, 0);
+            c2.getState(null, 30000);
             Object state=sh2.getReceivedState();
             System.out.println("state = " + state);
             assert state != null && state.equals("Bela");
@@ -53,7 +56,7 @@ public class StateTransferTest2 extends ChannelTestBase {
             c1.setReceiver(sh1);
             c2.setReceiver(sh2);
             try {
-                c2.getState(null, 0);
+                c2.getState(null, 30000);
                 assert false : "we shouldn't get here; getState() should have thrown an exception";
             }
             catch(StateTransferException ex) {
@@ -76,7 +79,7 @@ public class StateTransferTest2 extends ChannelTestBase {
         c1.setReceiver(sh1);
         c2.setReceiver(sh2);
         try {
-            c2.getState(null, 0);
+            c2.getState(null, 30000);
             assert false : "we shouldn't get here; getState() should have thrown an exception";
         }
         catch(StateTransferException ste) {
@@ -114,26 +117,6 @@ public class StateTransferTest2 extends ChannelTestBase {
         }
     }
 
-
-
-    protected static class MyIterator implements Iterator<Class<?>[]> {
-        protected final Class<?>[] stream_transfer_prots;
-        protected int              index=0;
-
-        public MyIterator(Class<?>[] stream_transfer_prots) {
-            this.stream_transfer_prots=stream_transfer_prots;
-        }
-
-        public boolean hasNext() {return index < stream_transfer_prots.length;}
-
-        public Class<?>[] next() {
-            if(index+1 > stream_transfer_prots.length)
-                throw new NoSuchElementException();
-            return new Class<?>[]{stream_transfer_prots[index++]};
-        }
-
-        public void remove() {}
-    }
 
 
     protected static class StateHandler extends ReceiverAdapter {

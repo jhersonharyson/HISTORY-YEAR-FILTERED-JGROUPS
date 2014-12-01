@@ -4,10 +4,7 @@ import org.jgroups.*;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
-import org.jgroups.protocols.DISCARD;
-import org.jgroups.protocols.PING;
-import org.jgroups.protocols.SHARED_LOOPBACK;
-import org.jgroups.protocols.UNICAST3;
+import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
@@ -32,7 +29,7 @@ import java.util.concurrent.TimeUnit;
  * Goal: the merge should *not* get cancelled, but instead all 3 non-faulty member should merge
  * @author Bela Ban
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class MergeTest2 {
     protected MyDiagnosticsHandler handler;
     protected JChannel a,b,c,d;
@@ -47,7 +44,7 @@ public class MergeTest2 {
                                          new DefaultThreadFactory("", false));
         handler.start();
         
-        TimeScheduler timer=new TimeScheduler2(new DefaultThreadFactory("Timer", true, true),
+        TimeScheduler timer=new TimeScheduler3(new DefaultThreadFactory("Timer", true, true),
                                                5,10,
                                                3000, 1000, "abort");
 
@@ -65,7 +62,7 @@ public class MergeTest2 {
 
 
     protected JChannel createChannel(String name, TimeScheduler timer, Executor thread_pool, Executor oob_thread_pool) throws Exception {
-        SHARED_LOOPBACK shared_loopback=(SHARED_LOOPBACK)new SHARED_LOOPBACK().setValue("enable_bundling", false);
+        SHARED_LOOPBACK shared_loopback=new SHARED_LOOPBACK();
         shared_loopback.setTimer(timer);
         shared_loopback.setOOBThreadPool(oob_thread_pool);
         shared_loopback.setDefaultThreadPool(thread_pool);
@@ -73,7 +70,7 @@ public class MergeTest2 {
 
         JChannel retval=Util.createChannel(shared_loopback,
                                            new DISCARD().setValue("discard_all",true),
-                                           new PING().setValue("timeout",100),
+                                           new SHARED_LOOPBACK_PING(),
                                            new NAKACK2().setValue("use_mcast_xmit",false)
                                              .setValue("log_discard_msgs",false).setValue("log_not_found_msgs",false),
                                            new UNICAST3(),
@@ -109,7 +106,7 @@ public class MergeTest2 {
         non_faulty_members.addAll(Arrays.asList(a.getAddress(),b.getAddress(),c.getAddress(),d.getAddress()));
         List<Address> tmp=new ArrayList<Address>(non_faulty_members);
         tmp.remove(merge_leader.getAddress());
-        Address faulty_member=(Address)Util.pickRandomElement(tmp);
+        Address faulty_member=Util.pickRandomElement(tmp);
         non_faulty_members.remove(faulty_member);
 
         System.out.println("\nMerge leader: " + merge_leader.getAddress() + "\nFaulty member: " + faulty_member +

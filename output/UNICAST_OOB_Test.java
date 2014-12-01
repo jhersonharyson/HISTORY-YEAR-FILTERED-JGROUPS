@@ -19,7 +19,7 @@ import java.util.List;
  * Tests the UNICAST protocol for OOB msgs, tests http://jira.jboss.com/jira/browse/JGRP-377
  * @author Bela Ban
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class UNICAST_OOB_Test {
     JChannel a, b;
 
@@ -72,7 +72,7 @@ public class UNICAST_OOB_Test {
 
         a.connect("UNICAST_OOB_Test");
         b.connect("UNICAST_OOB_Test");
-        assert b.getView().size() == 2 : "ch2.view is " + b.getView();
+        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, a,b);
 
         Address dest=b.getAddress();
         for(int i=1; i <=5; i++) {
@@ -120,14 +120,14 @@ public class UNICAST_OOB_Test {
         Protocol unicast=unicast_class.newInstance().setValue("xmit_interval",500);
         if(unicast instanceof UNICAST2)
             unicast.setValue("stable_interval", 1000);
-        return new JChannel(new Protocol[] {
+        return new JChannel(
           new SHARED_LOOPBACK(),
-          new PING().setValue("timeout", 300),
+          new SHARED_LOOPBACK_PING(),
           new NAKACK2(),
           new DISCARD(),
           unicast,
-          new GMS()
-        }).name(name);
+          new GMS())
+          .name(name);
     }
 
 

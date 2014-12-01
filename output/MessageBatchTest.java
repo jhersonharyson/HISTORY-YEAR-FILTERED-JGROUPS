@@ -5,6 +5,7 @@ import org.jgroups.Global;
 import org.jgroups.Message;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.*;
+import org.jgroups.util.Filter;
 import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Util;
 import org.testng.annotations.Test;
@@ -21,7 +22,7 @@ import java.util.concurrent.LinkedBlockingQueue;
  * @author Bela Ban
  * @since  3.3
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class MessageBatchTest {
     protected static final short UNICAST2_ID=ClassConfigurator.getProtocolId(UNICAST2.class),
       PING_ID=ClassConfigurator.getProtocolId(PING.class),
@@ -29,6 +30,10 @@ public class MessageBatchTest {
       MERGE_ID=ClassConfigurator.getProtocolId(MERGE3.class),
       UDP_ID=ClassConfigurator.getProtocolId(UDP.class);
     protected final Address a=Util.createRandomAddress("A"), b=Util.createRandomAddress("B");
+
+    protected static final MessageBatch.Visitor<Integer> print_numbers=new MessageBatch.Visitor<Integer>() {
+        public Integer visit(Message msg, MessageBatch batch) {return msg != null? (Integer)msg.getObject() : null;}
+    };
 
 
 
@@ -45,6 +50,50 @@ public class MessageBatchTest {
     public void testCapacityConstructor() {
         MessageBatch batch=new MessageBatch(3);
         assert batch.isEmpty();
+    }
+
+    public void testCreationWithFilter() {
+        List<Message> msgs=new ArrayList<Message>(10);
+        for(int i=1; i <= 10; i++)
+            msgs.add(new Message(null, i));
+        MessageBatch batch=new MessageBatch(null, null, null, true, msgs, new Filter<Message>() {
+            public boolean accept(Message msg) {
+                return msg != null && ((Integer)msg.getObject()) % 2 == 0; // only even numbers are accepted
+            }
+        });
+        System.out.println(batch.map(print_numbers));
+        assert batch.size() == 5;
+        for(Message msg: batch)
+            assert ((Integer)msg.getObject()) % 2 == 0;
+    }
+
+
+    public void testCreationWithFilter2() {
+        List<Message> msgs=new ArrayList<Message>(20);
+        for(int i=1; i <= 20; i++) {
+            Message msg=new Message(null, i);
+            if(i <= 10) {
+                msg.setFlag(Message.Flag.OOB);
+                if(i % 2 == 0)
+                    msg.setTransientFlag(Message.TransientFlag.OOB_DELIVERED);
+            }
+            msgs.add(msg);
+        }
+
+        MessageBatch batch=new MessageBatch(null, null, null, true, msgs, new Filter<Message>() {
+            public boolean accept(Message msg) {
+                return msg != null && (!msg.isFlagSet(Message.Flag.OOB) || msg.setTransientFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED));
+                // return msg != null && !(msg.isFlagSet(Message.Flag.OOB) && !msg.setTransientFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED));
+            }
+        });
+
+        System.out.println("batch = " + batch.map(print_numbers));
+        assert batch.size() == 15;
+        for(Message msg: batch) {
+            int num=(Integer)msg.getObject();
+            if(num <= 10)
+                assert msg.isTransientFlagSet(Message.TransientFlag.OOB_DELIVERED);
+        }
     }
 
 
@@ -141,6 +190,27 @@ public class MessageBatchTest {
     }
 
 
+    public void testReplaceDuplicates() {
+        Filter<Message> filter=new Filter<Message>() {
+            protected final Set<Integer> dupes=new HashSet<Integer>(5);
+            public boolean accept(Message msg) {
+                Integer num=(Integer)msg.getObject();
+                return dupes.add(num) == false;
+            }
+        };
+
+        MessageBatch batch=new MessageBatch(10);
+        for(int j=0; j < 2; j++)
+            for(int i=1; i <= 5; i++)
+                batch.add(new Message(null, i));
+        System.out.println(batch.map(print_numbers));
+        assert batch.size() == 10;
+        batch.replace(filter,  null, true);
+        assert batch.size() == 5;
+        System.out.println(batch.map(print_numbers));
+    }
+
+
     public void testRemove() {
         List<Message> msgs=createMessages();
         MessageBatch batch=new MessageBatch(msgs);
@@ -158,6 +228,30 @@ public class MessageBatchTest {
         System.out.println("batch = " + batch);
         assert batch.size() == prev_size;
         assert batch.capacity() == prev_size;
+    }
+
+    public void testRemoveWithFilter() {
+        Filter<Message> filter=new Filter<Message>() {
+            public boolean accept(Message msg) {return msg != null && msg.isTransientFlagSet(Message.TransientFlag.OOB_DELIVERED);}
+        };
+        MessageBatch batch=new MessageBatch(10);
+        for(int i=1; i <= 10; i++) {
+            Message msg=new Message(null, i);
+            if(i % 2 == 0)
+                msg.setTransientFlag(Message.TransientFlag.OOB_DELIVERED);
+            batch.add(msg);
+        }
+        System.out.println("batch = " + batch);
+        assert batch.size() == 10;
+        batch.remove(filter);
+        System.out.println("batch = " + batch);
+        assert batch.size() == 5;
+
+        for(int i=0; i < 5; i++)
+            batch.add(new Message(null, i).setTransientFlag(Message.TransientFlag.OOB_DELIVERED));
+        System.out.println("batch = " + batch);
+        batch.replace(filter, null, false);
+        assert batch.size() == 9;
     }
 
 
@@ -203,15 +297,15 @@ public class MessageBatchTest {
         List<Message> msgs=createMessages();
         ByteArrayOutputStream output=new ByteArrayOutputStream();
         DataOutputStream out=new DataOutputStream(output);
-        TP.writeMessageList(b, a, "cluster", msgs, out, false, UDP_ID);
+        TP.writeMessageList(b, a, "cluster".getBytes(), msgs, out, false, UDP_ID);
         out.flush();
 
         byte[] buf=output.toByteArray();
         System.out.println("size=" + buf.length + " bytes, " + msgs.size() + " messages");
 
         DataInputStream in=new DataInputStream(new ByteArrayInputStream(buf));
-        short version=in.readShort();
-        byte flags=in.readByte();
+        in.readShort(); // version
+        in.readByte(); // flags
         List<Message> list=TP.readMessageList(in, UDP_ID);
         assert msgs.size() == list.size();
     }
@@ -343,7 +437,7 @@ public class MessageBatchTest {
         MessageBatch batch=new MessageBatch(msgs);
         int index=0;
         for(Iterator<Message> it=batch.iterator(); it.hasNext();) {
-            Message msg=it.next();
+            it.next();
             if(index == 1 || index == 2 || index == 3 || index == 10 || index == msgs.size()-1)
                 it.remove();
             index++;
@@ -379,7 +473,7 @@ public class MessageBatchTest {
 
         int count=0;
         for(Iterator<Message> it=batch.iterator(); it.hasNext();) {
-            Message msg=it.next();
+            it.next();
             count++;
             if(count % 2 == 0)
                 batch.add(new Message());

@@ -9,10 +9,15 @@ import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.stack.Protocol;
+import org.jgroups.util.Average;
 import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Util;
 
-import java.util.*;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 
 
 /**
@@ -42,7 +47,7 @@ public abstract class FlowControl extends Protocol {
      * Max time (in milliseconds) to block. If credit hasn't been received after max_block_time, we send
      * a REPLENISHMENT request to the members from which we expect credits. A value <= 0 means to wait forever.
      */
-    @Property(description="Max time (in milliseconds) to block. Default is 5000 msec")
+    @Property(description="Max time (in ms) to block")
     protected long max_block_time=5000;
 
     /**
@@ -101,6 +106,8 @@ public abstract class FlowControl extends Protocol {
      */
     protected final Map<Address,Credit> received=Util.createConcurrentMap();
 
+    protected Address local_addr;
+
 
     /** Whether FlowControl is still running, this is set to false when the protocol terminates (on stop()) */
     protected volatile boolean running=true;
@@ -140,8 +147,6 @@ public abstract class FlowControl extends Protocol {
     public void setMinCredits(long min_credits) {
         this.min_credits=min_credits;
     }
-
-    public abstract int getNumberOfBlockings();
 
     public long getMaxBlockTime() {
         return max_block_time;
@@ -201,15 +206,10 @@ public abstract class FlowControl extends Protocol {
         }
         return sb.toString();
     }
-    
 
-    public abstract long getTotalTimeBlocked();
+    public abstract int getNumberOfBlockings();
 
-    @ManagedAttribute(description="Average time spent in a flow control block")
-    public double getAverageTimeBlocked() {
-        long number_of_blockings=getNumberOfBlockings();
-        return number_of_blockings == 0? 0.0 : getTotalTimeBlocked() / (double)number_of_blockings;
-    }
+    public abstract double getAverageTimeBlocked();
 
     @ManagedAttribute(description="Number of credit requests received")
     public int getNumberOfCreditRequestsReceived() {
@@ -327,7 +327,16 @@ public abstract class FlowControl extends Protocol {
                 if(length == 0)
                     break;
 
-                return handleDownMessage(evt, msg, dest, length);
+                Object retval=handleDownMessage(evt, msg, dest, length);
+
+                // if the message is DONT_LOOPBACK, we will not receive it, therefore the credit
+                // check needs to be done now
+                if(msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK)) {
+                    long new_credits=adjustCredit(received, local_addr, length);
+                    if(new_credits > 0)
+                        sendCredit(local_addr, new_credits);
+                }
+                return retval;
 
             case Event.CONFIG:
                 handleConfigEvent((Map<String,Object>)evt.getArg()); 
@@ -335,6 +344,10 @@ public abstract class FlowControl extends Protocol {
             
             case Event.VIEW_CHANGE:
                 handleViewChange(((View)evt.getArg()).getMembers());
+                break;
+
+            case Event.SET_LOCAL_ADDRESS:
+                local_addr=(Address)evt.getArg();
                 break;
         }
         return down_prot.down(evt); // this could potentially use the lower protocol's thread which may block
@@ -521,7 +534,7 @@ public abstract class FlowControl extends Protocol {
         // add members not in membership to received and sent hashmap (with full credits)
         for(Address addr: mbrs) {
             if(!received.containsKey(addr))
-                received.put(addr, new Credit(max_credits));
+                received.put(addr, new Credit(max_credits, null));
         }
         // remove members that left
         for(Iterator<Address> it=received.keySet().iterator(); it.hasNext();) {
@@ -544,16 +557,18 @@ public abstract class FlowControl extends Protocol {
 
 
     protected class Credit {
-        protected long credits_left;
-        protected int  num_blockings=0;
-        protected long total_blocking_time=0;
-        protected long last_credit_request=0;
+        protected long          credits_left;
+        protected int           num_blockings;
+        protected long          last_credit_request; // ns
+        protected final Average avg_blockings;
 
         
-        protected Credit(long credits) {
+        protected Credit(long credits, Average avg_blockings) {
             this.credits_left=credits;
+            this.avg_blockings=avg_blockings;
         }
 
+        public void reset() {num_blockings=0; if(avg_blockings != null) avg_blockings.clear();}
 
         protected synchronized boolean decrementIfEnoughCredits(long credits, long timeout) {
             if(decrement(credits))
@@ -562,15 +577,16 @@ public abstract class FlowControl extends Protocol {
             if(timeout <= 0)
                 return false;
 
-            long start=System.currentTimeMillis();
+            long start=avg_blockings != null? System.nanoTime() : 0;
             try {
                 this.wait(timeout);
             }
             catch(InterruptedException e) {
             }
             finally {
-                total_blocking_time+=System.currentTimeMillis() - start;
                 num_blockings++;
+                if(avg_blockings != null)
+                    avg_blockings.add(System.nanoTime() - start);
             }
 
             return decrement(credits);
@@ -603,8 +619,9 @@ public abstract class FlowControl extends Protocol {
         }
 
         protected synchronized boolean needToSendCreditRequest() {
-            long current_time=System.currentTimeMillis();
-            if(current_time - last_credit_request >= max_block_time) {
+            long current_time=System.nanoTime();
+            // will most likely send a request the first time (last_credit_request is 0), unless nanoTime() is negative
+            if(current_time - last_credit_request >= TimeUnit.NANOSECONDS.convert(max_block_time, TimeUnit.MILLISECONDS)) {
                 last_credit_request=current_time;
                 return true;
             }
@@ -612,8 +629,6 @@ public abstract class FlowControl extends Protocol {
         }
 
         protected int getNumBlockings() {return num_blockings;}
-
-        protected long getTotalBlockingTime() {return total_blocking_time;}
 
         protected synchronized long get() {return credits_left;}
 

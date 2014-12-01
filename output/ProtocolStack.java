@@ -1,11 +1,15 @@
 package org.jgroups.stack;
 
-import org.jgroups.*;
+import org.jgroups.Address;
+import org.jgroups.Event;
+import org.jgroups.Global;
+import org.jgroups.JChannel;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.conf.PropertyConverter;
 import org.jgroups.conf.ProtocolConfiguration;
 import org.jgroups.protocols.TP;
+import org.jgroups.util.AsciiString;
 import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Tuple;
 import org.jgroups.util.Util;
@@ -31,9 +35,10 @@ import java.util.concurrent.ConcurrentMap;
  * @author Bela Ban
  */
 public class ProtocolStack extends Protocol {
-    public static final int ABOVE = 1; // used by insertProtocol()
-    public static final int BELOW = 2; // used by insertProtocol()
+    public static final int       ABOVE = 1; // used by insertProtocol()
+    public static final int       BELOW = 2; // used by insertProtocol()
 
+    protected static final String max_list_print_size="max-list-print-size";
     /**
      * Holds the shared transports, keyed by 'TP.singleton_name'. The values are the transport and the use count for
      * init() (decremented by destroy()) and start() (decremented by stop()
@@ -57,6 +62,15 @@ public class ProtocolStack extends Protocol {
                     String tmp=printProtocolSpec(true);
                     HashMap<String, String> map=new HashMap<String, String>(1);
                     map.put("props", tmp);
+                    return map;
+                }
+                if(key.startsWith(max_list_print_size)) {
+                    int index=key.indexOf("=");
+                    if(index >= 0) {
+                        Util.MAX_LIST_PRINT_SIZE=Integer.valueOf(key.substring(index+1));
+                    }
+                    HashMap<String, String> map=new HashMap<String, String>(1);
+                    map.put(max_list_print_size, String.valueOf(Util.MAX_LIST_PRINT_SIZE));
                     return map;
                 }
                 if(key.startsWith("print-protocols")) {
@@ -151,7 +165,7 @@ public class ProtocolStack extends Protocol {
         }
 
         public String[] supportedKeys() {
-            return new String[]{"props", "print-protocols", "\nremove-protocol=<name>",
+            return new String[]{"props", max_list_print_size + "[=number]", "print-protocols", "\nremove-protocol=<name>",
               "\ninsert-protocol=<name>=above | below=<name>"};
         }
     };
@@ -467,7 +481,6 @@ public class ProtocolStack extends Protocol {
             initProtocolStack();
         }
     }
-
 
 
 
@@ -830,17 +843,17 @@ public class ProtocolStack extends Protocol {
                 if(transport.isSingleton()) {
                     String singleton_name=transport.getSingletonName();
                     synchronized(singleton_transports) {
-                        Tuple<TP, ProtocolStack.RefCounter> val=singleton_transports.get(singleton_name);
-                        if(val == null) {
-                            singleton_transports.put(singleton_name, new Tuple<TP, ProtocolStack.RefCounter>(transport,new ProtocolStack.RefCounter((short)1, (short)0)));
-                        }
+                        Tuple<TP,RefCounter> val=singleton_transports.get(singleton_name);
+                        if(val == null)
+                            singleton_transports.put(singleton_name, new Tuple<TP,RefCounter>(transport,new RefCounter((short)1, (short)0)));
                         else {
-                            ProtocolStack.RefCounter counter=val.getVal2();
+                            RefCounter counter=val.getVal2();
                             short num_inits=counter.incrementInitCount();
-                            if(num_inits >= 1) {
+                            if(num_inits >= 1)
                                 continue;
-                            }
                         }
+                        prot.init(); // if shared TP, call init() with lock : https://issues.jboss.org/browse/JGRP-1887
+                        continue;
                     }
                 }
             }
@@ -891,26 +904,26 @@ public class ProtocolStack extends Protocol {
      * <em>from top to bottom</em>.
      * Each layer can perform some initialization, e.g. create a multicast socket
      */
-    public void startStack(String cluster_name, Address local_addr) throws Exception {
+    public void startStack(String cluster, Address local_addr) throws Exception {
         if(stopped == false) return;
-
+        final AsciiString cluster_name=new AsciiString(cluster);
         Protocol above_prot=null;
         for(final Protocol prot: getProtocols()) {
             if(prot instanceof TP) {
                 String singleton_name=((TP)prot).getSingletonName();
                 TP transport=(TP)prot;
                 if(transport.isSingleton() && cluster_name != null) {
-                    final Map<String, Protocol> up_prots=transport.getUpProtocols();
+                    final Map<AsciiString, Protocol> up_prots=transport.getUpProtocols();
 
                     synchronized(singleton_transports) {
                         synchronized(up_prots) {
-                            Set<String> keys=up_prots.keySet();
+                            Set<AsciiString> keys=up_prots.keySet();
                             if(keys.contains(cluster_name))
                                 throw new IllegalStateException("cluster '" + cluster_name + "' is already connected to singleton " +
                                         "transport: " + keys);
 
-                            for(Iterator<Map.Entry<String,Protocol>> it=up_prots.entrySet().iterator(); it.hasNext();) {
-                                Map.Entry<String,Protocol> entry=it.next();
+                            for(Iterator<Map.Entry<AsciiString,Protocol>> it=up_prots.entrySet().iterator(); it.hasNext();) {
+                                Map.Entry<AsciiString,Protocol> entry=it.next();
                                 Protocol tmp=entry.getValue();
                                 if(tmp == above_prot) {
                                     it.remove();
@@ -918,7 +931,7 @@ public class ProtocolStack extends Protocol {
                             }
 
                             if(above_prot != null) {
-                                TP.ProtocolAdapter ad=new TP.ProtocolAdapter(cluster_name, local_addr, prot.getId(),
+                                TP.ProtocolAdapter ad=new TP.ProtocolAdapter(new AsciiString(cluster_name), local_addr, prot.getId(),
                                                                              above_prot, prot,
                                                                              transport.getThreadNamingPattern());
                                 ad.setProtocolStack(above_prot.getProtocolStack());
@@ -968,14 +981,15 @@ public class ProtocolStack extends Protocol {
      * <li>Calls stop() on the protocol
      * </ol>
      */
-    public void stopStack(String cluster_name) {
+    public void stopStack(String cluster) {
         if(stopped) return;
+        final AsciiString cluster_name=new AsciiString(cluster);
         for(final Protocol prot: getProtocols()) {
             if(prot instanceof TP) {
                 TP transport=(TP)prot;
                 if(transport.isSingleton()) {
                     String singleton_name=transport.getSingletonName();
-                    final Map<String,Protocol> up_prots=transport.getUpProtocols();
+                    final Map<AsciiString,Protocol> up_prots=transport.getUpProtocols();
                     synchronized(up_prots) {
                         Protocol adapter=up_prots.remove(cluster_name);
                         if(adapter != null) {
