@@ -137,7 +137,7 @@ public class COUNTER extends Protocol {
             throw new IllegalArgumentException("the channel needs to be connected before creating or getting a counter");
         Owner owner=getOwner();
         GetOrCreateRequest req=new GetOrCreateRequest(owner, name, initial_value);
-        Promise<long[]> promise=new Promise<long[]>();
+        Promise<long[]> promise=new Promise<>();
         pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
         sendRequest(coord, req);
         long[] result=promise.getResultWithTimeout(timeout);
@@ -187,11 +187,11 @@ public class COUNTER extends Protocol {
                         handleResponse((Response)obj, msg.getSrc());
                     }
                     else {
-                        log.error("received object is neither a Request nor a Response: " + obj);
+                        log.error(Util.getMessage("ReceivedObjectIsNeitherARequestNorAResponse") + obj);
                     }
                 }
                 catch(Exception ex) {
-                    log.error("failed handling message", ex);
+                    log.error(Util.getMessage("FailedHandlingMessage"), ex);
                 }
                 return null;
 
@@ -284,7 +284,7 @@ public class COUNTER extends Protocol {
 
                 // return all values except those with lower or same versions than the ones in the ReconcileRequest
                 ReconcileRequest reconcile_req=(ReconcileRequest)req;
-                Map<String,VersionedValue> map=new HashMap<String,VersionedValue>(counters);
+                Map<String,VersionedValue> map=new HashMap<>(counters);
                 if(reconcile_req.names !=  null) {
                     for(int i=0; i < reconcile_req.names.length; i++) {
                         counter_name=reconcile_req.names[i];
@@ -402,8 +402,8 @@ public class COUNTER extends Protocol {
             coord=members.get(0);
 
         if(coord != null && coord.equals(local_addr)) {
-            List<Address> old_backups=backup_coords != null? new ArrayList<Address>(backup_coords) : null;
-            backup_coords=new CopyOnWriteArrayList<Address>(Util.pickNext(members, local_addr, num_backups));
+            List<Address> old_backups=backup_coords != null? new ArrayList<>(backup_coords) : null;
+            backup_coords=new CopyOnWriteArrayList<>(Util.pickNext(members, local_addr, num_backups));
 
             // send the current values to all *new* backups
             List<Address> new_backups=Util.newElements(old_backups,backup_coords);
@@ -441,7 +441,7 @@ public class COUNTER extends Protocol {
             down_prot.down(new Event(Event.MSG, msg));
         }
         catch(Exception ex) {
-            log.error("failed sending " + req + " request: " + ex);
+            log.error(Util.getMessage("FailedSending") + req + " request: " + ex);
         }
     }
 
@@ -459,7 +459,7 @@ public class COUNTER extends Protocol {
             down_prot.down(new Event(Event.MSG, rsp_msg));
         }
         catch(Exception ex) {
-            log.error("failed sending " + rsp + " message to " + dest + ": " + ex);
+            log.error(Util.getMessage("FailedSending") + rsp + " message to " + dest + ": " + ex);
         }
     }
 
@@ -473,7 +473,7 @@ public class COUNTER extends Protocol {
             }
         }
         catch(Exception ex) {
-            log.error("failed sending " + req + " to backup coordinator(s):" + ex);
+            log.error(Util.getMessage("FailedSending") + req + " to backup coordinator(s):" + ex);
         }
     }
 
@@ -485,7 +485,7 @@ public class COUNTER extends Protocol {
             down_prot.down(new Event(Event.MSG, rsp_msg));
         }
         catch(Exception ex) {
-            log.error("failed sending message to " + dest + ": " + ex);
+            log.error(Util.getMessage("FailedSendingMessageTo") + dest + ": " + ex);
         }
     }
 
@@ -650,7 +650,7 @@ public class COUNTER extends Protocol {
             }
             Owner owner=getOwner();
             Request req=new SetRequest(owner, name, new_value);
-            Promise<long[]> promise=new Promise<long[]>();
+            Promise<long[]> promise=new Promise<>();
             pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
             sendRequest(coord, req);
             Object obj=promise.getResultWithTimeout(timeout);
@@ -673,7 +673,7 @@ public class COUNTER extends Protocol {
             }
             Owner owner=getOwner();
             Request req=new CompareAndSetRequest(owner, name, expect, update);
-            Promise<long[]> promise=new Promise<long[]>();
+            Promise<long[]> promise=new Promise<>();
             pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
             sendRequest(coord, req);
             Object obj=promise.getResultWithTimeout(timeout);
@@ -709,7 +709,7 @@ public class COUNTER extends Protocol {
             }
             Owner owner=getOwner();
             Request req=new AddAndGetRequest(owner, name, delta);
-            Promise<long[]> promise=new Promise<long[]>();
+            Promise<long[]> promise=new Promise<>();
             pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
             sendRequest(coord, req);
             Object obj=promise.getResultWithTimeout(timeout);
@@ -1139,7 +1139,7 @@ public class COUNTER extends Protocol {
 
 
         protected void _run() {
-            Map<String,VersionedValue> copy=new HashMap<String,VersionedValue>(counters);
+            Map<String,VersionedValue> copy=new HashMap<>(counters);
             int len=copy.size();
             String[] names=new String[len];
             long[] values=new long[len], versions=new long[len];
@@ -1150,9 +1150,9 @@ public class COUNTER extends Protocol {
                 versions[index]=entry.getValue().version;
                 index++;
             }
-            List<Address> targets=new ArrayList<Address>(view.getMembers());
+            List<Address> targets=new ArrayList<>(view.getMembers());
             targets.remove(local_addr);
-            responses=new ResponseCollector<ReconcileResponse>(targets); // send to everyone but us
+            responses=new ResponseCollector<>(targets); // send to everyone but us
             Request req=new ReconcileRequest(names, values, versions);
             sendRequest(null, req);
 

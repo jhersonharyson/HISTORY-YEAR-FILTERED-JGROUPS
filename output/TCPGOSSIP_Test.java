@@ -46,7 +46,7 @@ public class TCPGOSSIP_Test {
 
         bind_addr=InetAddress.getByName(tmp);
         gossip_router_port=ResourceManager.getNextTcpPort(bind_addr);
-        gossipRouter=new GossipRouter(gossip_router_port, null);
+        gossipRouter=new GossipRouter(null, gossip_router_port);
         gossipRouter.start();
     }
 
@@ -177,7 +177,7 @@ public class TCPGOSSIP_Test {
 
     protected JChannel createTcpgossipChannel(String name) throws Exception {
         TCPGOSSIP gossip=new TCPGOSSIP();
-        List<InetSocketAddress> initial_hosts=new ArrayList<InetSocketAddress>();
+        List<InetSocketAddress> initial_hosts=new ArrayList<>();
         initial_hosts.add(new InetSocketAddress(bind_addr, gossip_router_port));
         gossip.setInitialHosts(initial_hosts);
 

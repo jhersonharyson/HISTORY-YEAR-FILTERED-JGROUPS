@@ -40,7 +40,7 @@ public class SEQUENCER extends Protocol {
     /** Maintains messages forwarded to the coord which which no ack has been received yet.
      *  Needs to be sorted so we resend them in the right order
      */
-    protected final NavigableMap<Long,Message>  forward_table=new ConcurrentSkipListMap<Long,Message>();
+    protected final NavigableMap<Long,Message>  forward_table=new ConcurrentSkipListMap<>();
 
     protected final Lock                        send_lock=new ReentrantLock();
 
@@ -63,7 +63,7 @@ public class SEQUENCER extends Protocol {
     protected volatile Flusher                  flusher;
 
     /** Used for each resent message to wait until the message has been received */
-    protected final Promise<Long>               ack_promise=new Promise<Long>();
+    protected final Promise<Long>               ack_promise=new Promise<>();
 
 
 
@@ -165,7 +165,7 @@ public class SEQUENCER extends Protocol {
                     forwardToCoord(next_seqno, msg);
                 }
                 catch(Exception ex) {
-                    log.error("failed sending message", ex);
+                    log.error(Util.getMessage("FailedSendingMessage"), ex);
                 }
                 finally {
                     in_flight_sends.decrementAndGet();
@@ -259,7 +259,7 @@ public class SEQUENCER extends Protocol {
                 up(new Event(Event.MSG, msg));
             }
             catch(Throwable t) {
-                log.error("failed passing up message", t);
+                log.error(Util.getMessage("FailedPassingUpMessage"), t);
             }
         }
 
@@ -348,7 +348,7 @@ public class SEQUENCER extends Protocol {
                     val=Util.objectToByteBuffer(msg);
                 }
                 catch(Exception e) {
-                    log.error("flushing (broadcasting) failed", e);
+                    log.error(Util.getMessage("FlushingBroadcastingFailed"), e);
                     continue;
                 }
 
@@ -382,7 +382,7 @@ public class SEQUENCER extends Protocol {
                 val=Util.objectToByteBuffer(msg);
             }
             catch(Exception e) {
-                log.error("flushing (broadcasting) failed", e);
+                log.error(Util.getMessage("FlushingBroadcastingFailed"), e);
                 continue;
             }
 
@@ -448,7 +448,7 @@ public class SEQUENCER extends Protocol {
             forwarded_msgs++;
         }
         catch(Exception ex) {
-            log.error("failed forwarding message to " + msg.getDest(), ex);
+            log.error(Util.getMessage("FailedForwardingMessageTo") + msg.getDest(), ex);
         }
     }
 
@@ -489,7 +489,7 @@ public class SEQUENCER extends Protocol {
             deliver(msg_to_deliver, new Event(Event.MSG, msg_to_deliver), hdr);
         }
         catch(Exception ex) {
-            log.error("failure unmarshalling buffer", ex);
+            log.error(Util.getMessage("FailureUnmarshallingBuffer"), ex);
         }
     }
 
@@ -532,7 +532,7 @@ public class SEQUENCER extends Protocol {
     protected boolean canDeliver(Address sender, long seqno) {
         BoundedHashMap<Long,Long> seqno_set=delivery_table.get(sender);
         if(seqno_set == null) {
-            seqno_set=new BoundedHashMap<Long,Long>(delivery_table_max_size);
+            seqno_set=new BoundedHashMap<>(delivery_table_max_size);
             BoundedHashMap<Long,Long> existing=delivery_table.put(sender,seqno_set);
             if(existing != null)
                 seqno_set=existing;

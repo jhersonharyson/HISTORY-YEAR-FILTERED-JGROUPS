@@ -1,10 +1,7 @@
 package org.jgroups.protocols;
 
 
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Header;
-import org.jgroups.Message;
+import org.jgroups.*;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.Property;
 import org.jgroups.annotations.XmlAttribute;
@@ -56,7 +53,7 @@ public class AUTH extends Protocol {
     protected static final short    gms_id=ClassConfigurator.getProtocolId(GMS.class);
 
     /** List of UpHandler which are called when an up event has been received. Usually used by AuthToken impls */
-    protected final List<UpHandler> up_handlers=new ArrayList<UpHandler>();
+    protected final List<UpHandler> up_handlers=new ArrayList<>();
 
     protected Address               local_addr;
 
@@ -83,10 +80,11 @@ public class AUTH extends Protocol {
     public void      register(UpHandler handler)   {up_handlers.add(handler);}
     public void      unregister(UpHandler handler) {up_handlers.remove(handler);}
     public Address   getAddress()                  {return local_addr;}
+    public PhysicalAddress getPhysicalAddress()    {return getTransport().getPhysicalAddress();}
 
 
     protected List<Object> getConfigurableObjects() {
-        List<Object> retval=new LinkedList<Object>();
+        List<Object> retval=new LinkedList<>();
         if(auth_token != null)
             retval.add(auth_token);
         return retval;
@@ -101,7 +99,23 @@ public class AUTH extends Protocol {
         auth_token.init();
     }
 
+    public void start() throws Exception {
+        super.start();
+        if(auth_token != null)
+            auth_token.start();
+    }
 
+    public void stop() {
+        if(auth_token != null)
+            auth_token.stop();
+        super.stop();
+    }
+
+    public void destroy() {
+        if(auth_token != null)
+            auth_token.destroy();
+        super.destroy();
+    }
 
     /**
      * An event was received from the layer below. Usually the current layer will want to examine

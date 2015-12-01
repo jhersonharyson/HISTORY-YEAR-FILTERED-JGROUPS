@@ -58,6 +58,10 @@ public abstract class Protocol {
             "instances of it in the same stack (also change ID)",writable=false)
     protected String           name=getClass().getSimpleName();
 
+    @Property(description="Fully qualified name of a class implementing ProtocolHook, will be called after creation of " +
+      "the protocol (before init())",writable=false)
+    protected String           after_creation_hook;
+
     @Property(description="Give the protocol a different ID if needed so we can have multiple " +
             "instances of it in the same stack",writable=false)
     protected short            id=ClassConfigurator.getProtocolId(getClass());
@@ -73,23 +77,24 @@ public abstract class Protocol {
      * @param level The new level. Valid values are "fatal", "error", "warn", "info", "debug", "trace"
      * (capitalization not relevant)
      */
-    public void          setLevel(String level)            {log.setLevel(level);}
+    public Protocol      setLevel(String level)            {log.setLevel(level); return this;}
     @Property(name="level", description="logger level (see javadocs)")
     public String        getLevel()                        {return log.getLevel();}
     public Protocol      level(String level)               {this.log.setLevel(level); return this;}
     public boolean       isErgonomics()                    {return ergonomics;}
-    public void          setErgonomics(boolean ergonomics) {this.ergonomics=ergonomics;}
+    public Protocol      setErgonomics(boolean ergonomics) {this.ergonomics=ergonomics; return this;}
     public ProtocolStack getProtocolStack()                {return stack;}
     public boolean       statsEnabled()                    {return stats;}
     public void          enableStats(boolean flag)         {stats=flag;}
     public String        getName()                         {return name;}
     public short         getId()                           {return id;}
-    public void          setId(short id)                   {this.id=id;}
+    public Protocol      setId(short id)                   {this.id=id; return this;}
     public Protocol      getUpProtocol()                   {return up_prot;}
     public Protocol      getDownProtocol()                 {return down_prot;}
-    public void          setUpProtocol(Protocol prot)      {this.up_prot=prot;}
-    public void          setDownProtocol(Protocol prot)    {this.down_prot=prot;}
-    public void          setProtocolStack(ProtocolStack s) {this.stack=s;}
+    public Protocol      setUpProtocol(Protocol prot)      {this.up_prot=prot; return this;}
+    public Protocol      setDownProtocol(Protocol prot)    {this.down_prot=prot; return this;}
+    public Protocol      setProtocolStack(ProtocolStack s) {this.stack=s; return this;}
+    public String        afterCreationHook()               {return after_creation_hook;}
 
 
     public Object getValue(String name) {
@@ -149,7 +154,7 @@ public abstract class Protocol {
     /** Returns the protocol IDs of all protocols above this one (excluding the current protocol) */
     public short[] getIdsAbove() {
         short[]     retval;
-        List<Short> ids=new ArrayList<Short>();
+        List<Short> ids=new ArrayList<>();
         Protocol    current=up_prot;
         while(current != null) {
             ids.add(current.getId());
@@ -211,7 +216,7 @@ public abstract class Protocol {
     }
 
     public Map<String,Object> dumpStats() {
-        HashMap<String,Object> map=new HashMap<String,Object>();
+        HashMap<String,Object> map=new HashMap<>();
         for(Class<?> clazz=this.getClass();clazz != null;clazz=clazz.getSuperclass()) {
             Field[] fields=clazz.getDeclaredFields();
             for(Field field: fields) {
@@ -335,7 +340,7 @@ public abstract class Protocol {
 
     /** Returns all services provided by protocols below the current protocol */
     public final List<Integer> getDownServices() {
-        List<Integer> retval=new ArrayList<Integer>();
+        List<Integer> retval=new ArrayList<>();
         Protocol prot=down_prot;
         while(prot != null) {
             List<Integer> tmp=prot.providedUpServices();
@@ -348,7 +353,7 @@ public abstract class Protocol {
 
     /** Returns all services provided by the protocols above the current protocol */
     public final List<Integer> getUpServices() {
-        List<Integer> retval=new ArrayList<Integer>();
+        List<Integer> retval=new ArrayList<>();
         Protocol prot=up_prot;
         while(prot != null) {
             List<Integer> tmp=prot.providedDownServices();

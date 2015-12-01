@@ -126,10 +126,10 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     @Property(description="If enabled, multicasts the highest sent seqno every xmit_interval ms. This is skipped if " +
       "a regular message has been multicast, and the task aquiesces if the highest sent seqno hasn't changed for " +
       "resend_last_seqno_max_times times. Used to speed up retransmission of dropped last messages (JGRP-1904)")
-    protected boolean resend_last_seqno=false;
+    protected boolean resend_last_seqno=true;
 
     @Property(description="Max number of times the last seqno is resent before acquiescing if last seqno isn't incremented")
-    protected int     resend_last_seqno_max_times=3;
+    protected int     resend_last_seqno_max_times=1;
 
     /* -------------------------------------------------- JMX ---------------------------------------------------------- */
 
@@ -140,7 +140,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     @ManagedAttribute(description="Number of messages received")
     protected int                          num_messages_received;
 
-    protected static final Message         DUMMY_OOB_MSG=new Message(false).setFlag(Message.Flag.OOB);
+    protected static final Message         DUMMY_OOB_MSG=new Message().setFlag(Message.Flag.OOB);
 
     // Accepts messages which are (1) non-null, (2) no DUMMY_OOB_MSGs and (3) not OOB_DELIVERED
     protected final Filter<Message> no_dummy_and_no_oob_delivered_msgs_and_no_dont_loopback_msgs=new Filter<Message>() {
@@ -206,7 +206,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     /* -------------------------------------------------    Fields    ------------------------------------------------------------------------- */
     protected volatile boolean          is_server=false;
     protected Address                   local_addr=null;
-    protected volatile List<Address>    members=new ArrayList<Address>();
+    protected volatile List<Address>    members=new ArrayList<>();
     protected volatile View             view;
     private final AtomicLong            seqno=new AtomicLong(0); // current message sequence number (starts with 1)
 
@@ -216,7 +216,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     /** RetransmitTask running every xmit_interval ms */
     protected Future<?>                 xmit_task;
     /** Used by the retransmit task to keep the last retransmitted seqno per sender (https://issues.jboss.org/browse/JGRP-1539) */
-    protected final Map<Address,Long>   xmit_task_map=new ConcurrentHashMap<Address,Long>();
+    protected final Map<Address,Long>   xmit_task_map=new ConcurrentHashMap<>();
 
     protected volatile boolean          leaving=false;
     protected volatile boolean          running=false;
@@ -232,10 +232,10 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     protected Digest                    rebroadcast_digest=null;
 
     /** Keeps the last N stability messages */
-    protected final BoundedList<String> stability_msgs=new BoundedList<String>(10);
+    protected final BoundedList<String> stability_msgs=new BoundedList<>(10);
 
     /** Keeps a bounded list of the last N digest sets */
-    protected final BoundedList<String> digest_history=new BoundedList<String>(10);
+    protected final BoundedList<String> digest_history=new BoundedList<>(10);
 
     protected BoundedList<Message>      become_server_queue;
 
@@ -429,10 +429,10 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         }
 
         if(become_server_queue_size > 0)
-            become_server_queue=new BoundedList<Message>(become_server_queue_size);
+            become_server_queue=new BoundedList<>(become_server_queue_size);
 
         if(suppress_time_non_member_warnings > 0)
-            suppress_log_non_member=new SuppressLog<Address>(log, "MsgDroppedNak", "SuppressMsg");
+            suppress_log_non_member=new SuppressLog<>(log, "MsgDroppedNak", "SuppressMsg");
 
         // max bundle size (minus overhead) divided by <long size> times bits per long
         int estimated_max_msgs_in_xmit_req=(transport.getMaxBundleSize() -50) * Global.LONG_SIZE;
@@ -673,8 +673,8 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
             switch(hdr.type) {
                 case NakAckHeader2.MSG:
                     if(msgs == null)
-                        msgs=new ArrayList<Tuple<Long,Message>>(size);
-                    msgs.add(new Tuple<Long,Message>(hdr.seqno, msg));
+                        msgs=new ArrayList<>(size);
+                    msgs.add(new Tuple<>(hdr.seqno, msg));
                     break;
                 case NakAckHeader2.XMIT_REQ:
                     SeqnoList missing=(SeqnoList)msg.getObject();
@@ -685,8 +685,8 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                     Message xmitted_msg=msgFromXmitRsp(msg, hdr);
                     if(xmitted_msg != null) {
                         if(msgs == null)
-                            msgs=new ArrayList<Tuple<Long,Message>>(size);
-                        msgs.add(new Tuple<Long,Message>(hdr.seqno, xmitted_msg));
+                            msgs=new ArrayList<>(size);
+                        msgs.add(new Tuple<>(hdr.seqno, xmitted_msg));
                         got_retransmitted_msg=true;
                     }
                     break;
@@ -712,7 +712,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
     // ProbeHandler interface
     public Map<String, String> handleProbe(String... keys) {
-        Map<String,String> retval=new HashMap<String,String>();
+        Map<String,String> retval=new HashMap<>();
         for(String key: keys) {
             if(key.equals("digest-history"))
                 retval.put(key, printDigestHistory());
@@ -1050,7 +1050,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
             return;
         }
 
-        Message xmit_msg=msg.copy(true, true).dest(dest).setFlag(Message.Flag.INTERNAL); // copy payload and headers
+        Message xmit_msg=msg.copy(true, true).dest(dest); // copy payload and headers
         NakAckHeader2 hdr=(NakAckHeader2)xmit_msg.getHeader(id);
         NakAckHeader2 newhdr=hdr.copy();
         newhdr.type=NakAckHeader2.XMIT_RSP; // change the type in the copy from MSG --> XMIT_RSP
@@ -1247,7 +1247,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
      * Returns a message digest: for each member P the highest delivered and received seqno is added
      */
     public Digest getDigest() {
-        final Map<Address,long[]> map=new HashMap<Address,long[]>();
+        final Map<Address,long[]> map=new HashMap<>();
         for(Map.Entry<Address,Table<Message>> entry: xmit_table.entrySet()) {
             Address sender=entry.getKey(); // guaranteed to be non-null (CCHM)
             Table<Message> buf=entry.getValue(); // guaranteed to be non-null (CCHM)
@@ -1379,7 +1379,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
 
     protected Table<Message> createTable(long initial_seqno) {
-        return new Table<Message>(xmit_table_num_rows, xmit_table_msgs_per_row,
+        return new Table<>(xmit_table_num_rows, xmit_table_msgs_per_row,
                                   initial_seqno, xmit_table_resize_factor, xmit_table_max_compaction_time);
     }
 

@@ -2,11 +2,13 @@
 package org.jgroups.tests;
 
 import org.jgroups.*;
+import org.jgroups.util.Bits;
 import org.jgroups.util.*;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.util.*;
 
 
@@ -260,10 +262,10 @@ public class UtilTest {
     }
 
     @SuppressWarnings("unchecked")
-    public static void testObjectToFromByteBuffer() throws Exception {
+    public void testObjectToFromByteBuffer() throws Exception {
         byte[] buf;
         Address addr=Util.createRandomAddress(), addr2;
-        List<String> list=new ArrayList<String>(), list2;
+        List<String> list=new ArrayList<>(), list2;
         list.add("Bela");
         list.add("Jeannette");
 
@@ -292,17 +294,31 @@ public class UtilTest {
         assert obj == null;
 
         Object[] values={
-                Boolean.TRUE,
-                Boolean.FALSE,
-                new Byte((byte)22),
-                new Byte("2"),
-                new Character('5'),
-                new Double(3.14),
-                new Float(352.3),
-                new Integer(100),
-                new Long(322649),
-                new Short((short)22),
-                "Bela Ban"
+          Boolean.TRUE,
+          true,
+          false,
+          Boolean.FALSE,
+          (byte)22,
+          new Byte("2"),
+          '5',
+          3.14,
+          352.3f,
+          0,
+          100,
+          322649,
+          Integer.MAX_VALUE,
+          Integer.MIN_VALUE,
+          0L,
+          322649L,
+          Long.MAX_VALUE-50,
+          Long.MAX_VALUE,
+          Long.MIN_VALUE,
+          (short)22,
+          Short.MAX_VALUE,
+          Short.MIN_VALUE,
+          "Bela Ban",
+          new byte[]{'H', 'e', 'l', 'l', 'o'},
+          Util.generateArray(1024)
         };
         for(int i=0; i < values.length; i++) {
             Object value=values[i];
@@ -359,6 +375,37 @@ public class UtilTest {
     }
 
 
+    protected static class MyNioReceiver extends org.jgroups.blocks.cs.ReceiverAdapter {
+        protected String name;
+
+        @Override
+        public void receive(Address sender, byte[] buf, int offset, int length) {
+            name=new String(buf, offset, length);
+        }
+
+        @Override
+        public void receive(Address sender, ByteBuffer buf) {
+            Util.bufferToArray(sender, buf, this);
+        }
+    }
+
+    public void testBufferToArray() {
+        // test heap based ByteBuffer:
+        String hello="hello";
+        byte[] buffer=hello.getBytes();
+        ByteBuffer buf=(ByteBuffer)ByteBuffer.allocate(50).putInt(322649).put(buffer).flip();
+        buf.getInt();
+        MyNioReceiver receiver=new MyNioReceiver();
+        receiver.receive(null, buf);
+        assert receiver.name.equals(hello);
+
+        // test direct ByteBuffer:
+        buf=(ByteBuffer)ByteBuffer.allocateDirect(50).putInt(322649).put(buffer).flip();
+        buf.getInt();
+        receiver.receive(null, buf);
+        assert receiver.name.equals(hello);
+    }
+
     private static void marshalString(int size) throws Exception {
         byte[] tmp=new byte[size];
         String str=new String(tmp, 0, tmp.length);
@@ -377,6 +424,19 @@ public class UtilTest {
         Object obj2=Util.objectFromByteBuffer(buf);
         System.out.println("obj=" + obj + ", obj2=" + obj2 + " (type=" + obj.getClass().getName() + ", length=" + buf.length + " bytes)");
         Assert.assertEquals(obj, obj2);
+
+        if(obj instanceof Integer) { // test compressed ints and longs
+            buf=new byte[10];
+            Bits.writeIntCompressed((int)obj, buf, 0);
+            obj2=Bits.readIntCompressed(buf, 0);
+            assert obj.equals(obj2);
+        }
+        if(obj instanceof Long) { // test compressed ints and longs
+            buf=new byte[10];
+            Bits.writeLongCompressed((long)obj, buf, 0);
+            obj2=Bits.readLongCompressed(buf, 0);
+            assert obj.equals(obj2);
+        }
     }
 
 
@@ -401,7 +461,7 @@ public class UtilTest {
 
 
     public static void testWriteView() throws Exception {
-        List<Address> members=new ArrayList<Address>();
+        List<Address> members=new ArrayList<>();
         View v;
         Address a1=Util.createRandomAddress();
         Address a2=Util.createRandomAddress();
@@ -575,13 +635,13 @@ public class UtilTest {
     public static void testLeftMembers() {
         final Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
 
-        List<Address> v1=new ArrayList<Address>();
+        List<Address> v1=new ArrayList<>();
         v1.add(a);
         v1.add(b);
         v1.add(c);
         v1.add(d);
 
-        List<Address> v2=new ArrayList<Address>();
+        List<Address> v2=new ArrayList<>();
         v2.add(c);
         v2.add(d);
 
@@ -598,13 +658,13 @@ public class UtilTest {
     public static void testLeftMembers2() {
         final Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
 
-        List<Address> v1=new ArrayList<Address>();
+        List<Address> v1=new ArrayList<>();
         v1.add(a);
         v1.add(b);
         v1.add(c);
         v1.add(d);
 
-        List<Address> v2=new ArrayList<Address>();
+        List<Address> v2=new ArrayList<>();
         v2.add(c);
         v2.add(d);
         v2.add(a);
@@ -622,8 +682,8 @@ public class UtilTest {
     public static void testNewMembers() {
         final Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(),
                 d=Util.createRandomAddress(), e=Util.createRandomAddress();
-        List<Address> old=new ArrayList<Address>();
-        List<Address> new_list=new ArrayList<Address>();
+        List<Address> old=new ArrayList<>();
+        List<Address> new_list=new ArrayList<>();
 
         old.add(a); old.add(b); old.add(c);
         new_list.add(b);
@@ -643,7 +703,7 @@ public class UtilTest {
     }
 
     public static void testPickRandomElement() {
-        List<Integer> v=new ArrayList<Integer>();
+        List<Integer> v=new ArrayList<>();
         for(int i=0; i < 10; i++) {
             v.add(i);
         }
@@ -657,7 +717,7 @@ public class UtilTest {
 
 
     public static void testPickNext() {
-        List<Integer> list=new ArrayList<Integer>(10);
+        List<Integer> list=new ArrayList<>(10);
         for(int i=0; i < 10; i++)
             list.add(i);
         Integer num=Util.pickNext(list, 5);
@@ -698,7 +758,7 @@ public class UtilTest {
 
 
     public static void testAll() {
-        List<String> l=new ArrayList<String>();
+        List<String> l=new ArrayList<>();
         l.add("one"); l.add("two"); l.add("one");
         System.out.println("-- list is " + l);
         assert !(Util.all(l, "one"));
@@ -743,7 +803,7 @@ public class UtilTest {
         final String input="   hello world\nthis is \r\n just an example\r\nthis is line 2 \r\n";
         String line;
         InputStream in=new BufferedInputStream(new ByteArrayInputStream(input.getBytes()));
-        List<String> list=new ArrayList<String>(4);
+        List<String> list=new ArrayList<>(4);
 
         for(int i=0; i < 4; i++) {
             line=Util.readLine(in);
@@ -800,7 +860,7 @@ public class UtilTest {
         View v2=View.create(b, 2, b, c);
         View v3=View.create(b, 2, b, c);
 
-        Map<Address,View> map=new HashMap<Address,View>();
+        Map<Address,View> map=new HashMap<>();
         map.put(a, v1); map.put(b, v2); map.put(c, v3);
         StringBuilder sb=new StringBuilder("map:\n");
         for(Map.Entry<Address,View> entry: map.entrySet())
@@ -831,7 +891,7 @@ public class UtilTest {
         View v3=View.create(c, 2, c, d);
         View v4=View.create(c, 2, c, d);
 
-        Map<Address,View> map=new HashMap<Address,View>();
+        Map<Address,View> map=new HashMap<>();
         map.put(a, v1); map.put(b, v2); map.put(c, v3); map.put(d, v4);
 
         StringBuilder sb=new StringBuilder("map:\n");
@@ -863,7 +923,7 @@ public class UtilTest {
         View v3=View.create(a, 2, a, b, c, d);
         View v4=View.create(a, 3, a, b, c, d);
 
-        Map<Address,View> map=new HashMap<Address,View>();
+        Map<Address,View> map=new HashMap<>();
         map.put(a, v1); map.put(b, v2); map.put(c, v3); map.put(d, v4);
 
         StringBuilder sb=new StringBuilder("map:\n");
@@ -892,7 +952,7 @@ public class UtilTest {
         View v1=View.create(a, 1, a, b);
         View v2=View.create(c, 1, c, d);
 
-        Map<Address,View> map=new HashMap<Address,View>();
+        Map<Address,View> map=new HashMap<>();
         map.put(a, v1); map.put(b, v1); map.put(d, v2);
 
         StringBuilder sb=new StringBuilder("map:\n");

@@ -28,7 +28,7 @@ import java.util.concurrent.ConcurrentMap;
  */
 @MBean(description="Persistent Discovery Cache. Caches discovery information on disk.")
 public class PDC extends Protocol {
-    protected final ConcurrentMap<Address,PhysicalAddress> cache=new ConcurrentHashMap<Address,PhysicalAddress>();
+    protected final ConcurrentMap<Address,PhysicalAddress> cache=new ConcurrentHashMap<>();
 
     /* -----------------------------------------    Properties     ----------------------------------------------- */
     @Property(description="The absolute path of the directory for the disk cache. The mappings will be stored as " +
@@ -72,13 +72,13 @@ public class PDC extends Protocol {
 
             case Event.GET_PHYSICAL_ADDRESSES:
                 Collection<PhysicalAddress> addrs=(Collection<PhysicalAddress>)down_prot.down(evt);
-                Collection<PhysicalAddress> tmp=new HashSet<PhysicalAddress>(addrs);
+                Collection<PhysicalAddress> tmp=new HashSet<>(addrs);
                 tmp.addAll(cache.values());
                 return tmp;
 
             case Event.GET_LOGICAL_PHYSICAL_MAPPINGS:
                 Map<Address,PhysicalAddress> map=(Map<Address, PhysicalAddress>)down_prot.down(evt);
-                Map<Address,PhysicalAddress> new_map=new HashMap<Address,PhysicalAddress>(map);
+                Map<Address,PhysicalAddress> new_map=new HashMap<>(map);
                 new_map.putAll(cache);
                 return new_map;
 
@@ -208,7 +208,7 @@ public class PDC extends Protocol {
                 log.trace("Moved: " + tmpFile.getName() + "->" + destination.getName());
         }
         catch(Exception ioe) {
-            log.error("attempt to move failed at: " + tmpFile.getName() + "->" + destination.getName(), ioe);
+            log.error(Util.getMessage("AttemptToMoveFailedAt") + tmpFile.getName() + "->" + destination.getName(), ioe);
         }
         finally {
             deleteFile(tmpFile);
@@ -241,7 +241,7 @@ public class PDC extends Protocol {
         }
         catch(Exception e) {
             Util.close(out);
-            log.error("Failed to write temporary file: " + filename, e);
+            log.error(Util.getMessage("FailedToWriteTemporaryFile") + filename, e);
             deleteFile(file);
             return null;
         }
@@ -283,7 +283,7 @@ public class PDC extends Protocol {
                     log.trace("Deleted file result: "+file.getAbsolutePath() +" : "+result);
             }
             catch(Throwable e) {
-                log.error("Failed to delete file: " + file.getAbsolutePath(), e);
+                log.error(Util.getMessage("FailedToDeleteFile") + file.getAbsolutePath(), e);
             }
         }
         return result;

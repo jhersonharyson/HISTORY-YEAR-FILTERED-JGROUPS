@@ -43,7 +43,7 @@ public class ProtocolStack extends Protocol {
      * Holds the shared transports, keyed by 'TP.singleton_name'. The values are the transport and the use count for
      * init() (decremented by destroy()) and start() (decremented by stop()
      */
-    protected static final ConcurrentMap<String,Tuple<TP,RefCounter>> singleton_transports=new ConcurrentHashMap<String,Tuple<TP,RefCounter>>();
+    protected static final ConcurrentMap<String,Tuple<TP,RefCounter>> singleton_transports=new ConcurrentHashMap<>();
 
     protected Protocol                      top_prot;
     protected Protocol                      bottom_prot;
@@ -60,7 +60,7 @@ public class ProtocolStack extends Protocol {
             for(String key: keys) {
                 if(key.equals("props")) {
                     String tmp=printProtocolSpec(true);
-                    HashMap<String, String> map=new HashMap<String, String>(1);
+                    HashMap<String, String> map=new HashMap<>(1);
                     map.put("props", tmp);
                     return map;
                 }
@@ -69,7 +69,7 @@ public class ProtocolStack extends Protocol {
                     if(index >= 0) {
                         Util.MAX_LIST_PRINT_SIZE=Integer.valueOf(key.substring(index+1));
                     }
-                    HashMap<String, String> map=new HashMap<String, String>(1);
+                    HashMap<String, String> map=new HashMap<>(1);
                     map.put(max_list_print_size, String.valueOf(Util.MAX_LIST_PRINT_SIZE));
                     return map;
                 }
@@ -79,7 +79,7 @@ public class ProtocolStack extends Protocol {
                     StringBuilder sb=new StringBuilder();
                     for(Protocol prot: prots)
                         sb.append(prot.getName()).append("\n");
-                    HashMap<String, String> map=new HashMap<String, String>(1);
+                    HashMap<String, String> map=new HashMap<>(1);
                     map.put("protocols", sb.toString());
                     return map;
                 }
@@ -95,7 +95,7 @@ public class ProtocolStack extends Protocol {
                                     log.debug("removed protocol " + prot_name + " from stack");
                             }
                             catch(Exception e) {
-                                log.error("failed removing protocol " + prot_name, e);
+                                log.error(Util.getMessage("FailedRemovingProtocol") + prot_name, e);
                             }
                         }
                     }
@@ -118,7 +118,7 @@ public class ProtocolStack extends Protocol {
                         //prot.start();
                     }
                     catch(Exception e) {
-                        log.error("failed creating an instance of " + prot_name, e);
+                        log.error(Util.getMessage("FailedCreatingAnInstanceOf") + prot_name, e);
                         break;
                     }
 
@@ -141,7 +141,7 @@ public class ProtocolStack extends Protocol {
                     String neighbor_prot=key.trim();
                     Protocol neighbor=findProtocol(neighbor_prot);
                     if(neighbor == null) {
-                        log.error("Neighbor protocol " + neighbor_prot + " not found in stack");
+                        log.error(Util.getMessage("NeighborProtocol") + neighbor_prot + " not found in stack");
                         break;
                     }
                     int position=tmp.equalsIgnoreCase("above")? ABOVE : BELOW;
@@ -149,15 +149,16 @@ public class ProtocolStack extends Protocol {
                         insertProtocol(prot, position, neighbor.getClass());
                     }
                     catch(Exception e) {
-                        log.error("failed inserting protocol " + prot_name + " " + tmp + " " + neighbor_prot, e);
+                        log.error(Util.getMessage("FailedInsertingProtocol") + prot_name + " " + tmp + " " + neighbor_prot, e);
                     }
 
                     try {
+                        callAfterCreationHook(prot, afterCreationHook());
                         prot.init();
                         prot.start();
                     }
                     catch(Exception e) {
-                        log.error("failed creating an instance of " + prot_name, e);
+                        log.error(Util.getMessage("FailedCreatingAnInstanceOf") + prot_name, e);
                     }
                 }
             }
@@ -184,15 +185,15 @@ public class ProtocolStack extends Protocol {
 
     public JChannel getChannel() {return channel;}
 
-    public void setChannel(JChannel ch) {
-        this.channel=ch;
+    public ProtocolStack setChannel(JChannel ch) {
+        this.channel=ch; return this;
     }
 
 
     /** Returns all protocols in a list, from top to bottom. <em>These are not copies of protocols,
      so modifications will affect the actual instances !</em> */
     public List<Protocol> getProtocols() {
-        List<Protocol> v=new ArrayList<Protocol>(15);
+        List<Protocol> v=new ArrayList<>(15);
         Protocol p=top_prot;
         while(p != null) {
             v.add(p);
@@ -204,7 +205,7 @@ public class ProtocolStack extends Protocol {
 
     public List<Protocol> copyProtocols(ProtocolStack targetStack) throws IllegalAccessException, InstantiationException {
         List<Protocol> list=getProtocols();
-        List<Protocol> retval=new ArrayList<Protocol>(list.size());
+        List<Protocol> retval=new ArrayList<>(list.size());
         for(Protocol prot: list) {
             Protocol new_prot=prot.getClass().newInstance();
             new_prot.setProtocolStack(targetStack);
@@ -227,7 +228,7 @@ public class ProtocolStack extends Protocol {
                     String methodName=method.getName();
                     if(method.isAnnotationPresent(Property.class) && Configurator.isSetPropertyMethod(method)) {
                         Property annotation=method.getAnnotation(Property.class);
-                        List<String> possible_names=new LinkedList<String>();
+                        List<String> possible_names=new LinkedList<>();
                         if(annotation.name() != null)
                             possible_names.add(annotation.name());
                         possible_names.add(Util.methodNameToAttributeName(methodName));
@@ -261,7 +262,7 @@ public class ProtocolStack extends Protocol {
      */
     public Map<String,Object> dumpStats() {
         Protocol p;
-        Map<String,Object> retval=new HashMap<String,Object>(), tmp;
+        Map<String,Object> retval=new HashMap<>(), tmp;
         String prot_name;
 
         p=top_prot;
@@ -285,7 +286,7 @@ public class ProtocolStack extends Protocol {
         if(prot == null)
             return null;
 
-        Map<String,Object> retval=new HashMap<String,Object>(), tmp;
+        Map<String,Object> retval=new HashMap<>(), tmp;
         tmp=prot.dumpStats();
         if(tmp != null) {
             if(attrs != null && !attrs.isEmpty()) {
@@ -415,7 +416,7 @@ public class ProtocolStack extends Protocol {
     }
 
     private static Map<String,String> getProps(Protocol prot) {
-        Map<String,String> retval=new HashMap<String,String>();
+        Map<String,String> retval=new HashMap<>();
 
         for(Class<?> clazz=prot.getClass(); clazz != null; clazz=clazz.getSuperclass()) {
 
@@ -446,7 +447,7 @@ public class ProtocolStack extends Protocol {
                 String methodName=method.getName();
                 if(method.isAnnotationPresent(Property.class) && Configurator.isSetPropertyMethod(method)) {
                     annotation=method.getAnnotation(Property.class);
-                    List<String> possible_names=new LinkedList<String>();
+                    List<String> possible_names=new LinkedList<>();
                     if(annotation.name() != null)
                         possible_names.add(annotation.name());
                     possible_names.add(Util.methodNameToAttributeName(methodName));
@@ -701,13 +702,13 @@ public class ProtocolStack extends Protocol {
             prot.stop();
         }
         catch(Throwable t) {
-            log.error("failed stopping " + prot.getName() + ": " + t);
+            log.error(Util.getMessage("FailedStopping") + prot.getName() + ": " + t);
         }
         try {
             prot.destroy();
         }
         catch(Throwable t) {
-            log.error("failed destroying " + prot.getName() + ": " + t);
+            log.error(Util.getMessage("FailedDestroying") + prot.getName() + ": " + t);
         }
         return prot;
     }
@@ -785,7 +786,7 @@ public class ProtocolStack extends Protocol {
 
         if(new_prot.getUpProtocol() == this)
             top_prot=new_prot;
-
+        callAfterCreationHook(new_prot, afterCreationHook());
         new_prot.init();
     }
 
@@ -845,18 +846,20 @@ public class ProtocolStack extends Protocol {
                     synchronized(singleton_transports) {
                         Tuple<TP,RefCounter> val=singleton_transports.get(singleton_name);
                         if(val == null)
-                            singleton_transports.put(singleton_name, new Tuple<TP,RefCounter>(transport,new RefCounter((short)1, (short)0)));
+                            singleton_transports.put(singleton_name, new Tuple<>(transport,new RefCounter((short)1, (short)0)));
                         else {
                             RefCounter counter=val.getVal2();
                             short num_inits=counter.incrementInitCount();
                             if(num_inits >= 1)
                                 continue;
                         }
+                        callAfterCreationHook(prot, prot.afterCreationHook());
                         prot.init(); // if shared TP, call init() with lock : https://issues.jboss.org/browse/JGRP-1887
                         continue;
                     }
                 }
             }
+            callAfterCreationHook(prot, prot.afterCreationHook());
             prot.init();
         }
     }
@@ -1090,5 +1093,13 @@ public class ProtocolStack extends Protocol {
         }
     }
 
+
+    protected static void callAfterCreationHook(Protocol prot, String classname) throws Exception {
+        if(classname == null || prot == null)
+            return;
+        Class<ProtocolHook> clazz=Util.loadClass(classname, prot.getClass());
+        ProtocolHook hook=clazz.newInstance();
+        hook.afterCreation(prot);
+    }
 
 }

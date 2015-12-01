@@ -18,6 +18,7 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.util.*;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -59,7 +60,7 @@ abstract public class Locking extends Protocol {
     // client side locks
     protected final ClientLockTable       client_lock_table=new ClientLockTable();
 
-    protected final Set<LockNotification> lock_listeners=new HashSet<LockNotification>();
+    protected final Set<LockNotification> lock_listeners=new CopyOnWriteArraySet<>();
 
     protected final static AtomicInteger  current_lock_id=new AtomicInteger(1);
     
@@ -299,7 +300,7 @@ abstract public class Locking extends Protocol {
         this.view=view;
         log.debug("view=%s", view);
         List<Address> members=view.getMembers();
-        List<Response> responses=new ArrayList<Response>();
+        List<Response> responses=new ArrayList<>();
         for(Map.Entry<String,ServerLock> entry: server_locks.entrySet()) {
             String lock_name=entry.getKey();
             ServerLock server_lock=entry.getValue();
@@ -424,7 +425,7 @@ abstract public class Locking extends Protocol {
             if (server_lock != null)
                 server_lock.condition.addWaiter(owner);
             else
-                log.error("Condition await was received but lock was not created. Waiter may block forever");
+                log.error(Util.getMessage("ConditionAwaitWasReceivedButLockWasNotCreatedWaiterMayBlockForever"));
         }
         finally {
             lock.unlock();
@@ -439,7 +440,7 @@ abstract public class Locking extends Protocol {
             if (server_lock != null)
                 server_lock.condition.removeWaiter(owner);
             else
-                log.error("Condition await delete was received, but lock was gone");
+                log.error(Util.getMessage("ConditionAwaitDeleteWasReceivedButLockWasGone"));
         }
         finally {
             lock.unlock();
@@ -452,7 +453,7 @@ abstract public class Locking extends Protocol {
             lock.condition.signaled();
         }
         else {
-            log.error("Condition response was client lock was not present. Ignored signal.");
+            log.error(Util.getMessage("ConditionResponseWasClientLockWasNotPresentIgnoredSignal"));
         }
     }
     
@@ -465,7 +466,7 @@ abstract public class Locking extends Protocol {
             if (server_lock != null)
                 rsp=server_lock.handleRequest(req);
             else
-                log.error("Condition signal was received but lock was not created. Couldn't notify anyone.");
+                log.error(Util.getMessage("ConditionSignalWasReceivedButLockWasNotCreatedCouldnTNotifyAnyone"));
         }
         finally {
             lock.unlock();
@@ -619,7 +620,7 @@ abstract public class Locking extends Protocol {
     protected class ServerLock {
         protected final String          lock_name;
         protected Owner                 current_owner;
-        protected final List<Request>   queue=new ArrayList<Request>();
+        protected final List<Request>   queue=new ArrayList<>();
         protected final ServerCondition condition;
 
         public ServerLock(String lock_name) {
@@ -796,7 +797,7 @@ abstract public class Locking extends Protocol {
 
     protected class ServerCondition {
         protected final ServerLock   lock;
-        protected final Queue<Owner> queue=new ArrayDeque<Owner>();
+        protected final Queue<Owner> queue=new ArrayDeque<>();
         
         public ServerCondition(ServerLock lock) {
             this.lock = lock;
@@ -909,7 +910,7 @@ abstract public class Locking extends Protocol {
 
         protected synchronized void lockGranted(int lock_id) {
             if(this.lock_id != lock_id) {
-                log.error("discarded LOCK-GRANTED response with lock-id=" + lock_id + ", my lock-id=" + this.lock_id);
+                log.error(Util.getMessage("DiscardedLOCKGRANTEDResponseWithLockId") + lock_id + ", my lock-id=" + this.lock_id);
                 return;
             }
             acquired=true;
@@ -918,7 +919,7 @@ abstract public class Locking extends Protocol {
 
         protected synchronized void lockDenied(int lock_id) {
             if(this.lock_id != lock_id) {
-                log.error("discarded LOCK-DENIED response with lock-id=" + lock_id + ", my lock_id=" + this.lock_id);
+                log.error(Util.getMessage("DiscardedLOCKDENIEDResponseWithLockId") + lock_id + ", my lock_id=" + this.lock_id);
                 return;
             }
             denied=true;
@@ -990,13 +991,12 @@ abstract public class Locking extends Protocol {
 
                         while(wait_time > 0 && !acquired && !denied) {
                             try {
-                                this.wait(TimeUnit.MILLISECONDS.convert(wait_time, TimeUnit.NANOSECONDS));
+                                long wait_ms=TimeUnit.MILLISECONDS.convert(wait_time, TimeUnit.NANOSECONDS);
+                                if(wait_ms <= 0)
+                                    break;
+                                this.wait(wait_ms);
                             }
                             catch(InterruptedException e) {
-                                //if (!acquired && !denied) {
-                                  //  _unlock(true);
-                                    //throw e;
-                                //}
                                 interrupted=true;
                             }
                             finally {
@@ -1035,7 +1035,7 @@ abstract public class Locking extends Protocol {
             if(owners == null) {
                 if(!create_if_absent)
                     return null;
-                owners=new HashMap<Owner,ClientLock>();
+                owners=new HashMap<>();
                 Map<Owner,ClientLock> existing=table.putIfAbsent(name,owners);
                 if(existing != null)
                     owners=existing;
@@ -1062,7 +1062,7 @@ abstract public class Locking extends Protocol {
         }
 
         protected void unlockAll() {
-            List<ClientLock> lock_list=new ArrayList<ClientLock>();
+            List<ClientLock> lock_list=new ArrayList<>();
             synchronized(this) {
                 Collection<Map<Owner,ClientLock>> maps=table.values();
                 for(Map<Owner,ClientLock> map: maps)
@@ -1123,7 +1123,7 @@ abstract public class Locking extends Protocol {
          * This is okay only having 1 since a client condition is 1 per 
          * lock_name, thread id combination.
          */
-        protected volatile AtomicReference<Thread> parker=new AtomicReference<Thread>();
+        protected volatile AtomicReference<Thread> parker=new AtomicReference<>();
         
         public ClientCondition(ClientLock lock) {
             this.lock = lock;

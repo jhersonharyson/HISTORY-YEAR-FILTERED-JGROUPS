@@ -15,8 +15,8 @@ import java.util.List;
  * @author Bela Ban
  */
 public class ParticipantGmsImpl extends ServerGmsImpl {
-    private final List<Address>     suspected_mbrs=new ArrayList<Address>(11);
-    private final Promise<Boolean>  leave_promise=new Promise<Boolean>();
+    private final List<Address>     suspected_mbrs=new ArrayList<>(11);
+    private final Promise<Boolean>  leave_promise=new Promise<>();
 
 
     public ParticipantGmsImpl(GMS g) {
@@ -44,29 +44,23 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
      * Else send handleLeave() to coord until success
      */
     public void leave(Address mbr) {
-        Address coord;
-        int max_tries=3;
-
         leave_promise.reset();
-
         if(mbr.equals(gms.local_addr))
             leaving=true;
 
-        while((coord=gms.determineCoordinator()) != null && max_tries-- > 0) {
-            if(gms.local_addr.equals(coord)) {            // I'm the coordinator
+        Address coord=gms.determineCoordinator();
+        if(coord != null) {
+            if(gms.local_addr.equals(coord)) { // I'm the coordinator
                 gms.becomeCoordinator();
-                // gms.getImpl().handleLeave(mbr, false);    // regular leave
-                gms.getImpl().leave(mbr);    // regular leave
+                gms.getImpl().leave(mbr);      // regular leave
                 return;
             }
 
             log.trace("%s: sending LEAVE request to %s", gms.local_addr, coord);
             sendLeaveMessage(coord, mbr);
             Boolean result=leave_promise.getResult(gms.leave_timeout);
-            if(result != null) {
+            if(result != null)
                 log.trace("%s: got LEAVE response from %s", gms.local_addr, coord);
-                break;
-            }
         }
         gms.becomeClient();
     }
@@ -93,7 +87,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
 
 
     public void suspect(Address mbr) {
-        Collection<Request> suspected=new LinkedHashSet<Request>(1);
+        Collection<Request> suspected=new LinkedHashSet<>(1);
         suspected.add(new Request(Request.SUSPECT,mbr,true));
         handleMembershipChange(suspected);
     }
@@ -107,7 +101,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
 
 
     public void handleMembershipChange(Collection<Request> requests) {
-        Collection<Address> suspectedMembers=new LinkedHashSet<Address>(requests.size());
+        Collection<Address> suspectedMembers=new LinkedHashSet<>(requests.size());
         for(Request req: requests)
             if(req.type == Request.SUSPECT)
                 suspectedMembers.add(req.mbr);

@@ -12,10 +12,7 @@ import org.jgroups.stack.Protocol;
 import org.jgroups.stack.StateTransferInfo;
 import org.jgroups.util.*;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -40,17 +37,18 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * @author Bela Ban
  */
-public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
+public class MessageDispatcher implements AsyncRequestHandler, ChannelListener, Closeable {
     protected Channel                               channel;
     protected RequestCorrelator                     corr;
     protected MessageListener                       msg_listener;
     protected MembershipListener                    membership_listener;
     protected RequestHandler                        req_handler;
     protected boolean                               async_dispatching;
+    protected boolean                               wrap_exceptions=true;
     protected ProtocolAdapter                       prot_adapter;
-    protected volatile Collection<Address>          members=new HashSet<Address>();
+    protected volatile Collection<Address>          members=new HashSet<>();
     protected Address                               local_addr;
-    protected final Log                             log=LogFactory.getLog(getClass());
+    protected final Log                             log=LogFactory.getLog(MessageDispatcher.class);
     protected boolean                               hardware_multicast_supported=false;
     protected final AtomicInteger                   sync_unicasts=new AtomicInteger(0);
     protected final AtomicInteger                   async_unicasts=new AtomicInteger(0);
@@ -58,7 +56,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
     protected final AtomicInteger                   async_multicasts=new AtomicInteger(0);
     protected final AtomicInteger                   sync_anycasts=new AtomicInteger(0);
     protected final AtomicInteger                   async_anycasts=new AtomicInteger(0);
-    protected final Set<ChannelListener>            channel_listeners=new CopyOnWriteArraySet<ChannelListener>();
+    protected final Set<ChannelListener>            channel_listeners=new CopyOnWriteArraySet<>();
     protected final DiagnosticsHandler.ProbeHandler probe_handler=new MyProbeHandler();
 
 
@@ -99,6 +97,12 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         return this;
     }
 
+    public boolean                  wrapExceptions()               {return wrap_exceptions;}
+    public MessageDispatcher        wrapExceptions(boolean flag)   {
+        wrap_exceptions=flag;
+        if(corr != null)
+            corr.wrapExceptions(flag);
+        return this;}
 
     public UpHandler getProtocolAdapter() {
         return prot_adapter;
@@ -112,7 +116,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
      */
     protected void setMembers(List<Address> new_mbrs) {
         if(new_mbrs != null)
-            members=new HashSet<Address>(new_mbrs); // volatile write - seen by a subsequent read
+            members=new HashSet<>(new_mbrs); // volatile write - seen by a subsequent read
     }
 
 
@@ -134,7 +138,8 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
     public void start() {
         if(corr == null)
-            corr=createRequestCorrelator(prot_adapter, this, local_addr).asyncDispatching(async_dispatching);
+            corr=createRequestCorrelator(prot_adapter, this, local_addr)
+              .asyncDispatching(async_dispatching).wrapExceptions(this.wrap_exceptions);
         correlatorStarted();
         corr.start();
 
@@ -159,6 +164,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         ;
     }
 
+    @Override public void close() throws IOException {stop();}
 
     public void stop() {
         if(corr != null)
@@ -202,7 +208,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         // method and still integrate with a MuxUpHandler
         installUpHandler(prot_adapter, false);
     }
-    
+
     /**
      * Sets the given UpHandler as the UpHandler for the channel, or, if the
      * channel already has a Muxer installed as it's UpHandler, sets the given
@@ -214,9 +220,9 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
      * Passing <code>false</code> as the <code>canReplace</code> value allows
      * callers to use this method to install defaults without concern about
      * inadvertently overriding
-     * 
+     *
      * @param handler the UpHandler to install
-     * @param canReplace <code>true</code> if an existing Channel upHandler or 
+     * @param canReplace <code>true</code> if an existing Channel upHandler or
      *              Muxer default upHandler can be replaced; <code>false</code>
      *              if this method shouldn't install
      */
@@ -233,13 +239,12 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
                mux.setDefaultHandler(handler);
            }
            else if (canReplace) {
-               log.warn("Channel Muxer already has a default up handler installed (" +
-                     mux.getDefaultHandler() + ") but now it is being overridden"); 
+               log.warn("Channel Muxer already has a default up handler installed (%s) but now it is being overridden",  mux.getDefaultHandler());
                mux.setDefaultHandler(handler);
            }
        }
        else if (canReplace) {
-           log.warn("Channel already has an up handler installed (" + existing + ") but now it is being overridden");
+           log.warn("Channel already has an up handler installed (%s) but now it is being overridden", existing);
            channel.setUpHandler(handler);
        }
     }
@@ -276,7 +281,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
                                                                  RequestOptions options,
                                                                  FutureListener<RspList<T>> listener) throws Exception {
         GroupRequest<T> req=cast(dests,msg,options,false, listener);
-        return req != null? req : new NullFuture<RspList<T>>(new RspList<T>());
+        return req != null? req : new NullFuture<>(new RspList<T>());
     }
 
     /**
@@ -300,16 +305,19 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         if(msg.getDest() != null && !(msg.getDest() instanceof AnycastAddress))
             throw new IllegalArgumentException("message destination is non-null, cannot send message");
 
-        if(options != null) {
-            msg.setFlag(options.getFlags()).setTransientFlag(options.getTransientFlags());
-            if(options.getScope() > 0)
-                msg.setScope(options.getScope());
+        if(options == null) {
+            log.warn("request options were null, using default of sync");
+            options=RequestOptions.SYNC();
         }
+
+        msg.setFlag(options.getFlags()).setTransientFlag(options.getTransientFlags());
+        if(options.getScope() > 0)
+            msg.setScope(options.getScope());
 
         List<Address> real_dests;
         // we need to clone because we don't want to modify the original
         if(dests != null) {
-            real_dests=new ArrayList<Address>();
+            real_dests=new ArrayList<>(dests.size());
             for(Address dest: dests) {
                 if(dest instanceof SiteAddress || this.members.contains(dest)) {
                     if(!real_dests.contains(dest))
@@ -318,7 +326,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
             }
         }
         else
-            real_dests=new ArrayList<Address>(members);
+            real_dests=new ArrayList<>(members);
 
         // if local delivery is off, then we should not wait for the message from the local member.
         // therefore remove it from the membership
@@ -330,7 +338,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
                 real_dests.remove(local_addr);
         }
 
-        if(options != null && options.hasExclusionList()) {
+        if(options.hasExclusionList()) {
             Address[] exclusion_list=options.exclusionList();
             for(Address excluding: exclusion_list)
                 real_dests.remove(excluding);
@@ -338,7 +346,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
         // don't even send the message if the destination list is empty
         if(log.isTraceEnabled())
-            log.trace("real_dests=" + real_dests);
+            log.trace("real_dests=%s", real_dests);
 
         if(real_dests.isEmpty()) {
             if(log.isTraceEnabled())
@@ -346,25 +354,21 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
             return null;
         }
 
-        if(options != null) {
-            boolean async=options.getMode() == ResponseMode.GET_NONE;
-            if(options.getAnycasting()) {
-                if(async) async_anycasts.incrementAndGet();
-                else sync_anycasts.incrementAndGet();
-            }
-            else {
-                if(async) async_multicasts.incrementAndGet();
-                else sync_multicasts.incrementAndGet();
-            }
+        boolean async=options.getMode() == ResponseMode.GET_NONE;
+        if(options.getAnycasting()) {
+            if(async) async_anycasts.incrementAndGet();
+            else sync_anycasts.incrementAndGet();
+        }
+        else {
+            if(async) async_multicasts.incrementAndGet();
+            else sync_multicasts.incrementAndGet();
         }
 
-        GroupRequest<T> req=new GroupRequest<T>(msg, corr, real_dests, options);
+        GroupRequest<T> req=new GroupRequest<>(msg, corr, real_dests, options);
         if(listener != null)
             req.setListener(listener);
-        if(options != null) {
-            req.setResponseFilter(options.getRspFilter());
-            req.setAnycasting(options.getAnycasting());
-        }
+        req.setResponseFilter(options.getRspFilter());
+        req.setAnycasting(options.getAnycasting());
         req.setBlockForResults(block_for_results);
         req.execute();
         return req;
@@ -395,20 +399,23 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         if(dest == null)
             throw new IllegalArgumentException("message destination is null, cannot send message");
 
-        if(opts != null) {
-            msg.setFlag(opts.getFlags()).setTransientFlag(opts.getTransientFlags());
-            if(opts.getScope() > 0)
-                msg.setScope(opts.getScope());
-            if(opts.getMode() == ResponseMode.GET_NONE)
-                async_unicasts.incrementAndGet();
-            else
-                sync_unicasts.incrementAndGet();
+        if(opts == null) {
+            log.warn("request options were null, using default of sync");
+            opts=RequestOptions.SYNC();
         }
 
-        UnicastRequest<T> req=new UnicastRequest<T>(msg, corr, dest, opts);
+        msg.setFlag(opts.getFlags()).setTransientFlag(opts.getTransientFlags());
+        if(opts.getScope() > 0)
+            msg.setScope(opts.getScope());
+        if(opts.getMode() == ResponseMode.GET_NONE)
+            async_unicasts.incrementAndGet();
+        else
+            sync_unicasts.incrementAndGet();
+
+        UnicastRequest<T> req=new UnicastRequest<>(msg, corr, dest, opts);
         req.execute();
 
-        if(opts != null && opts.getMode() == ResponseMode.GET_NONE)
+        if(opts.getMode() == ResponseMode.GET_NONE)
             return null;
 
         Rsp<T> rsp=req.getResult();
@@ -447,23 +454,26 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         if(dest == null)
             throw new IllegalArgumentException("message destination is null, cannot send message");
 
-        if(options != null) {
-            msg.setFlag(options.getFlags()).setTransientFlag(options.getTransientFlags());
-            if(options.getScope() > 0)
-                msg.setScope(options.getScope());
-            if(options.getMode() == ResponseMode.GET_NONE)
-                async_unicasts.incrementAndGet();
-            else
-                sync_unicasts.incrementAndGet();
+        if(options == null) {
+            log.warn("request options were null, using default of sync");
+            options=RequestOptions.SYNC();
         }
 
-        UnicastRequest<T> req=new UnicastRequest<T>(msg, corr, dest, options);
+        msg.setFlag(options.getFlags()).setTransientFlag(options.getTransientFlags());
+        if(options.getScope() > 0)
+            msg.setScope(options.getScope());
+        if(options.getMode() == ResponseMode.GET_NONE)
+            async_unicasts.incrementAndGet();
+        else
+            sync_unicasts.incrementAndGet();
+
+        UnicastRequest<T> req=new UnicastRequest<>(msg, corr, dest, options);
         if(listener != null)
             req.setListener(listener);
         req.setBlockForResults(false);
         req.execute();
-        if(options != null && options.getMode() == ResponseMode.GET_NONE)
-            return new NullFuture<T>(null);
+        if(options.getMode() == ResponseMode.GET_NONE)
+            return new NullFuture<>(null);
         return req;
     }
 
@@ -484,6 +494,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
 
     /* ------------------------ RequestHandler Interface ---------------------- */
+    @Override
     public Object handle(Message msg) throws Exception {
         if(req_handler != null)
             return req_handler.handle(msg);
@@ -494,6 +505,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
 
     /* -------------------- AsyncRequestHandler Interface --------------------- */
+    @Override
     public void handle(Message request, Response response) throws Exception {
         if(req_handler != null) {
             if(req_handler instanceof AsyncRequestHandler)
@@ -517,6 +529,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
     /* --------------------- Interface ChannelListener ---------------------- */
 
+    @Override
     public void channelConnected(Channel channel) {
         for(ChannelListener l: channel_listeners) {
             try {
@@ -528,6 +541,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         }
     }
 
+    @Override
     public void channelDisconnected(Channel channel) {
         stop();
         for(ChannelListener l: channel_listeners) {
@@ -540,6 +554,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         }
     }
 
+    @Override
     public void channelClosed(Channel channel) {
         stop();
         for(ChannelListener l: channel_listeners) {
@@ -603,8 +618,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
                 break;
 
             case Event.SET_LOCAL_ADDRESS:
-                if(log.isTraceEnabled())
-                    log.trace("setting local_addr (" + local_addr + ") to " + evt.getArg());
+                log.trace("setting local_addr (%s) to %s", local_addr, evt.getArg());
                 local_addr=(Address)evt.getArg();
                 break;
 
@@ -629,8 +643,9 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
     class MyProbeHandler implements DiagnosticsHandler.ProbeHandler {
 
+        @Override
         public Map<String,String> handleProbe(String... keys) {
-            Map<String,String> retval=new HashMap<String,String>();
+            Map<String,String> retval=new HashMap<>();
             for(String key: keys) {
                 if("rpcs".equals(key)) {
                     String channel_name = channel != null ? channel.getClusterName() : "";
@@ -653,6 +668,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
             return retval;
         }
 
+        @Override
         public String[] supportedKeys() {
             return new String[]{"rpcs", "rpcs-reset"};
         }
@@ -664,6 +680,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
         /* ------------------------- Protocol Interface --------------------------- */
 
+        @Override
         public String getName() {
             return "MessageDispatcher";
         }
@@ -672,6 +689,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
         /**
          * Called by channel (we registered before) when event is received. This is the UpHandler interface.
          */
+        @Override
         public Object up(Event evt) {
             if(corr != null) {
                 if(!corr.receive(evt)) {
@@ -688,6 +706,7 @@ public class MessageDispatcher implements AsyncRequestHandler, ChannelListener {
 
 
 
+        @Override
         public Object down(Event evt) {
             if(channel != null) {
                 if(evt.getType() == Event.MSG && !(channel.isConnected() || channel.isConnecting()))

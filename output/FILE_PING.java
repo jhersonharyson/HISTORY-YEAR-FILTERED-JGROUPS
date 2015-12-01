@@ -5,16 +5,16 @@ import org.jgroups.Event;
 import org.jgroups.PhysicalAddress;
 import org.jgroups.View;
 import org.jgroups.annotations.ManagedAttribute;
+import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.util.Responses;
+import org.jgroups.util.TimeScheduler;
 import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.Future;
 
 
 /**
@@ -36,6 +36,19 @@ public class FILE_PING extends Discovery {
     @Deprecated @Property(description="Interval (in milliseconds) at which the own Address is written. 0 disables it.")
     protected long interval=60000;
 
+    @Property(description="If true, on a view change, the new coordinator removes files from old coordinators")
+    protected boolean remove_old_coords_on_view_change=false;
+
+    @Property(description="If true, on a view change, the new coordinator removes all files except its own")
+    protected boolean remove_all_files_on_view_change=false;
+
+    @Property(description="The max number of times my own information should be written to the DB after a view change")
+    protected int info_writer_max_writes_after_view=2;
+
+    @Property(description="Interval (in ms) at which the info writer should kick in")
+    protected long info_writer_sleep_time=10000;
+
+
     @ManagedAttribute(description="Number of writes to the file system or cloud store")
     protected int writes;
 
@@ -48,9 +61,15 @@ public class FILE_PING extends Discovery {
     protected static final FilenameFilter filter=new FilenameFilter() {
         public boolean accept(File dir, String name) {return name.endsWith(SUFFIX);}
     };
-    protected volatile View               prev_view;
+    protected Future<?>                   info_writer;
 
     public boolean isDynamic() {return true;}
+
+    @ManagedAttribute(description="Whether the InfoWriter task is running")
+    public synchronized boolean isInfoWriterRunning() {return info_writer != null && !info_writer.isDone();}
+
+    @ManagedOperation(description="Causes the member to write its own information into the DB, replacing an existing entry")
+    public void writeInfo() {if(is_coord) writeAll();}
 
     public void init() throws Exception {
         super.init();
@@ -90,7 +109,7 @@ public class FILE_PING extends Discovery {
             if(responses.isEmpty()) {
                 PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS,local_addr));
                 PingData coord_data=new PingData(local_addr, true, UUID.get(local_addr), physical_addr).coord(is_coord);
-                write(Arrays.asList(coord_data), cluster_name);
+                write(Collections.singletonList(coord_data), cluster_name);
                 return;
             }
 
@@ -126,7 +145,8 @@ public class FILE_PING extends Discovery {
 
     protected static String addressToFilename(Address mbr) {
         String logical_name=UUID.get(mbr);
-        return addressAsString(mbr) + (logical_name != null? "." + logical_name + SUFFIX : SUFFIX);
+        return (addressAsString(mbr) + (logical_name != null? "." + logical_name + SUFFIX : SUFFIX))
+            .replace(File.separatorChar, '-');
     }
 
     protected void createRootDir() {
@@ -144,12 +164,24 @@ public class FILE_PING extends Discovery {
 
     // remove all files which are not from the current members
     protected void handleView(View new_view, View old_view, boolean coord_changed) {
-        if(coord_changed) {
-            if(is_coord)
+        if(is_coord) {
+            if(coord_changed) {
+                if(remove_all_files_on_view_change)
+                    removeAll(cluster_name);
+                else if(remove_old_coords_on_view_change) {
+                    Address old_coord=old_view != null? old_view.getCreator() : null;
+                    if(old_coord != null)
+                        remove(cluster_name, old_coord);
+                }
+            }
+            if(coord_changed || View.diff(old_view, new_view)[1].length > 0) {
                 writeAll();
-            else
-                remove(cluster_name, local_addr);
+                if(remove_all_files_on_view_change || remove_old_coords_on_view_change)
+                    startInfoWriter();
+            }
         }
+        else if(coord_changed) // I'm no longer the coordinator
+            remove(cluster_name, local_addr);
     }
 
     protected void remove(String clustername, Address addr) {
@@ -165,6 +197,18 @@ public class FILE_PING extends Discovery {
         String filename=addressToFilename(addr);
         File file=new File(dir, filename);
         deleteFile(file);
+    }
+
+    /** Removes all files for the given cluster name */
+    protected void removeAll(String clustername) {
+        if(clustername == null)
+            return;
+        File dir=new File(root_dir, clustername);
+        if(!dir.exists())
+            return;
+        File[] files=dir.listFiles(filter); // finds all files ending with '.list'
+        for(File file: files)
+            file.delete();
     }
 
 
@@ -225,7 +269,7 @@ public class FILE_PING extends Discovery {
         Map<Address,PhysicalAddress> cache_contents=
           (Map<Address,PhysicalAddress>)down_prot.down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS, false));
 
-        List<PingData> list=new ArrayList<PingData>(cache_contents.size());
+        List<PingData> list=new ArrayList<>(cache_contents.size());
         for(Map.Entry<Address,PhysicalAddress> entry: cache_contents.entrySet()) {
             Address         addr=entry.getKey();
             PhysicalAddress phys_addr=entry.getValue();
@@ -247,7 +291,7 @@ public class FILE_PING extends Discovery {
             write(list, new FileOutputStream(destination));
         }
         catch(Exception ioe) {
-            log.error("attempt to write data failed at " + clustername + " : " + destination.getName(), ioe);
+            log.error(Util.getMessage("AttemptToWriteDataFailedAt") + clustername + " : " + destination.getName(), ioe);
             deleteFile(destination);
         }
     }
@@ -275,10 +319,45 @@ public class FILE_PING extends Discovery {
                 log.trace("Deleted file result: "+file.getAbsolutePath() +" : "+result);
             }
             catch(Throwable e) {
-                log.error("Failed to delete file: " + file.getAbsolutePath(), e);
+                log.error(Util.getMessage("FailedToDeleteFile") + file.getAbsolutePath(), e);
             }
         }
         return result;
+    }
+
+    protected synchronized void startInfoWriter() {
+        if(info_writer == null || info_writer.isDone())
+            info_writer=timer.scheduleWithDynamicInterval(new InfoWriter(info_writer_max_writes_after_view, info_writer_sleep_time));
+    }
+
+    protected synchronized void stopInfoWriter() {
+        if(info_writer != null)
+            info_writer.cancel(false);
+    }
+
+
+    /** Class which calls writeAll() a few times. Started after a view change in which an old coord left */
+    protected class InfoWriter implements TimeScheduler.Task {
+        protected final int  max_writes;
+        protected int        num_writes;
+        protected final long sleep_interval;
+
+        public InfoWriter(int max_writes, long sleep_interval) {
+            this.max_writes=max_writes;
+            this.sleep_interval=sleep_interval;
+        }
+
+        @Override
+        public long nextInterval() {
+            if(++num_writes > max_writes)
+                return 0; // discontinues this task
+            return Math.max(1000, Util.random(sleep_interval));
+        }
+
+        @Override
+        public void run() {
+            writeAll();
+        }
     }
 
 

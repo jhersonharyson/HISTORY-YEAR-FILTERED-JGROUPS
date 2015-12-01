@@ -36,7 +36,7 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
     protected double                         avg_state_size=0;
     protected Address                        local_addr;
     protected volatile View                  view;
-    protected final List<Address>            members=new ArrayList<Address>();
+    protected final List<Address>            members=new ArrayList<>();
 
     /** List of members requesting state */
     protected final ProcessingQueue<Address> state_requesters=new ProcessingQueue<Address>().setHandler(this);
@@ -64,7 +64,7 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
     public void init() throws Exception {}
 
     public void start() throws Exception {
-        Map<String,Object> map=new HashMap<String,Object>();
+        Map<String,Object> map=new HashMap<>();
         map.put("state_transfer", Boolean.TRUE);
         map.put("protocol_class", getClass().getName());
         up_prot.up(new Event(Event.CONFIG, map));
@@ -140,7 +140,7 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
             case Event.CONFIG:
                 Map<String,Object> config=(Map<String,Object>)evt.getArg();
                 if(config != null && config.containsKey("state_transfer"))
-                    log.error("Protocol stack cannot contain two state transfer protocols. Remove either one of them");
+                    log.error(Util.getMessage("ProtocolStackCannotContainTwoStateTransferProtocolsRemoveEitherOneOfThem"));
                 break;
         }
         return up_prot.up(evt);

@@ -96,7 +96,7 @@ public class TCPPING extends Discovery {
 
     public void init() throws Exception {
         super.init();
-        dynamic_hosts=new BoundedList<PhysicalAddress>(max_dynamic_hosts);
+        dynamic_hosts=new BoundedList<>(max_dynamic_hosts);
     }
 
     public Object down(Event evt) {
@@ -136,8 +136,15 @@ public class TCPPING extends Discovery {
         PingData data=new PingData(local_addr, false, org.jgroups.util.UUID.get(local_addr), physical_addr);
         PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ).clusterName(cluster_name);
 
-        Set<PhysicalAddress> cluster_members=new HashSet<PhysicalAddress>(initial_hosts);
-        cluster_members.addAll(dynamic_hosts);
+        List<PhysicalAddress> cluster_members=new ArrayList<>(initial_hosts.size() + (dynamic_hosts != null? dynamic_hosts.size() : 0) + 5);
+        for(PhysicalAddress phys_addr: initial_hosts)
+            if(!cluster_members.contains(phys_addr))
+                cluster_members.add(phys_addr);
+        if(dynamic_hosts != null) {
+            for(PhysicalAddress phys_addr : dynamic_hosts)
+                if(!cluster_members.contains(phys_addr))
+                    cluster_members.add(phys_addr);
+        }
 
         if(use_disk_cache) {
             // this only makes sense if we have PDC below us
@@ -151,11 +158,23 @@ public class TCPPING extends Discovery {
         for(final PhysicalAddress addr: cluster_members) {
             if(physical_addr != null && addr.equals(physical_addr)) // no need to send the request to myself
                 continue;
+
             // the message needs to be DONT_BUNDLE, see explanation above
             final Message msg=new Message(addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB)
               .putHeader(this.id,hdr).setBuffer(marshal(data));
-            log.trace("%s: sending discovery request to %s", local_addr, msg.getDest());
-            down_prot.down(new Event(Event.MSG, msg));
+
+            if(async_discovery_use_separate_thread_per_request) {
+                timer.execute(new Runnable() {
+                    public void run() {
+                        log.trace("%s: sending discovery request to %s", local_addr, msg.getDest());
+                        down_prot.down(new Event(Event.MSG, msg));
+                    }
+                });
+            }
+            else {
+                log.trace("%s: sending discovery request to %s", local_addr, msg.getDest());
+                down_prot.down(new Event(Event.MSG, msg));
+            }
         }
     }
 }

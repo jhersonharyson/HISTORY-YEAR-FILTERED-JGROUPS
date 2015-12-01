@@ -1,7 +1,6 @@
 package org.jgroups.blocks;
 
 import org.jgroups.*;
-import org.jgroups.annotations.Experimental;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.util.Util;
@@ -26,9 +25,8 @@ import java.util.concurrent.CopyOnWriteArraySet;
  *
  * @author Bela Ban
  */
-@Experimental
 public class ReplicatedHashMap<K, V> extends
-        AbstractMap<K,V> implements ConcurrentMap<K,V>, Receiver, ReplicatedMap<K,V> {
+        AbstractMap<K,V> implements ConcurrentMap<K,V>, Receiver, ReplicatedMap<K,V>, Closeable {
 
     public interface Notification<K, V> {
         void entrySet(K key, V value);
@@ -55,7 +53,7 @@ public class ReplicatedHashMap<K, V> extends
 
     static {
         try {
-            methods=new HashMap<Short,Method>(8);
+            methods=new HashMap<>(8);
             methods.put(PUT, ReplicatedHashMap.class.getMethod("_put",
                                                                Object.class,
                                                                Object.class));
@@ -85,8 +83,8 @@ public class ReplicatedHashMap<K, V> extends
     protected RpcDispatcher disp=null;
     private String cluster_name=null;
     // to be notified when mbrship changes
-    private final Set<Notification> notifs=new CopyOnWriteArraySet<Notification>();
-    private final List<Address> members=new ArrayList<Address>(); // keeps track of all DHTs
+    private final Set<Notification> notifs=new CopyOnWriteArraySet<>();
+    private final List<Address> members=new ArrayList<>(); // keeps track of all DHTs
 
     protected final RequestOptions call_options=new RequestOptions(ResponseMode.GET_NONE, 5000);
 
@@ -103,7 +101,7 @@ public class ReplicatedHashMap<K, V> extends
      */
     public ReplicatedHashMap(Channel channel) {
         this.channel=channel;
-        this.map=new ConcurrentHashMap<K,V>();
+        this.map=new ConcurrentHashMap<>();
         init();
     }
 
@@ -199,6 +197,11 @@ public class ReplicatedHashMap<K, V> extends
             disp=null;
         }
         Util.close(channel);
+    }
+
+
+    @Override public void close() throws IOException {
+        stop();
     }
 
     /**
@@ -458,40 +461,25 @@ public class ReplicatedHashMap<K, V> extends
     
 
     public void getState(OutputStream ostream) throws Exception {
-        K key;
-        V val;
-        HashMap<K,V> copy=new HashMap<K,V>();
-        ObjectOutputStream oos=null;
-
+        HashMap<K,V> copy=new HashMap<>();
         for(Map.Entry<K,V> entry:entrySet()) {
-            key=entry.getKey();
-            val=entry.getValue();
+            K key=entry.getKey();
+            V val=entry.getValue();
             copy.put(key, val);
         }
-        try {
-            oos=new ObjectOutputStream(new BufferedOutputStream(ostream, 1024));
+        try(ObjectOutputStream oos=new ObjectOutputStream(new BufferedOutputStream(ostream, 1024))) {
             oos.writeObject(copy);
-        }
-        finally {
-            Util.close(oos);
         }
     }
 
     public void setState(InputStream istream) throws Exception {
         HashMap<K,V> new_copy=null;
-        ObjectInputStream ois=null;
-        try {
-            ois=new ObjectInputStream(istream);
+        try(ObjectInputStream ois=new ObjectInputStream(istream)) {
             new_copy=(HashMap<K,V>)ois.readObject();
-        }
-        finally {
-            Util.close(ois);
         }
         if(new_copy != null)
             _putAll(new_copy);
-
-        if(log.isDebugEnabled())
-            log.debug("state received successfully");
+        log.debug("state received successfully");
     }
 
     /*------------------- Membership Changes ----------------------*/
@@ -500,7 +488,7 @@ public class ReplicatedHashMap<K, V> extends
         List<Address> new_mbrs=new_view.getMembers();
 
         if(new_mbrs != null) {
-            sendViewChangeNotifications(new_view, new_mbrs, new ArrayList<Address>(members)); // notifies observers (joined, left)
+            sendViewChangeNotifications(new_view, new_mbrs, new ArrayList<>(members)); // notifies observers (joined, left)
             members.clear();
             members.addAll(new_mbrs);
         }
@@ -525,14 +513,14 @@ public class ReplicatedHashMap<K, V> extends
             return;
 
         // 1. Compute set of members that joined: all that are in new_mbrs, but not in old_mbrs
-        joined=new ArrayList<Address>();
+        joined=new ArrayList<>();
         for(Address mbr: new_mbrs) {
             if(!old_mbrs.contains(mbr))
                 joined.add(mbr);
         }
 
         // 2. Compute set of members that left: all that were in old_mbrs, but not in new_mbrs
-        left=new ArrayList<Address>();
+        left=new ArrayList<>();
         for(Address mbr: old_mbrs) {
             if(!new_mbrs.contains(mbr)) {
                 left.add(mbr);
@@ -557,7 +545,7 @@ public class ReplicatedHashMap<K, V> extends
      * @return
      */
     public static <K, V> ReplicatedMap<K,V> synchronizedMap(ReplicatedMap<K,V> map) {
-        return new SynchronizedReplicatedMap<K,V>(map);
+        return new SynchronizedReplicatedMap<>(map);
     }
 
     private static class SynchronizedReplicatedMap<K, V>

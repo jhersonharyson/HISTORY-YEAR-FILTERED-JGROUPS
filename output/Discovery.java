@@ -85,6 +85,10 @@ public abstract class Discovery extends Protocol {
       "discovery is blocking and/or takes more than a few milliseconds")
     protected boolean                    async_discovery=false;
 
+    @Property(description="If enabled, use a separate thread for every discovery request. Can be used with or without " +
+      "async_discovery")
+    protected boolean                    async_discovery_use_separate_thread_per_request;
+
     @Property(description="When a new node joins, and we have a static discovery protocol (TCPPING), then send the " +
       "contents of the discovery cache to new and existing members if true (and we're the coord). Addresses JGRP-1903")
     protected boolean                    send_cache_on_join=false;
@@ -107,13 +111,13 @@ public abstract class Discovery extends Protocol {
     protected volatile boolean           is_leaving=false;
     protected TimeScheduler              timer;
     protected View                       view;
-    protected final List<Address>        members=new ArrayList<Address>(11);
+    protected final List<Address>        members=new ArrayList<>(11);
     @ManagedAttribute(description="Whether this member is the current coordinator")
     protected boolean                    is_coord=false;
     protected Address                    local_addr=null;
     protected Address                    current_coord;
     protected String                     cluster_name;
-    protected final Map<Long,Responses>  ping_responses=new HashMap<Long,Responses>();
+    protected final Map<Long,Responses>  ping_responses=new HashMap<>();
     @ManagedAttribute(description="Whether the transport supports multicasting")
     protected boolean                    transport_supports_multicasting=true;
     protected static final byte[]        WHITESPACE=" \t".getBytes();
@@ -165,7 +169,7 @@ public abstract class Discovery extends Protocol {
     public Discovery forceDiscoveryResponses(boolean f) {force_sending_discovery_rsps=f; return this;}
     public boolean   useDiskCache()                     {return use_disk_cache;}
     public Discovery useDiskCache(boolean flag)         {use_disk_cache=flag; return this;}
-
+    public Discovery discoveryRspExpiryTime(long t)     {this.discovery_rsp_expiry_time=t; return this;}
 
 
 
@@ -188,7 +192,7 @@ public abstract class Discovery extends Protocol {
     public void sendCacheInformation() {
         List<Address> current_members=null;
         synchronized(members) {
-            current_members=new ArrayList<Address>(members);
+            current_members=new ArrayList<>(members);
         }
         disseminateDiscoveryInformation(current_members, null, current_members);
     }
@@ -238,6 +242,7 @@ public abstract class Discovery extends Protocol {
         }
         else
             findMembers(members, initial_discovery, rsps);
+        weedOutCompletedDiscoveryResponses();
         return rsps;
     }
 
@@ -270,7 +275,7 @@ public abstract class Discovery extends Protocol {
         Map<Address,PhysicalAddress> cache_contents=
           (Map<Address,PhysicalAddress>)down_prot.down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS, false));
 
-        List<PingData> list=new ArrayList<PingData>(cache_contents.size());
+        List<PingData> list=new ArrayList<>(cache_contents.size());
         for(Map.Entry<Address,PhysicalAddress> entry: cache_contents.entrySet()) {
             Address         addr=entry.getKey();
             PhysicalAddress phys_addr=entry.getValue();
@@ -399,7 +404,7 @@ public abstract class Discovery extends Protocol {
                 if(send_cache_on_join && !isDynamic() && is_coord) {
                     List<Address> curr_mbrs, left_mbrs, new_mbrs;
                     synchronized(members) {
-                        curr_mbrs=new ArrayList<Address>(members);
+                        curr_mbrs=new ArrayList<>(members);
                         left_mbrs=old_view != null? Util.leftMembers(old_view.getMembers(), members) : null;
                         new_mbrs=old_view != null? Util.newMembers(old_view.getMembers(), members) : null;
                     }
@@ -465,11 +470,11 @@ public abstract class Discovery extends Protocol {
                     boolean is_coordinator=coord_str.trim().equals("T") || coord_str.trim().equals("t");
 
                     if(retval == null)
-                        retval=new ArrayList<PingData>();
+                        retval=new ArrayList<>();
                     retval.add(new PingData(uuid, true, name_str, phys_addr).coord(is_coordinator));
                 }
                 catch(Throwable t) {
-                    log.error("failed reading line of input stream", t);
+                    log.error(Util.getMessage("FailedReadingLineOfInputStream"), t);
                 }
             }
             return retval;
@@ -519,6 +524,22 @@ public abstract class Discovery extends Protocol {
         }
     }
 
+    /** Removes responses which are done or whose timeout has expired (in the latter case, an expired response is marked as done) */
+    @ManagedOperation(description="Removes expired or completed responses")
+    public void weedOutCompletedDiscoveryResponses() {
+        synchronized(ping_responses) {
+            for(Iterator<Map.Entry<Long,Responses>> it=ping_responses.entrySet().iterator(); it.hasNext();) {
+                Map.Entry<Long,Responses> entry=it.next();
+                long timestamp=entry.getKey();
+                Responses rsps=entry.getValue();
+                if(rsps.isDone() || TimeUnit.MILLISECONDS.convert(System.nanoTime() - timestamp, TimeUnit.NANOSECONDS) > discovery_rsp_expiry_time) {
+                    it.remove();
+                    rsps.done();
+                }
+            }
+        }
+    }
+
 
     protected boolean addDiscoveryResponseToCaches(Address mbr, String logical_name, PhysicalAddress physical_addr) {
         if(mbr == null)
@@ -526,7 +547,7 @@ public abstract class Discovery extends Protocol {
         if(logical_name != null)
             UUID.add(mbr, logical_name);
         if(physical_addr != null)
-            return (Boolean)down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<Address,PhysicalAddress>(mbr, physical_addr)));
+            return (Boolean)down(new Event(Event.SET_PHYSICAL_ADDRESS, new Tuple<>(mbr, physical_addr)));
         return false;
     }
 
@@ -546,7 +567,7 @@ public abstract class Discovery extends Protocol {
             return Util.streamableToByteBuffer(clone);
         }
         catch(Exception e) {
-            log.error("error serializing PingData", e);
+            log.error(Util.getMessage("ErrorSerializingPingData"), e);
             return null;
         }
     }

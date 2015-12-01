@@ -115,6 +115,11 @@ public class MergeTest extends ChannelTestBase {
 
 
     private static void createPartitions(JChannel[] channels) throws Exception {
+        long view_id=1; // find the highest view-id +1
+        for(JChannel ch: channels)
+            view_id=Math.max(ch.getView().getViewId().getId(), view_id);
+        view_id++;
+
         for(JChannel ch: channels) {
             DISCARD discard=new DISCARD();
             discard.setDiscardAll(true);
@@ -122,7 +127,7 @@ public class MergeTest extends ChannelTestBase {
         }
 
         for(JChannel ch: channels) {
-            View view=View.create(ch.getAddress(), 10, ch.getAddress());
+            View view=View.create(ch.getAddress(), view_id, ch.getAddress());
             GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             gms.installView(view);
         }
@@ -135,7 +140,7 @@ public class MergeTest extends ChannelTestBase {
     }
 
     private static void injectMergeEvent(JChannel[] channels, Address leader_addr, String ... coordinators) {
-        Map<Address,View> views=new HashMap<Address,View>();
+        Map<Address,View> views=new HashMap<>();
         for(String tmp: coordinators) {
             Address coord=findAddress(tmp, channels);
             views.put(coord, findView(tmp, channels));
@@ -182,8 +187,7 @@ public class MergeTest extends ChannelTestBase {
         Membership membership=new Membership();
         for(String coord: coords)
             membership.add(findAddress(coord, channels));
-        membership.sort();
-        return membership.elementAt(0);
+        return membership.sort().elementAt(0);
     }
 
      private static Address findAddress(String tmp, JChannel[] channels) {

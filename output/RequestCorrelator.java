@@ -66,6 +66,9 @@ public class RequestCorrelator {
     /** Whether or not to use async dispatcher */
     protected boolean                                async_dispatching=false;
 
+    // send exceptions back wrapped in an {@link InvocationTargetException}, or not
+    protected boolean                                wrap_exceptions=true;
+
     private final MyProbeHandler                     probe_handler=new MyProbeHandler(requests);
 
     protected static final Log                       log=LogFactory.getLog(RequestCorrelator.class);
@@ -109,10 +112,12 @@ public class RequestCorrelator {
 
 
 
-    public RpcDispatcher.Marshaller getMarshaller() {return marshaller;}
+    public RpcDispatcher.Marshaller getMarshaller()                {return marshaller;}
     public void                     setMarshaller(RpcDispatcher.Marshaller marshaller) {this.marshaller=marshaller;}
-    public boolean                  asyncDispatching() {return async_dispatching;}
+    public boolean                  asyncDispatching()             {return async_dispatching;}
     public RequestCorrelator        asyncDispatching(boolean flag) {async_dispatching=flag; return this;}
+    public boolean                  wrapExceptions()               {return wrap_exceptions;}
+    public RequestCorrelator        wrapExceptions(boolean flag)   {wrap_exceptions=flag; return this;}
 
     public void sendRequest(long id, List<Address> dest_mbrs, Message msg, RspCollector coll) throws Exception {
         sendRequest(id, dest_mbrs, msg, coll, new RequestOptions().setAnycasting(false));
@@ -391,7 +396,7 @@ public class RequestCorrelator {
                                 Util.objectFromByteBuffer(buf, offset, length);
                     }
                     catch(Exception e) {
-                        log.error("failed unmarshalling buffer into return value", e);
+                        log.error(Util.getMessage("FailedUnmarshallingBufferIntoReturnValue"), e);
                         retval=e;
                         is_exception=true;
                     }
@@ -401,7 +406,7 @@ public class RequestCorrelator {
 
             default:
                 msg.getHeader(this.id);
-                if(log.isErrorEnabled()) log.error("header's type is neither REQ nor RSP !");
+                if(log.isErrorEnabled()) log.error(Util.getMessage("HeaderSTypeIsNeitherREQNorRSP"));
                 break;
         }
 
@@ -461,7 +466,7 @@ public class RequestCorrelator {
             }
             catch(Throwable t) {
                 if(rsp != null)
-                    rsp.send(new InvocationTargetException(t), true);
+                    rsp.send(wrap_exceptions ? new InvocationTargetException(t) : t, true);
                 else
                     log.error(local_addr + ": failed dispatching request asynchronously: " + t);
             }
@@ -473,7 +478,7 @@ public class RequestCorrelator {
         }
         catch(Throwable t) {
             threw_exception=true;
-            retval=new InvocationTargetException(t);
+            retval=wrap_exceptions ? new InvocationTargetException(t) : t;
         }
         if(hdr.rsp_expected)
             sendReply(req, hdr.id, retval, threw_exception);
@@ -481,30 +486,27 @@ public class RequestCorrelator {
 
 
     protected void sendReply(final Message req, final long req_id, Object reply, boolean is_exception) {
-        Object rsp_buf; // either byte[] or Buffer
+        Buffer rsp_buf;
         try {  // retval could be an exception, or a real value
-            rsp_buf=marshaller != null? marshaller.objectToBuffer(reply) : Util.objectToByteBuffer(reply);
+            rsp_buf=marshaller != null? marshaller.objectToBuffer(reply) : Util.objectToBuffer(reply);
         }
         catch(Throwable t) {
             try {  // this call should succeed (all exceptions are serializable)
-                rsp_buf=marshaller != null? marshaller.objectToBuffer(t) : Util.objectToByteBuffer(t);
+                rsp_buf=marshaller != null? marshaller.objectToBuffer(t) : Util.objectToBuffer(t);
                 is_exception=true;
             }
             catch(NotSerializableException not_serializable) {
-                if(log.isErrorEnabled()) log.error("failed marshalling rsp (" + reply + "): not serializable");
+                if(log.isErrorEnabled()) log.error(Util.getMessage("FailedMarshallingRsp") + reply + "): not serializable");
                 return;
             }
             catch(Throwable tt) {
-                if(log.isErrorEnabled()) log.error("failed marshalling rsp (" + reply + "): " + tt);
+                if(log.isErrorEnabled()) log.error(Util.getMessage("FailedMarshallingRsp") + reply + "): " + tt);
                 return;
             }
         }
 
-        Message rsp=req.makeReply().setFlag(req.getFlags()).clearFlag(Message.Flag.RSVP, Message.Flag.SCOPED);
-        if(rsp_buf instanceof Buffer)
-            rsp.setBuffer((Buffer)rsp_buf);
-        else if(rsp_buf instanceof byte[])
-            rsp.setBuffer((byte[])rsp_buf);
+        Message rsp=req.makeReply().setFlag(req.getFlags()).setBuffer(rsp_buf)
+          .clearFlag(Message.Flag.RSVP, Message.Flag.SCOPED, Message.Flag.INTERNAL); // JGRP-1940
 
        sendResponse(rsp, req_id, is_exception);
     }
@@ -676,7 +678,7 @@ public class RequestCorrelator {
         public Map<String, String> handleProbe(String... keys) {
             if(requests == null)
                 return null;
-            Map<String,String> retval=new HashMap<String,String>();
+            Map<String,String> retval=new HashMap<>();
             for(String key: keys) {
                 if(key.equals("requests")) {
                     StringBuilder sb=new StringBuilder();

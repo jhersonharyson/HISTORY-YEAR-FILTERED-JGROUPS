@@ -89,21 +89,21 @@ public class FD_SOCK extends Protocol implements Runnable {
 
     protected int num_suspect_events=0;
 
-    protected final BoundedList<Address> suspect_history=new BoundedList<Address>(20);
+    protected final BoundedList<String> suspect_history=new BoundedList<>(20);
 
 
     /* --------------------------------------------- Fields ------------------------------------------------------ */
 
 
-    protected volatile List<Address> members=new ArrayList<Address>(11); // volatile eliminates the lock
+    protected volatile List<Address> members=new ArrayList<>(11); // volatile eliminates the lock
 
-    protected final Set<Address>     suspected_mbrs=new CopyOnWriteArraySet<Address>();
+    protected final Set<Address>     suspected_mbrs=new CopyOnWriteArraySet<>();
 
-    protected final List<Address>    pingable_mbrs=new CopyOnWriteArrayList<Address>();
+    protected final List<Address>    pingable_mbrs=new CopyOnWriteArrayList<>();
 
     protected volatile boolean srv_sock_sent=false; // has own socket been broadcast yet ?
     /** Used to rendezvous on GET_CACHE and GET_CACHE_RSP */
-    protected final Promise<Map<Address,IpAddress>> get_cache_promise=new Promise<Map<Address,IpAddress>>();
+    protected final Promise<Map<Address,IpAddress>> get_cache_promise=new Promise<>();
     protected volatile boolean got_cache_from_coord=false; // was cache already fetched ?
     protected Address local_addr=null; // our own address
     protected ServerSocket srv_sock=null; // server socket to which another member connects to monitor me
@@ -119,12 +119,12 @@ public class FD_SOCK extends Protocol implements Runnable {
     /** Cache of member addresses and their ServerSocket addresses */
     protected final ConcurrentMap<Address,IpAddress> cache=Util.createConcurrentMap(11);
 
-    protected final Promise<IpAddress> ping_addr_promise=new Promise<IpAddress>(); // to fetch the ping_addr for ping_dest
+    protected final Promise<IpAddress> ping_addr_promise=new Promise<>(); // to fetch the ping_addr for ping_dest
     protected final Object sock_mutex=new Object(); // for access to ping_sock, ping_input
     protected TimeScheduler timer=null;
     protected final BroadcastTask bcast_task=new BroadcastTask(); // to transmit SUSPECT message (until view change)
     protected volatile boolean regular_sock_close=false; // used by interruptPingerThread() when new ping_dest is computed
-
+    protected volatile boolean shuttin_down;
     protected boolean log_suspected_msgs=true;
 
 
@@ -137,6 +137,10 @@ public class FD_SOCK extends Protocol implements Runnable {
     public String getMembers() {return Util.printListWithDelimiter(members, ",");}
     @ManagedAttribute(description="List of pingable members of a cluster")
     public String getPingableMembers() {return pingable_mbrs.toString();}
+    @ManagedAttribute(description="List of currently suspected members")
+    public String getSuspectedMembers() {return suspected_mbrs.toString();}
+    @ManagedAttribute(description="The number of currently suspected members")
+    public int getNumSuspectedMembers() {return suspected_mbrs.size();}
     @ManagedAttribute(description="Ping destination")
     public String getPingDest() {return ping_dest != null? ping_dest.toString() : "null";}
     @ManagedAttribute(description="Number of suspect event generated")
@@ -155,9 +159,8 @@ public class FD_SOCK extends Protocol implements Runnable {
     @ManagedOperation(description="Print suspect history")
     public String printSuspectHistory() {
         StringBuilder sb=new StringBuilder();
-        for(Address suspect: suspect_history) {
-            sb.append(new Date()).append(": ").append(suspect).append("\n");
-        }
+        for(String suspect: suspect_history)
+            sb.append(suspect).append("\n");
         return sb.toString();
     }
 
@@ -185,6 +188,7 @@ public class FD_SOCK extends Protocol implements Runnable {
     }
 
     public void init() throws Exception {
+        shuttin_down=false;
         srv_sock_handler=new ServerSocketHandler();
         timer=getTransport().getTimer();
         if(timer == null)
@@ -193,10 +197,11 @@ public class FD_SOCK extends Protocol implements Runnable {
 
 
     public void start() throws Exception {
-        super.start();
+        shuttin_down=false; super.start();
     }
 
     public void stop() {
+        shuttin_down=true;
         pingable_mbrs.clear();
         stopPingerThread();
         stopServerSocket(true); // graceful close
@@ -226,6 +231,14 @@ public class FD_SOCK extends Protocol implements Runnable {
                         if(hdr.mbrs != null) {
                             log.trace("%s: received SUSPECT message from %s: suspects=%s", local_addr, msg.getSrc(), hdr.mbrs);
                             suspect(hdr.mbrs);
+                        }
+                        break;
+
+                    case FdHeader.UNSUSPECT:
+                        if(hdr.mbrs != null) {
+                            log.trace("%s: received UNSUSPECT message from %s: mbrs=%s", local_addr, msg.getSrc(), hdr.mbrs);
+                            for(Address tmp: hdr.mbrs)
+                                unsuspect(tmp);
                         }
                         break;
 
@@ -302,13 +315,14 @@ public class FD_SOCK extends Protocol implements Runnable {
         switch(evt.getType()) {
 
             case Event.UNSUSPECT:
-                bcast_task.removeSuspectedMember((Address)evt.getArg());
+                broadcastUnuspectMessage((Address)evt.getArg());
                 break;
 
             case Event.CONNECT:
             case Event.CONNECT_WITH_STATE_TRANSFER:
             case Event.CONNECT_USE_FLUSH:
             case Event.CONNECT_WITH_STATE_TRANSFER_USE_FLUSH:
+                shuttin_down=false;
                 Object ret=down_prot.down(evt);
                 try {
                     startServerSocket();
@@ -319,6 +333,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 return ret;
 
             case Event.DISCONNECT:
+                shuttin_down=true;
                 stopServerSocket(true); // graceful close
                 break;
 
@@ -454,11 +469,12 @@ public class FD_SOCK extends Protocol implements Runnable {
         if(suspects == null)
             return;
 
-        final List<Address> eligible_mbrs=new ArrayList<Address>();
+        suspects.remove(local_addr);
+        final List<Address> eligible_mbrs=new ArrayList<>();
         for(Address suspect: suspects)
-            suspect_history.add(suspect);
+            suspect_history.add(String.format("%s: %s", new Date(), suspect));
         suspected_mbrs.addAll(suspects);
-        eligible_mbrs.addAll(members);
+        eligible_mbrs.addAll(this.members);
         eligible_mbrs.removeAll(suspected_mbrs);
 
         // Check if we're coord, then send up the stack
@@ -474,6 +490,12 @@ public class FD_SOCK extends Protocol implements Runnable {
         }
     }
 
+    protected void unsuspect(Address mbr) {
+        if(mbr == null)
+            return;
+        suspected_mbrs.remove(mbr);
+        bcast_task.removeSuspectedMember(mbr);
+    }
 
     protected void handleSocketClose(Exception ex) {
         teardownPingSocket();     // make sure we have no leftovers
@@ -618,7 +640,8 @@ public class FD_SOCK extends Protocol implements Runnable {
                 return true;
             }
             catch(Throwable ex) {
-                log.warn("%s: creating the client socket to %s failed: %s", local_addr, destAddr, ex);
+                if(!shuttin_down)
+                    log.warn("%s: creating the client socket to %s failed: %s", local_addr, destAddr, ex.getMessage());
                 return false;
             }
         }
@@ -685,18 +708,15 @@ public class FD_SOCK extends Protocol implements Runnable {
      * react to the SUSPECT message and issue a new view, at which point the broadcast task stops.
      */
     protected void broadcastSuspectMessage(Address suspected_mbr) {
-        Message suspect_msg;
-        FdHeader hdr;
-
         if(suspected_mbr == null) return;
 
         log.debug("%s: suspecting %s", local_addr, suspected_mbr);
 
         // 1. Send a SUSPECT message right away; the broadcast task will take some time to send it (sleeps first)
-        hdr=new FdHeader(FdHeader.SUSPECT);
-        hdr.mbrs=new HashSet<Address>(1);
+        FdHeader hdr=new FdHeader(FdHeader.SUSPECT);
+        hdr.mbrs=new HashSet<>(1);
         hdr.mbrs.add(suspected_mbr);
-        suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(this.id, hdr);
+        Message suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(this.id, hdr);
         down_prot.down(new Event(Event.MSG, suspect_msg));
 
         // 2. Add to broadcast task and start latter (if not yet running). The task will end when
@@ -704,10 +724,23 @@ public class FD_SOCK extends Protocol implements Runnable {
         bcast_task.addSuspectedMember(suspected_mbr);
         if(stats) {
             num_suspect_events++;
-            suspect_history.add(suspected_mbr);
+            suspect_history.add(String.format("%s: %s", new Date(), suspected_mbr));
         }
     }
 
+
+    protected void broadcastUnuspectMessage(Address mbr) {
+        if(mbr == null) return;
+
+        log.debug("%s: unsuspecting %s", local_addr, mbr);
+
+        // 1. Send a SUSPECT message right away; the broadcast task will take some time to send it (sleeps first)
+        FdHeader hdr=new FdHeader(FdHeader.UNSUSPECT);
+        hdr.mbrs=new HashSet<>(1);
+        hdr.mbrs.add(mbr);
+        Message suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(this.id, hdr);
+        down_prot.down(new Event(Event.MSG, suspect_msg));
+    }
 
 
 
@@ -826,7 +859,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         try {
             int size=in.readInt();
             if(size > 0) {
-                addrs=new HashMap<Address,IpAddress>(size);
+                addrs=new HashMap<>(size);
                 for(int i=0; i < size; i++) {
                     Address key=Util.readAddress(in);
                     IpAddress val=(IpAddress)Util.readStreamable(IpAddress.class, in);
@@ -865,10 +898,11 @@ public class FD_SOCK extends Protocol implements Runnable {
 
     public static class FdHeader extends Header {
         public static final byte SUSPECT       = 10;
-        public static final byte WHO_HAS_SOCK  = 11;
-        public static final byte I_HAVE_SOCK   = 12;
-        public static final byte GET_CACHE     = 13; // sent by joining member to coordinator
-        public static final byte GET_CACHE_RSP = 14; // sent by coordinator to joining member in response to GET_CACHE
+        public static final byte UNSUSPECT     = 11;
+        public static final byte WHO_HAS_SOCK  = 12;
+        public static final byte I_HAVE_SOCK   = 13;
+        public static final byte GET_CACHE     = 14; // sent by joining member to coordinator
+        public static final byte GET_CACHE_RSP = 15; // sent by coordinator to joining member in response to GET_CACHE
 
 
         byte                      type=SUSPECT;
@@ -916,18 +950,13 @@ public class FD_SOCK extends Protocol implements Runnable {
 
         public static String type2String(byte type) {
             switch(type) {
-                case SUSPECT:
-                    return "SUSPECT";
-                case WHO_HAS_SOCK:
-                    return "WHO_HAS_SOCK";
-                case I_HAVE_SOCK:
-                    return "I_HAVE_SOCK";
-                case GET_CACHE:
-                    return "GET_CACHE";
-                case GET_CACHE_RSP:
-                    return "GET_CACHE_RSP";
-                default:
-                    return "unknown type (" + type + ')';
+                case SUSPECT:       return "SUSPECT";
+                case UNSUSPECT:     return "UNSUSPECT";
+                case WHO_HAS_SOCK:  return "WHO_HAS_SOCK";
+                case I_HAVE_SOCK:   return "I_HAVE_SOCK";
+                case GET_CACHE:     return "GET_CACHE";
+                case GET_CACHE_RSP: return "GET_CACHE_RSP";
+                default:            return "unknown type (" + type + ')';
             }
         }
 
@@ -970,7 +999,7 @@ public class FD_SOCK extends Protocol implements Runnable {
             int size=in.readInt();
             if(size > 0) {
                 if(mbrs == null)
-                    mbrs=new HashSet<Address>();
+                    mbrs=new HashSet<>();
                 for(int i=0; i < size; i++)
                     mbrs.add(Util.readAddress(in));
             }
@@ -989,7 +1018,7 @@ public class FD_SOCK extends Protocol implements Runnable {
     protected class ServerSocketHandler implements Runnable {
         Thread acceptor=null;
         /** List<ClientConnectionHandler> */
-        final List<ClientConnectionHandler> clients=new LinkedList<ClientConnectionHandler>();
+        final List<ClientConnectionHandler> clients=new LinkedList<>();
 
 
         String getName() {
@@ -1126,7 +1155,7 @@ public class FD_SOCK extends Protocol implements Runnable {
      * any longer. Then the task terminates.
      */
     protected class BroadcastTask implements Runnable {
-        final Set<Address>    suspects=new HashSet<Address>();
+        final Set<Address>    suspects=new HashSet<>();
         Future<?>             future;
 
 
@@ -1144,10 +1173,8 @@ public class FD_SOCK extends Protocol implements Runnable {
         public void removeSuspectedMember(Address suspected_mbr) {
             if(suspected_mbr == null) return;
             synchronized(suspects) {
-                suspects.remove(suspected_mbr);
-                if(suspects.isEmpty()) {
+                if(suspects.remove(suspected_mbr) && suspects.isEmpty())
                     stopTask();
-                }
             }
         }
 
@@ -1204,7 +1231,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 }
 
                 hdr=new FdHeader(FdHeader.SUSPECT);
-                hdr.mbrs=new HashSet<Address>(suspects);
+                hdr.mbrs=new HashSet<>(suspects);
             }
             Message suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(id, hdr); // mcast SUSPECT to all members
             down_prot.down(new Event(Event.MSG, suspect_msg));

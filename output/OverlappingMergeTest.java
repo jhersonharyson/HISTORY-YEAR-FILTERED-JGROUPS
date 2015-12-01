@@ -54,7 +54,6 @@ public class OverlappingMergeTest extends ChannelTestBase {
     }
 
     @SuppressWarnings("unchecked")
-   // @Test(invocationCount=20)
     public void testRegularMessageSending() throws Exception {
         sendMessages(5, a, b, c);
         checkReceivedMessages(make(ra, 15), make(rb,15), make(rc,15));
@@ -115,7 +114,7 @@ public class OverlappingMergeTest extends ChannelTestBase {
         System.out.println("\n ==== Digests are:\n" + dumpDigests(a,b,c));
 
         // start merging
-        Map<Address,View> views=new HashMap<Address,View>();
+        Map<Address,View> views=new HashMap<>();
         views.put(a.getAddress(), a.getView());
         views.put(b.getAddress(), b.getView());
         views.put(c.getAddress(), c.getView());
@@ -155,12 +154,13 @@ public class OverlappingMergeTest extends ChannelTestBase {
      * Verifies that unicasts are received correctly by all participants after an overlapping merge. The following steps
      * are executed:
      * <ol>
-     * <li/>Group is {A,B,C}
-     * <li/>Install view {A,C} in A and {A,B,C} in B and C
-     * <li/>Try to initiate a merge.
+     * <li/>Group is {A,B,C}, inject views:
+     * <li/>A: A,C
+     * <li/>B: A,B,C
+     * <li/>C: A,B,C
+     * <li/>Then initiate a merge.
      * </ol>
      */
-    @Test
     public void testOverlappingMergeWithABC() throws Exception {
         sendMessages(5, a, b, c);
         checkReceivedMessages(make(ra, 15), make(rb,15), make(rc,15));
@@ -182,16 +182,14 @@ public class OverlappingMergeTest extends ChannelTestBase {
 
 
         // start merging
-        Map<Address,View> views=new HashMap<Address,View>();
+        Map<Address,View> views=new HashMap<>();
         views.put(a.getAddress(),a.getView());
         views.put(b.getAddress(), b.getView());
         views.put(c.getAddress(),c.getView());
         Event merge_evt=new Event(Event.MERGE, views);
 
-        for(JChannel ch: new JChannel[]{a,b,c}) {
-            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
-            gms.setLevel("trace");
-        }
+        for(JChannel ch: new JChannel[]{a,b,c})
+            ch.getProtocolStack().findProtocol(GMS.class).setLevel("trace");
 
         System.out.println("\n==== Injecting a merge event into A, B and C ====");
         injectMergeEvent(merge_evt,a,b,c);
@@ -221,11 +219,77 @@ public class OverlappingMergeTest extends ChannelTestBase {
         sendMessages(5,a,b,c);
         checkReceivedMessages(make(ra, 15), make(rb,15), make(rc,15));
 
-        for(JChannel ch: new JChannel[]{a,b,c}) {
-            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
-            gms.setLevel("warn");
-        }
+        for(JChannel ch: new JChannel[]{a,b,c})
+            ch.getProtocolStack().findProtocol(GMS.class).setLevel("warn");
     }
+
+
+
+    /**
+     * <ol>
+     * <li/>Group is A|4={A,B,C}, inject views:
+     * <li/>A: A|5={A,B}
+     * <li/>B: A|5={A,B}
+     * <li/>C: A|4={A,B,C} // failed installing view A|5
+     * <li/>Then initiate a merge.
+     * </ol>
+     */
+    public void testOverlappingMergeWithABC2() throws Exception {
+        // Inject view {A,B} into A and B:
+        View new_view=View.create(a.getAddress(), 4, a.getAddress(), b.getAddress());
+        System.out.println("\n ==== Injecting view " + new_view + " into A and B ====");
+        injectView(new_view, a,b);
+        assertTrue(Util.isCoordinator(a));
+        assertFalse(Util.isCoordinator(b));
+        assertFalse(Util.isCoordinator(c));
+
+        System.out.println("A's view: " + a.getView());
+        System.out.println("B's view: " + b.getView());
+        System.out.println("C's view: " + c.getView());
+        assertEquals("A's view is " + a.getView(), 2, a.getView().size());
+        assertEquals("B's view is " + b.getView(), 2, b.getView().size());
+        assertEquals("C's view is " + c.getView(), 3, c.getView().size());
+
+
+        // start merging
+        Map<Address,View> views=new HashMap<>();
+        views.put(a.getAddress(),a.getView());
+        views.put(b.getAddress(), b.getView());
+        views.put(c.getAddress(),c.getView());
+        Event merge_evt=new Event(Event.MERGE, views);
+
+        for(JChannel ch: new JChannel[]{a,b,c})
+            ch.getProtocolStack().findProtocol(GMS.class).setLevel("trace");
+
+        System.out.println("\n==== Injecting a merge event into A, B and C ====");
+        injectMergeEvent(merge_evt,a,b,c);
+
+        System.out.println("\n==== checking views after merge ====:");
+        for(int i=0; i < 20; i++) {
+            if(a.getView().size() == 3 && b.getView().size() == 3 && c.getView().size() == 3) {
+                System.out.println("views are correct: all views have a size of 3");
+                break;
+            }
+            System.out.print(".");
+            runStableProtocol(a,b,c);
+            Util.sleep(1000);
+        }
+
+        System.out.println("\n ==== Digests after the merge:\n" + dumpDigests(a,b,c));
+
+        View va=a.getView(), vb=b.getView(), vc=c.getView();
+        System.out.println("\nA's view: " + va);
+        System.out.println("B's view: " + vb);
+        System.out.println("C's view: " + vc);
+        assertEquals("A's view is " + va,3,va.size());
+        assertEquals("B's view is " + vb, 3, vb.size());
+        assertEquals("C's view is " + vc,3,vc.size());
+
+        for(JChannel ch: new JChannel[]{a,b,c})
+            ch.getProtocolStack().findProtocol(GMS.class).setLevel("warn");
+    }
+
+
 
 
     /**
@@ -262,14 +326,14 @@ public class OverlappingMergeTest extends ChannelTestBase {
 
 
         // start merging
-        Map<Address,View> views=new HashMap<Address,View>();
+        Map<Address,View> views=new HashMap<>();
         views.put(a.getAddress(), a.getView());
         views.put(b.getAddress(), b.getView());
-        views.put(c.getAddress(),c.getView());
-        views.put(d.getAddress(),d.getView());
+        views.put(c.getAddress(), c.getView());
+        views.put(d.getAddress(), d.getView());
         Event merge_evt=new Event(Event.MERGE, views);
 
-        System.out.println("\n==== Injecting a merge event into A, B, C and D====");
+        System.out.println("\n==== Injecting a merge event into members ====");
 
         for(JChannel ch: new JChannel[]{a,b,c,d}) {
             GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
@@ -281,14 +345,18 @@ public class OverlappingMergeTest extends ChannelTestBase {
         for(int i=0; i < 20; i++) {
             if(a.getView().size() == 4 && b.getView().size() == 4 && c.getView().size() == 4 && d.getView().size() == 4)
                 break;
-            Util.sleep(500);
+            Util.sleep(2000);
+            injectMergeEvent(merge_evt,a,b,c,d);
         }
 
         for(JChannel ch: Arrays.asList(a,b,c,d))
             System.out.println(ch.getName() + ": " + ch.getView() + " (coord=" + isCoord(ch) + ")");
 
-        for(JChannel ch: Arrays.asList(a,b,c,d))
-            assert ch.getView().size() == 4: ch.getName() + ": view is " + ch.getView();
+        for(JChannel ch: Arrays.asList(a,b,c,d)) {
+            assert ch.getView().size() == 4 : ch.getName() + ": view is " + ch.getView();
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
+            gms.setLevel("warn");
+        }
         System.out.println("\n");
     }
 
@@ -308,8 +376,8 @@ public class OverlappingMergeTest extends ChannelTestBase {
                 merge_prot.init();
                 merge_prot.down(new Event(Event.SET_LOCAL_ADDRESS, ch.getAddress()));
                 merge_prot.setMinInterval(2000);
-                merge_prot.setMaxInterval(5000);
-                merge_prot.setValue("check_interval", 2000);
+                merge_prot.setMaxInterval(3000);
+                merge_prot.setValue("check_interval", 5000);
             }
         }
 
@@ -326,33 +394,7 @@ public class OverlappingMergeTest extends ChannelTestBase {
         System.out.println("B's view: " + b.getView());
         System.out.println("C's view: " + c.getView());
 
-        for(JChannel ch: new JChannel[]{a,b,c})
-            ch.getProtocolStack().findProtocol(GMS.class).setLevel("trace");
-
-        System.out.println("\n==== checking views after merge ====:");
-        for(int i=0; i < 20; i++) {
-            if(a.getView().size() == 3 && b.getView().size() == 3 && c.getView().size() == 3) {
-                System.out.println("views are correct: all views have a size of 3");
-                break;
-            }
-
-            for(JChannel ch: new JChannel[]{a,b,c}) {
-                MERGE3 merge_prot=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
-                if(merge_prot != null)
-                    merge_prot.sendInfo();
-            }
-
-            Util.sleep(500);
-            MERGE3 merge_prot=(MERGE3)a.getProtocolStack().findProtocol(MERGE3.class);
-            merge_prot.checkInconsistencies();
-
-            System.out.print(".");
-            runStableProtocol(a,b,c);
-            Util.sleep(1000);
-        }
-
-        for(JChannel ch: new JChannel[]{a,b,c})
-            ch.getProtocolStack().findProtocol(GMS.class).setLevel("warn");
+        Util.waitUntilAllChannelsHaveSameSize(50000, 1000, a,b,c);
 
         View va=a.getView(), vb=b.getView(), vc=c.getView();
         System.out.println("\nA's view: " + va);
@@ -482,7 +524,7 @@ public class OverlappingMergeTest extends ChannelTestBase {
 
     @SuppressWarnings("unchecked")
     protected Tuple<MyReceiver,Integer> make(MyReceiver r, int expected_msgs) {
-        return new Tuple<MyReceiver,Integer>(r, expected_msgs);
+        return new Tuple<>(r, expected_msgs);
     }
 
 
@@ -516,7 +558,7 @@ public class OverlappingMergeTest extends ChannelTestBase {
     protected static class MyReceiver extends ReceiverAdapter {
         final String name;
         final JChannel ch;
-        final List<Message> mcasts=new ArrayList<Message>(20);
+        final List<Message> mcasts=new ArrayList<>(20);
 
         public MyReceiver(String name, JChannel ch) {
             this.name=name;

@@ -65,7 +65,7 @@ public class RELAY2 extends Protocol {
     /* ---------------------------------------------    Fields    ------------------------------------------------ */
 
     /** A map containing site names (e.g. "LON") as keys and SiteConfigs as values */
-    protected final Map<String,RelayConfig.SiteConfig> sites=new HashMap<String,RelayConfig.SiteConfig>();
+    protected final Map<String,RelayConfig.SiteConfig> sites=new HashMap<>();
 
     protected RelayConfig.SiteConfig                   site_config;
 
@@ -81,7 +81,7 @@ public class RELAY2 extends Protocol {
 
     protected volatile Address                         local_addr;
 
-    protected volatile List<Address>                   members=new ArrayList<Address>(11);
+    protected volatile List<Address>                   members=new ArrayList<>(11);
 
     /** Whether or not FORWARD_TO_COORD is on the stack */
     @ManagedAttribute(description="FORWARD_TO_COORD protocol is present below the current protocol")
@@ -219,7 +219,7 @@ public class RELAY2 extends Protocol {
     }
 
     public List<String> getSites() {
-        return sites.isEmpty()? Collections.<String>emptyList() : new ArrayList<String>(sites.keySet());
+        return sites.isEmpty()? Collections.<String>emptyList() : new ArrayList<>(sites.keySet());
     }
 
 
@@ -242,8 +242,7 @@ public class RELAY2 extends Protocol {
         site_config=sites.get(site);
         if(site_config == null)
             throw new Exception("site configuration for \"" + site + "\" not found in " + config);
-        if(log.isTraceEnabled())
-            log.trace(local_addr + ": site configuration:\n" + site_config);
+        log.trace(local_addr + ": site configuration:\n" + site_config);
 
         if(!site_config.getForwards().isEmpty())
             log.warn(local_addr + ": forwarding routes are currently not supported and will be ignored. This will change " +
@@ -274,8 +273,7 @@ public class RELAY2 extends Protocol {
     public void stop() {
         super.stop();
         is_site_master=false;
-        if(log.isTraceEnabled())
-            log.trace(local_addr + ": ceased to be site master; closing bridges");
+        log.trace(local_addr + ": ceased to be site master; closing bridges");
         if(relayer != null)
             relayer.stop();
     }
@@ -622,7 +620,7 @@ public class RELAY2 extends Protocol {
             }
         }
         catch(Exception e) {
-            log.error("failed delivering message", e);
+            log.error(Util.getMessage("FailedDeliveringMessage"), e);
         }
     }
 
@@ -665,8 +663,7 @@ public class RELAY2 extends Protocol {
         else {
             if(cease_site_master) { // ceased being the site master: stop the relayer
                 is_site_master=false;
-                if(log.isTraceEnabled())
-                    log.trace(local_addr + ": ceased to be site master; closing bridges");
+                log.trace(local_addr + ": ceased to be site master; closing bridges");
                 if(relayer != null)
                     relayer.stop();
             }
@@ -676,8 +673,7 @@ public class RELAY2 extends Protocol {
 
     protected void startRelayer(Relayer rel, String bridge_name) {
         try {
-            if(log.isTraceEnabled())
-                log.trace(local_addr + ": became site master; starting bridges");
+            log.trace(local_addr + ": became site master; starting bridges");
             rel.start(site_config.getBridges(), bridge_name, site);
         }
         catch(Throwable t) {
@@ -693,7 +689,7 @@ public class RELAY2 extends Protocol {
      * the first member of the view will be returned (even if it has can_become_site_master == false)
      */
     protected List<Address> determineSiteMasters(View view) {
-        List<Address> retval=new ArrayList<Address>(view.size());
+        List<Address> retval=new ArrayList<>(view.size());
         int selected=0;
 
         for(Address member: view) {
