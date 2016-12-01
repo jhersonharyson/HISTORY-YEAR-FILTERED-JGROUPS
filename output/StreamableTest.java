@@ -28,8 +28,8 @@ public class StreamableTest {
     public static void testStreamable() throws Exception {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
         byte[] tmp;
-        Message m1=new Message(null, null, buf, 0, 4);
-        Message m2=new Message(null, null, buf, 4, 3);
+        Message m1=new Message(null, buf, 0, 4);
+        Message m2=new Message(null, buf, 4, 3);
 
 
         ByteArrayOutputStream output=new ByteArrayOutputStream();
@@ -79,14 +79,14 @@ public class StreamableTest {
 
     public static void testStreamable2() throws Exception {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
-        Message msg=new Message(null, null, buf, 0, 4);
+        Message msg=new Message(null, buf, 0, 4);
         stream(msg);
     }
 
 
     public static void testStreamable3() throws Exception {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
-        Message msg=new Message(null, null, buf, 4, 3);
+        Message msg=new Message(null, buf, 4, 3);
         stream(msg);
     }
 
@@ -99,21 +99,21 @@ public class StreamableTest {
 
 
     public static void testNonNullBuffer() throws Exception {
-        Message msg=new Message(null, null, "Hello world".getBytes());
+        Message msg=new Message(null, "Hello world".getBytes());
         stream(msg);
     }
 
 
 
     public static void testNonNullAddress() throws Exception {
-        stream(new Message(null, UUID.randomUUID(), "Hello world".getBytes()));
+        stream(new Message(null, "Hello world".getBytes()).src(UUID.randomUUID()));
     }
 
 
     public static void testHeaders() throws Exception {
         Address dest=UUID.randomUUID();
         Address src=UUID.randomUUID();
-        Message msg=new Message(dest, src, "Hello world".getBytes());
+        Message msg=new Message(dest, "Hello world".getBytes()).src(src);
         PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ);
         msg.putHeader(PING_ID, hdr);
         TpHeader udp_hdr=new TpHeader("bla");
@@ -129,7 +129,7 @@ public class StreamableTest {
           d=Util.createRandomAddress("D"), e=Util.createRandomAddress("E"), f=Util.createRandomAddress("F");
 
         View v1=View.create(a,1,a,b,c);
-        View v2=new MergeView(d, 2, Arrays.asList(d), new ArrayList<View>());
+        View v2=new MergeView(d, 2, Arrays.asList(d), new ArrayList<>());
         View v3=View.create(e, 3, e,f);
         View v4=new MergeView(e, 4, Arrays.asList(d), null);
         View v5=new View(e, 5, Arrays.asList(d));

@@ -18,6 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * Dynamic tool to measure multicast performance of JGroups; every member sends N messages and we measure how long it
@@ -212,7 +213,7 @@ public class MPerf extends ReceiverAdapter {
 
 
     protected void send(Address target, Object payload, byte header, Message.Flag ... flags) throws Exception {
-        Message msg=new Message(target, null, payload);
+        Message msg=new Message(target, payload);
         if(flags != null)
             for(Message.Flag flag: flags)
                 msg.setFlag(flag);
@@ -263,7 +264,7 @@ public class MPerf extends ReceiverAdapter {
 
 
     public void receive(Message msg) {
-        MPerfHeader hdr=(MPerfHeader)msg.getHeader(ID);
+        MPerfHeader hdr=msg.getHeader(ID);
         switch(hdr.type) {
             case MPerfHeader.DATA:
                 // we're checking the *application's* seqno, and multiple sender threads
@@ -326,7 +327,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.RESULT:
-                Result res=(Result)msg.getObject();
+                Result res=msg.getObject();
                 results.add(msg.getSrc(), res);
                 if(initiator && results.hasAllResponses()) {
                     initiator=false;
@@ -335,8 +336,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.CLEAR_RESULTS:
-                for(Stats result: received_msgs.values())
-                    result.reset();
+                received_msgs.values().forEach(Stats::reset);
                 total_received_msgs.set(0);
                 last_interval=0;
 
@@ -350,7 +350,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.CONFIG_CHANGE:
-                ConfigChange config_change=(ConfigChange)msg.getObject();
+                ConfigChange config_change=msg.getObject();
                 handleConfigChange(config_change);
                 break;
 
@@ -364,7 +364,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.CONFIG_RSP:
-                handleConfigResponse((Configuration)msg.getObject());
+                handleConfigResponse(msg.getObject());
                 break;
 
             case MPerfHeader.EXIT:
@@ -481,8 +481,7 @@ public class MPerf extends ReceiverAdapter {
     }
 
     protected void handleConfigResponse(Configuration cfg) {
-        for(ConfigChange change: cfg.changes)
-            handleConfigChange(change);
+        cfg.changes.forEach(this::handleConfigChange);
     }
 
 
@@ -748,7 +747,12 @@ public class MPerf extends ReceiverAdapter {
         public MPerfHeader() {}
         public MPerfHeader(byte type) {this.type=type;}
         public MPerfHeader(byte type, long seqno) {this(type); this.seqno=seqno;}
-        public int size() {
+        public short getMagicId() {return 77;}
+        public Supplier<? extends Header> create() {
+            return MPerfHeader::new;
+        }
+
+        public int serializedSize() {
             int retval=Global.BYTE_SIZE;
             if(type == DATA)
                 retval+=Bits.size(seqno);

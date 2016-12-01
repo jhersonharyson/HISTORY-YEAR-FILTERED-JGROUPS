@@ -30,8 +30,7 @@ public class FCTest {
 
     @DataProvider
     static Object[][] configProvider() {
-        return new Object[][]{
-          {FC.class},
+        return new Object[][] {
           {MFC.class}
         };
     }
@@ -40,7 +39,7 @@ public class FCTest {
         Protocol flow_control_prot=flow_control_class.newInstance();
         flow_control_prot.setValue("min_credits", 1000).setValue("max_credits", 10000).setValue("max_block_time", 1000);
 
-        ch=new JChannel(new SHARED_LOOPBACK().setValue("thread_pool_rejection_policy", "run"),
+        ch=new JChannel(new SHARED_LOOPBACK(),
                         new SHARED_LOOPBACK_PING(),
                         new NAKACK2().setValue("use_mcast_xmit", false),
                         new UNICAST3(),
@@ -61,7 +60,7 @@ public class FCTest {
         setUp(flow_control_class);
         ch.setReceiver(r);
         for(int i=1; i <= NUM_MSGS; i++) {
-            Message msg=new Message(null, null, createPayload(SIZE));
+            Message msg=new Message(null, createPayload(SIZE));
             ch.send(msg);
             if(i % PRINT == 0)
                 System.out.println("==> " + i);

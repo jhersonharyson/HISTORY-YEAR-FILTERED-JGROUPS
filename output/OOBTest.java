@@ -3,7 +3,6 @@ package org.jgroups.tests;
 import org.jgroups.*;
 import org.jgroups.protocols.DISCARD;
 import org.jgroups.protocols.TP;
-import org.jgroups.protocols.UNICAST2;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.Protocol;
@@ -32,11 +31,11 @@ public class OOBTest extends ChannelTestBase {
     void init() throws Exception {
         a=createChannel(true, 2, "A");
         b=createChannel(a, "B");
-        setOOBPoolSize(a,b);
+        setThreadPoolSize(a, b);
         setStableGossip(a,b);
         a.connect("OOBTest");
         b.connect("OOBTest");
-        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, a, b);
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, a, b);
     }
 
 
@@ -63,7 +62,7 @@ public class OOBTest extends ChannelTestBase {
     public void testRegularAndOOBUnicasts() throws Exception {
         DISCARD discard=new DISCARD();
         ProtocolStack stack=a.getProtocolStack();
-        stack.insertProtocol(discard, ProtocolStack.BELOW,(Class<? extends Protocol>[])Util.getUnicastProtocols());
+        stack.insertProtocol(discard, ProtocolStack.Position.BELOW,(Class<? extends Protocol>[])Util.getUnicastProtocols());
 
         Address dest=b.getAddress();
         Message m1=new Message(dest, 1);
@@ -91,7 +90,7 @@ public class OOBTest extends ChannelTestBase {
     public void testRegularAndOOBUnicasts2() throws Exception {
         DISCARD discard=new DISCARD();
         ProtocolStack stack=a.getProtocolStack();
-        stack.insertProtocol(discard, ProtocolStack.BELOW,(Class<? extends Protocol>[])Util.getUnicastProtocols());
+        stack.insertProtocol(discard, ProtocolStack.Position.BELOW,(Class<? extends Protocol>[])Util.getUnicastProtocols());
 
         Address dest=b.getAddress();
         Message m1=new Message(dest, 1);
@@ -122,7 +121,7 @@ public class OOBTest extends ChannelTestBase {
     public void testRegularAndOOBMulticasts() throws Exception {
         DISCARD discard=new DISCARD();
         ProtocolStack stack=a.getProtocolStack();
-        stack.insertProtocol(discard, ProtocolStack.BELOW, NAKACK2.class);
+        stack.insertProtocol(discard, ProtocolStack.Position.BELOW, NAKACK2.class);
         a.setDiscardOwnMessages(true);
 
         Address dest=null; // send to all
@@ -158,7 +157,7 @@ public class OOBTest extends ChannelTestBase {
         discard.setLocalAddress(a.getAddress());
         discard.setUpDiscardRate(0.5);
         ProtocolStack stack=a.getProtocolStack();
-        stack.insertProtocol(discard, ProtocolStack.ABOVE, TP.class);
+        stack.insertProtocol(discard, ProtocolStack.Position.ABOVE, TP.class);
         MyReceiver r1=new MyReceiver("A"), r2=new MyReceiver("B");
         a.setReceiver(r1);
         b.setReceiver(r2);
@@ -194,14 +193,11 @@ public class OOBTest extends ChannelTestBase {
         MyReceiver receiver=new MySleepingReceiver("A", 1000);
         a.setReceiver(receiver);
 
-        TP transport=a.getProtocolStack().getTransport();
-        transport.setOOBRejectionPolicy("discard");
-
         final int NUM=10;
         for(int i=1; i <= NUM; i++)
             a.send(new Message(null, i).setFlag(Message.Flag.OOB));
 
-        STABLE stable=(STABLE)a.getProtocolStack().findProtocol(STABLE.class);
+        STABLE stable=a.getProtocolStack().findProtocol(STABLE.class);
         if(stable != null)
             stable.gc();
         Collection<Integer> msgs=receiver.getMsgs();
@@ -226,7 +222,6 @@ public class OOBTest extends ChannelTestBase {
     public void testOOBUnicastMessageLoss() throws Exception {
         MyReceiver receiver=new MySleepingReceiver("B", 1000);
         b.setReceiver(receiver);
-        a.getProtocolStack().getTransport().setOOBRejectionPolicy("discard");
 
         final int NUM=10;
         final Address dest=b.getAddress();
@@ -263,7 +258,7 @@ public class OOBTest extends ChannelTestBase {
                 threads[i]=new Thread() {
                     public void run() {
                         for(int j=0; j < msgs_per_thread; j++) {
-                            Channel sender=Util.tossWeightedCoin(0.5) ? a : b;
+                            JChannel sender=Util.tossWeightedCoin(0.5) ? a : b;
                             boolean oob=Util.tossWeightedCoin(oob_prob);
                             int num=counter.incrementAndGet();
                             Message msg=new Message(dest, num);
@@ -288,9 +283,9 @@ public class OOBTest extends ChannelTestBase {
 
 
         for(int i=0; i < num_msgs; i++) {
-            Channel sender=Util.tossWeightedCoin(0.5) ? a : b;
+            JChannel sender=Util.tossWeightedCoin(0.5) ? a : b;
             boolean oob=Util.tossWeightedCoin(oob_prob);
-            Message msg=new Message(dest, null, i);
+            Message msg=new Message(dest, i);
             if(oob)
                msg.setFlag(Message.Flag.OOB);
             sender.send(msg);            
@@ -354,36 +349,33 @@ public class OOBTest extends ChannelTestBase {
     }
 
 
-    private static void setOOBPoolSize(JChannel... channels) {
-        for(Channel channel: channels) {
+    private static void setThreadPoolSize(JChannel... channels) {
+        for(JChannel channel: channels) {
             TP transport=channel.getProtocolStack().getTransport();
-            transport.setOOBThreadPoolMinThreads(4);
-            transport.setOOBThreadPoolMaxThreads(8);
+            transport.setThreadPoolMinThreads(4);
+            transport.setThreadPoolMaxThreads(8);
         }
     }
 
     private static void setStableGossip(JChannel... channels) {
-        for(Channel channel: channels) {
+        for(JChannel channel: channels) {
             ProtocolStack stack=channel.getProtocolStack();
-            STABLE stable=(STABLE)stack.findProtocol(STABLE.class);
+            STABLE stable=stack.findProtocol(STABLE.class);
             stable.setDesiredAverageGossip(2000);
         }
     }
 
     private static void sendStableMessages(JChannel ... channels) {
         for(JChannel ch: channels) {
-            STABLE stable=(STABLE)ch.getProtocolStack().findProtocol(STABLE.class);
+            STABLE stable=ch.getProtocolStack().findProtocol(STABLE.class);
             if(stable != null)
                 stable.gc();
-            UNICAST2 uni=(UNICAST2)ch.getProtocolStack().findProtocol(UNICAST2.class);
-            if(uni != null)
-                uni.sendStableMessages();
         }
     }
 
     private static class BlockingReceiver extends ReceiverAdapter {
         final CountDownLatch latch;
-        final List<Integer>  msgs=Collections.synchronizedList(new LinkedList<Integer>());
+        final List<Integer>  msgs=Collections.synchronizedList(new LinkedList<>());
 
         public BlockingReceiver(CountDownLatch latch) {this.latch=latch;}
 
@@ -401,7 +393,7 @@ public class OOBTest extends ChannelTestBase {
                 }
             }
 
-            msgs.add((Integer)msg.getObject());
+            msgs.add(msg.getObject());
         }
     }
 
@@ -414,7 +406,7 @@ public class OOBTest extends ChannelTestBase {
         public Collection<Integer> getMsgs() {return msgs;}
 
         public void receive(Message msg) {
-            Integer val=(Integer)msg.getObject();
+            Integer val=msg.getObject();
             System.out.println(name + ": <-- " + val);
             msgs.add(val);
         }

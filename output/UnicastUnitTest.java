@@ -164,7 +164,7 @@ public class UnicastUnitTest {
     protected JChannel create(String name, boolean use_batching) throws Exception {
         Protocol[] protocols={
           new SHARED_LOOPBACK(),
-          new SHARED_LOOPBACK_PING().timeout(1000),
+          new SHARED_LOOPBACK_PING(),
           new NAKACK2(),
           new MAKE_BATCH().sleepTime(100).unicasts(use_batching),
           new UNICAST3(),
@@ -178,17 +178,17 @@ public class UnicastUnitTest {
     protected void connect() throws Exception {
         a.connect("UnicastUnitTest");
         b.connect("UnicastUnitTest");
-        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, a, b);
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, a, b);
     }
 
 
     protected static class MyReceiver extends ReceiverAdapter {
-        protected Channel             channel;
+        protected JChannel channel;
         protected Throwable           ex;
         protected final List<Integer> list=new ArrayList<>();
 
         public               MyReceiver()           {this(null);}
-        public               MyReceiver(Channel ch) {this.channel=ch;}
+        public               MyReceiver(JChannel ch) {this.channel=ch;}
         public Throwable     getEx()                {return ex;}
         public List<Integer> list()                 {return list;}
         public void          clear()                {list.clear();}
@@ -209,7 +209,7 @@ public class UnicastUnitTest {
             List<Address> members=new LinkedList<>(new_view.getMembers());
             assert 2 == members.size() : "members=" + members + ", local_addr=" + local_addr + ", view=" + new_view;
             Address dest=members.get(0);
-            Message unicast_msg=new Message(dest, null, null);
+            Message unicast_msg=new Message(dest);
             try {
                 channel.send(unicast_msg);
             }

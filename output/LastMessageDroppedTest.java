@@ -29,7 +29,7 @@ public class LastMessageDroppedTest extends ChannelTestBase {
         changeNAKACK2(a,b);
         a.connect("LastMessageDroppedTest");
         b.connect("LastMessageDroppedTest");
-        Util.waitUntilAllChannelsHaveSameSize(10000,500,a,b);
+        Util.waitUntilAllChannelsHaveSameView(10000, 500, a, b);
     }
 
 
@@ -40,7 +40,7 @@ public class LastMessageDroppedTest extends ChannelTestBase {
     public void testLastMessageDropped() throws Exception {
         DISCARD discard=new DISCARD();
         ProtocolStack stack=a.getProtocolStack();
-        stack.insertProtocol(discard,ProtocolStack.BELOW,NAKACK2.class);
+        stack.insertProtocol(discard,ProtocolStack.Position.BELOW,NAKACK2.class);
         a.setDiscardOwnMessages(true);
 
         MyReceiver receiver=new MyReceiver();

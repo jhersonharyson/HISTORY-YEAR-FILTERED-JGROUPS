@@ -1,6 +1,5 @@
 package org.jgroups.protocols;
 
-import org.jgroups.Event;
 import org.jgroups.Global;
 import org.jgroups.Header;
 import org.jgroups.Message;
@@ -14,6 +13,7 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.function.Supplier;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
@@ -63,93 +63,80 @@ public class COMPRESS extends Protocol {
     }
 
     public void destroy() {
-        for(Deflater deflater: deflater_pool)
-            deflater.end();
-        for(Inflater inflater: inflater_pool)
-            inflater.end();
+        deflater_pool.forEach(Deflater::end);
+        inflater_pool.forEach(Inflater::end);
     }   
 
 
     /**
-     * We compress the payload if it is larger than <code>min_size</code>. In this case we add a header containing
-     * the original size before compression. Otherwise we add no header.<br/>
+     * We compress the payload if it is larger than {@code min_size}. In this case we add a header containing
+     * the original size before compression. Otherwise we add no header.<p>
      * Note that we compress either the entire buffer (if offset/length are not used), or a subset (if offset/length
      * are used)
-     * @param evt
      */
-    public Object down(Event evt) {
-        if(evt.getType() == Event.MSG) {
-            Message msg=(Message)evt.getArg();
-            int length=msg.getLength(); // takes offset/length (if set) into account
-            if(length >= min_size) {
-                byte[] payload=msg.getRawBuffer(); // here we get the ref so we can avoid copying
-                byte[] compressed_payload=new byte[length];
-                Deflater deflater=null;
-                try {
-                    deflater=deflater_pool.take();
-                    deflater.reset();
-                    deflater.setInput(payload, msg.getOffset(), length);
-                    deflater.finish();
-                    deflater.deflate(compressed_payload);
-                    int compressed_size=deflater.getTotalOut();
+    public Object down(Message msg) {
+        int length=msg.getLength(); // takes offset/length (if set) into account
+        if(length >= min_size) {
+            byte[] payload=msg.getRawBuffer(); // here we get the ref so we can avoid copying
+            byte[] compressed_payload=new byte[length];
+            Deflater deflater=null;
+            try {
+                deflater=deflater_pool.take();
+                deflater.reset();
+                deflater.setInput(payload, msg.getOffset(), length);
+                deflater.finish();
+                deflater.deflate(compressed_payload);
+                int compressed_size=deflater.getTotalOut();
 
-                    if(compressed_size < length ) { // JGRP-1000
-                        byte[] new_payload=new byte[compressed_size];
-                        System.arraycopy(compressed_payload,0,new_payload,0,compressed_size);
-                        Message copy=msg.copy(false).setBuffer(new_payload).putHeader(this.id,new CompressHeader(length));
-                        if(log.isTraceEnabled())
-                            log.trace("down(): compressed payload from " + length + " bytes to " + compressed_size + " bytes");
-                        return down_prot.down(new Event(Event.MSG, copy));
-                    }
-                    else {
-                        if(log.isTraceEnabled())
-                            log.trace("down(): skipping compression since the compressed message (" + compressed_size +
-                                        ") is not smaller than the original (" + length + ")");
-                    }
+                if(compressed_size < length ) { // JGRP-1000
+                    Message copy=msg.copy(false).putHeader(this.id,new CompressHeader(length))
+                      .setBuffer(compressed_payload, 0, compressed_size);
+                    if(log.isTraceEnabled())
+                        log.trace("compressed payload from %d bytes to %d bytes", length, compressed_size);
+                    return down_prot.down(copy);
                 }
-                catch(InterruptedException e) {
-                    Thread.currentThread().interrupt(); // set interrupt flag again
-                    throw new RuntimeException(e);
-                }
-                finally {
-                    if(deflater != null)
-                        deflater_pool.offer(deflater);
+                else {
+                    if(log.isTraceEnabled())
+                        log.trace("skipping compression since the compressed message (%d) is not " +
+                                    "smaller than the original (%d)", compressed_size, length);
                 }
             }
+            catch(InterruptedException e) {
+                Thread.currentThread().interrupt(); // set interrupt flag again
+                throw new RuntimeException(e);
+            }
+            finally {
+                if(deflater != null)
+                    deflater_pool.offer(deflater);
+            }
         }
-        return down_prot.down(evt);
+        return down_prot.down(msg);
     }
-
-
 
     /**
      * If there is no header, we pass the message up. Otherwise we uncompress the payload to its original size.
-     * @param evt
      */
-    public Object up(Event evt) {
-        if(evt.getType() == Event.MSG) {
-            Message msg=(Message)evt.getArg();
-            CompressHeader hdr=(CompressHeader)msg.getHeader(this.id);
-            if(hdr != null) {
-                Message uncompressed_msg=uncompress(msg, hdr.original_size);
-                if(uncompressed_msg != null) {
-                    if(log.isTraceEnabled())
-                        log.trace("up(): uncompressed " + msg.getLength() + " bytes to " + uncompressed_msg.getLength() + " bytes");
-                    return up_prot.up(new Event(Event.MSG, uncompressed_msg));
-                }
+    public Object up(Message msg) {
+        CompressHeader hdr=msg.getHeader(this.id);
+        if(hdr != null) {
+            Message uncompressed_msg=uncompress(msg, hdr.original_size);
+            if(uncompressed_msg != null) {
+                if(log.isTraceEnabled())
+                    log.trace("uncompressed %d bytes to %d bytes", msg.getLength(), uncompressed_msg.getLength());
+                return up_prot.up(uncompressed_msg);
             }
         }
-        return up_prot.up(evt);
+        return up_prot.up(msg);
     }
 
     public void up(MessageBatch batch) {
         for(Message msg: batch) {
-            CompressHeader hdr=(CompressHeader)msg.getHeader(this.id);
+            CompressHeader hdr=msg.getHeader(this.id);
             if(hdr != null) {
                 Message uncompressed_msg=uncompress(msg, hdr.original_size);
                 if(uncompressed_msg != null) {
                     if(log.isTraceEnabled())
-                        log.trace("up(): uncompressed " + msg.getLength() + " bytes to " + uncompressed_msg.getLength() + " bytes");
+                        log.trace("uncompressed %d bytes to %d bytes", msg.getLength(), uncompressed_msg.getLength());
                     batch.replace(msg, uncompressed_msg); // replace msg in batch with uncompressed_msg
                 }
             }
@@ -202,7 +189,13 @@ public class COMPRESS extends Protocol {
             original_size=s;
         }
 
-        public int size() {
+        public short getMagicId() {return 58;}
+
+        public Supplier<? extends Header> create() {
+            return CompressHeader::new;
+        }
+
+        public int serializedSize() {
             return Global.INT_SIZE;
         }
 

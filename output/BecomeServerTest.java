@@ -65,7 +65,7 @@ public class BecomeServerTest extends BMNGRunner {
 
         b.connect("BecomeServerTest");
 
-        Util.waitUntilAllChannelsHaveSameSize(20000, 1000, a,b);
+        Util.waitUntilAllChannelsHaveSameView(20000, 1000, a, b);
 
         System.out.println("\nA: " + a.getView() + "\nB: " + b.getView());
     }
@@ -83,7 +83,7 @@ public class BecomeServerTest extends BMNGRunner {
 
 
     protected JChannel createChannel(String name) throws Exception {
-        JChannel ch=Util.createChannel(new SHARED_LOOPBACK(),
+        JChannel ch=new JChannel(new SHARED_LOOPBACK(),
                                        new PING(),
                                        new NAKACK2().setValue("become_server_queue_size", 10),
                                        new UNICAST3(),

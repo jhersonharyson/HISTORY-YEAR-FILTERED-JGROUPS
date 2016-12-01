@@ -32,10 +32,10 @@ public class FlushTest {
         s.release(1);
 
         // Make sure everyone is in sync
-        Channel[] tmp = new Channel[receivers.length];
+        JChannel[] tmp = new JChannel[receivers.length];
         for (int i = 0; i < receivers.length; i++)
             tmp[i] = receivers[i].getChannel();
-        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, tmp);
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, tmp);
 
         // Reacquire the semaphore tickets; when we have them all we know the threads are done
         s.tryAcquire(1, 10, TimeUnit.SECONDS);
@@ -95,7 +95,7 @@ public class FlushTest {
     }
     
     public void testSequentialFlushInvocation() throws Exception {
-        Channel a=null, b=null, c=null;
+        JChannel a=null, b=null, c=null;
         try {
             a = createChannel("A");
             a.connect("testSequentialFlushInvocation");
@@ -106,7 +106,7 @@ public class FlushTest {
             c = createChannel("C");
             c.connect("testSequentialFlushInvocation");
 
-            Util.waitUntilAllChannelsHaveSameSize(10000, 1000, a,b,c);
+            Util.waitUntilAllChannelsHaveSameView(10000, 1000, a, b, c);
             
             for (int i = 0; i < 100; i++) {
                 System.out.print("flush #" + i + ": ");
@@ -143,11 +143,15 @@ public class FlushTest {
             a.getProtocolStack().findProtocol(FLUSH.class).setLevel("debug");
             c.getProtocolStack().findProtocol(FLUSH.class).setLevel("debug");
 
-            Util.waitUntilAllChannelsHaveSameSize(10000, 500, a, c);
+            for(int i=0; i < 20; i++) {
+                if(a.getView().size() == 2 && c.getView().size() == 2)
+                    break;
+                Util.sleep(500);
+            }
 
             // cluster should not hang and two remaining members should have a correct view
-            assert a.getView().size() == 2;
-            assert c.getView().size() == 2;
+            assert a.getView().size() == 2 : String.format("A's view: %s", a.getView());
+            assert c.getView().size() == 2 : String.format("C's view: %s", c.getView());
 
             a.getProtocolStack().findProtocol(FLUSH.class).setLevel("warn");
             c.getProtocolStack().findProtocol(FLUSH.class).setLevel("warn");
@@ -182,7 +186,7 @@ public class FlushTest {
             b.stopFlush();
 
             System.out.println("waiting for view to contain C1 and C2");
-            Util.waitUntilAllChannelsHaveSameSize(10000, 500, a, b);
+            Util.waitUntilAllChannelsHaveSameView(10000, 500, a, b);
 
             // cluster should not hang and two remaining members should have a correct view
             System.out.println("C1: view=" + a.getView() + "\nC2: view=" + b.getView());
@@ -214,10 +218,14 @@ public class FlushTest {
             Util.startFlush(b);
 
             b.stopFlush();
-            Util.waitUntilAllChannelsHaveSameSize(10000, 500, b);
+            for(int i=0; i < 20; i++) {
+                if(b.getView().size() == 1)
+                    break;
+                Util.sleep(500);
+            }
 
             // cluster should not hang and one remaining member should have a correct view
-            assert b.getView().size() == 1;
+            assert b.getView().size() == 1 : String.format("B's view is %s", b.getView());
         } finally {
             Util.close(c, b, a);
         }
@@ -289,11 +297,11 @@ public class FlushTest {
                 first = false;
             }
 
-            Channel[] tmp = new Channel[channels.size()];
+            JChannel[] tmp = new JChannel[channels.size()];
             int cnt = 0;
             for (FlushTestReceiver receiver : channels)
                 tmp[cnt++] = receiver.getChannel();
-            Util.waitUntilAllChannelsHaveSameSize(30000, 1000, tmp);
+            Util.waitUntilAllChannelsHaveSameView(30000, 1000, tmp);
 
             // Reacquire the semaphore tickets; when we have them all
             // we know the threads are done
@@ -302,8 +310,7 @@ public class FlushTest {
             Util.sleep(1000); //let all events propagate...
             for (FlushTestReceiver app : channels)
                 app.getChannel().setReceiver(null);
-            for (FlushTestReceiver app : channels)
-                app.cleanup();
+            channels.forEach(FlushTestReceiver::cleanup);
 
             // verify block/unblock/view/get|set state sequences for all members
             for (FlushTestReceiver receiver : channels) {
@@ -312,8 +319,7 @@ public class FlushTest {
             }
         }
         finally {
-            for (FlushTestReceiver app : channels)
-                app.cleanup();
+            channels.forEach(FlushTestReceiver::cleanup);
         }
     }
 
@@ -394,12 +400,12 @@ public class FlushTest {
 
     private static void changeProps(JChannel ... channels) {
         for(JChannel ch: channels) {
-            FD fd=(FD)ch.getProtocolStack().findProtocol(FD.class);
+            FD fd=ch.getProtocolStack().findProtocol(FD.class);
             if(fd != null) {
                 fd.setTimeout(1000);
                 fd.setMaxTries(2);
             }
-            FD_ALL fd_all=(FD_ALL)ch.getProtocolStack().findProtocol(FD_ALL.class);
+            FD_ALL fd_all=ch.getProtocolStack().findProtocol(FD_ALL.class);
             if(fd_all != null) {
                 fd_all.setTimeout(2000);
                 fd_all.setInterval(800);
@@ -483,10 +489,10 @@ public class FlushTest {
     }
 
     private static class SimpleReplier extends ReceiverAdapter {
-        protected final Channel channel;
+        protected final JChannel channel;
         protected boolean       handle_requests=false;
 
-        public SimpleReplier(Channel channel, boolean handle_requests) {
+        public SimpleReplier(JChannel channel, boolean handle_requests) {
             this.channel = channel;
             this.handle_requests = handle_requests;
         }

@@ -6,7 +6,6 @@ import org.jgroups.JChannel;
 import org.jgroups.Message;
 import org.jgroups.ReceiverAdapter;
 import org.jgroups.protocols.DISCARD_PAYLOAD;
-import org.jgroups.protocols.pbcast.NAKACK;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Util;
@@ -55,7 +54,7 @@ public class NAKACK_Test extends ChannelTestBase {
         c2.setReceiver(receiver2);
         c3.setReceiver(receiver3);
 
-        c1.getProtocolStack().insertProtocol(new DISCARD_PAYLOAD(),ProtocolStack.BELOW,NAKACK.class,NAKACK2.class);
+        c1.getProtocolStack().insertProtocol(new DISCARD_PAYLOAD(), ProtocolStack.Position.BELOW, NAKACK2.class);
 
         c1.connect("NAKACK_OOB_Test");
         c2.connect("NAKACK_OOB_Test");
@@ -64,7 +63,7 @@ public class NAKACK_Test extends ChannelTestBase {
         assert c3.getView().getMembers().size() == 3 : "view is " + c3.getView() + ", expected view of 3 members";
 
         for(int i=1; i <=5; i++) {
-            Message msg=new Message(null, null,(long)i);
+            Message msg=new Message(null, (long)i);
             if(i == 4)
                 msg.setFlag(Message.Flag.OOB);
             System.out.println("-- sending message #" + i);

@@ -27,44 +27,38 @@ public class RpcLockingTest {
 	void setUp() throws Exception {
 		System.out.print("Connecting channels: ");
         a=createChannel("A");
-        disp_a=new MessageDispatcher(a, null, null);
+        disp_a=new MessageDispatcher(a);
         a.connect(RpcLockingTest.class.getSimpleName());
         lock_a=new LockService(a).getLock("lock");
 
         b=createChannel("B");
-        disp_b=new MessageDispatcher(b, null, null);
+        disp_b=new MessageDispatcher(b);
         b.connect(RpcLockingTest.class.getSimpleName());
         lock_b=new LockService(b).getLock("lock");
 
-		Util.waitUntilAllChannelsHaveSameSize(30000, 1000, a, b);
+		Util.waitUntilAllChannelsHaveSameView(30000, 1000, a, b);
 		System.out.println("");
 
-        disp_a.setRequestHandler(new RequestHandler() {
-            @Override
-            public Object handle(Message arg0) throws Exception {
-                System.out.println("A received a message, will now try to lock the lock");
-                if(lock_a.tryLock()) {
-                    Assert.fail("Should not be able to lock the lock here");
-                    System.out.println("A aquired the lock, this shouldn't be possible");
-                }
-                else
-                    System.out.println("The lock was already locked, as it should be");
-                return "Hello";
+        disp_a.setRequestHandler(arg0 -> {
+            System.out.println("A received a message, will now try to lock the lock");
+            if(lock_a.tryLock()) {
+                Assert.fail("Should not be able to lock the lock here");
+                System.out.println("A aquired the lock, this shouldn't be possible");
             }
+            else
+                System.out.println("The lock was already locked, as it should be");
+            return "Hello";
         });
 
-        disp_b.setRequestHandler(new RequestHandler() {
-            @Override
-            public Object handle(Message arg0) throws Exception {
-                System.out.println("B received a message, will now try to lock the lock");
-                if(lock_b.tryLock()) {
-                    Assert.fail("Should not be able to lock the lock here");
-                    System.out.println("B aquired the lock, this shouldn't be possible");
-                }
-                else
-                    System.out.println("The lock already was locked, as it should be");
-                return "Hello";
+        disp_b.setRequestHandler(arg0 -> {
+            System.out.println("B received a message, will now try to lock the lock");
+            if(lock_b.tryLock()) {
+                Assert.fail("Should not be able to lock the lock here");
+                System.out.println("B aquired the lock, this shouldn't be possible");
             }
+            else
+                System.out.println("The lock already was locked, as it should be");
+            return "Hello";
         });
 
         // Print who is the coordinator
@@ -82,8 +76,7 @@ public class RpcLockingTest {
 
     protected JChannel createChannel(String name) throws Exception {
         return new JChannel(
-          new SHARED_LOOPBACK(),
-          new SHARED_LOOPBACK_PING().setValue("force_sending_discovery_rsps", true),
+          new SHARED_LOOPBACK(), new SHARED_LOOPBACK_PING(),
           new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000),
           new NAKACK2().setValue("use_mcast_xmit", false).setValue("discard_delivered_msgs", true)
             .setValue("log_discard_msgs", false).setValue("log_not_found_msgs", false),
@@ -108,7 +101,8 @@ public class RpcLockingTest {
         if (lock_a.tryLock()) {
             try {
                 System.out.println("A aquired the lock, about to send message to B");
-                String rsp=disp_a.sendMessage(new Message(b.getAddress(),"bla"), RequestOptions.SYNC().setTimeout(60000).setFlags(Message.Flag.OOB));
+                byte[] buf="bla".getBytes();
+                String rsp=disp_a.sendMessage(b.getAddress(), buf, 0, buf.length, RequestOptions.SYNC().timeout(60000).flags(Message.Flag.OOB));
                 if (rsp == null) {
                     System.err.println("ERROR: didn't return correctly");
                     Assert.fail("Didn't return correctly");
@@ -137,7 +131,8 @@ public class RpcLockingTest {
 		if(lock_b.tryLock()) {
 			try {
 				System.out.println("B aquired the lock, about to send message to A");
-				String rsp = disp_b.sendMessage(new Message(a.getAddress(), "bla"), RequestOptions.SYNC().setFlags(Message.Flag.OOB));
+                byte[] buf="bla".getBytes();
+				String rsp = disp_b.sendMessage(a.getAddress(), buf, 0, buf.length, RequestOptions.SYNC().flags(Message.Flag.OOB));
 				if (rsp == null) {
                     System.err.println("ERROR: didn't return correctly");
 					Assert.fail("Didn't return correctly");
@@ -156,7 +151,8 @@ public class RpcLockingTest {
 		if(lock_a.tryLock(5000, TimeUnit.MILLISECONDS)) {
 			try {
 				System.out.println("A aquired the lock, about to send message to B");
-                String rsp = disp_a.sendMessage(new Message(b.getAddress(), "bla"), RequestOptions.SYNC().setTimeout(60000).setFlags(Message.Flag.OOB));
+                byte[] buf="bla".getBytes();
+                String rsp = disp_a.sendMessage(b.getAddress(), buf, 0, buf.length, RequestOptions.SYNC().timeout(60000).flags(Message.Flag.OOB));
 				if (rsp == null) {
 					System.err.println("ERROR: didn't return correctly");
 					Assert.fail("Didn't return correctly");

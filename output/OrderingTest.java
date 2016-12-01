@@ -64,9 +64,7 @@ public class OrderingTest {
 
 
     protected static JChannel createChannel() throws Exception {
-        return new JChannel(new SHARED_LOOPBACK().setValue("oob_thread_pool_rejection_policy", "run")
-                              .setValue("thread_pool_rejection_policy", "run")
-                              .setValue("thread_pool_queue_max_size", 100000),
+        return new JChannel(new SHARED_LOOPBACK(),
                             new SHARED_LOOPBACK_PING(),
                             new MERGE3(),
                             new FD_SOCK(),
@@ -172,7 +170,7 @@ public class OrderingTest {
         public void run() {
             for(int i=1; i <= NUM_MSGS; i++) {
                 try {
-                    Message msg=new Message(null, null, new Integer(i));
+                    Message msg=new Message(null, i);
                     ch.send(msg);
                     if(i % 100000 == 0)
                         System.out.println(Thread.currentThread().getId() + ": " + i + " sent");

@@ -95,7 +95,7 @@ public class NakackUnitTest {
     protected JChannel create(String name, boolean use_batching) throws Exception {
         Protocol[] protocols={
           new SHARED_LOOPBACK(),
-          new SHARED_LOOPBACK_PING().timeout(1000),
+          new SHARED_LOOPBACK_PING(),
           new MAKE_BATCH().sleepTime(100).multicasts(use_batching),
           new NAKACK2(),
           new UNICAST3(),
@@ -109,7 +109,7 @@ public class NakackUnitTest {
     protected void connect() throws Exception {
         a.connect("UnicastUnitTest");
         b.connect("UnicastUnitTest");
-        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, a, b);
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, a, b);
     }
 
 

@@ -12,6 +12,7 @@ import org.testng.annotations.Test;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.TimeoutException;
 
 /**
  * @author Bela Ban
@@ -31,31 +32,20 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
         o2=new ServerObject();
         o3=new ServerObject();
 
-        c1=createChannel(true, 3);
-        c1.setName("A");
+        c1=createChannel(true, 3).setName("A");
         final String GROUP="RpcDispatcherUnitTest";
         d1=new RpcDispatcher(c1, o1);
         c1.connect(GROUP);
 
-        c2=createChannel(c1);
-        c2.setName("B");
+        c2=createChannel(c1).setName("B");
         d2=new RpcDispatcher(c2, o2);
         c2.connect(GROUP);
 
-        c3=createChannel(c1);
-        c3.setName("C");
+        c3=createChannel(c1).setName("C");
         d3=new RpcDispatcher(c3, o3);
         c3.connect(GROUP);
 
-        System.out.println("c1.view=" + c1.getView() + "\nc2.view=" + c2.getView() + "\nc3.view=" + c3.getView());
-        View view=null;
-        for(int i=0; i < 10; i++) {
-            view=c3.getView();
-            if(view.size() == 3)
-                break;
-            Util.sleep(1000);
-        }
-        assert view != null && view.size() == 3 : "view=" + view;
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, c1, c2, c3);
 
         a1=c1.getAddress();
         a2=c2.getAddress();
@@ -93,7 +83,7 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
 
     /** Invoke a method on all but myself */
     public void testInvocationWithExclusionOfSelf() throws Exception {
-        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setExclusionList(a1);
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).exclusionList(a1);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);
@@ -103,7 +93,7 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
     }
 
     public void testInvocationWithExclusionOfSelfUsingDontLoopback() throws Exception {
-        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setTransientFlags(Message.TransientFlag.DONT_LOOPBACK);
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).transientFlags(Message.TransientFlag.DONT_LOOPBACK);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);
@@ -113,8 +103,8 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
     }
 
     public void testInvocationWithExclusionOfSelfUsingDontLoopbackAnycasting() throws Exception {
-        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setTransientFlags(Message.TransientFlag.DONT_LOOPBACK);
-        RspList<Object> rsps=d1.callRemoteMethods(null, "foo", null, null, options.setAnycasting(true));
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).transientFlags(Message.TransientFlag.DONT_LOOPBACK);
+        RspList<Object> rsps=d1.callRemoteMethods(null, "foo", null, null, options.anycasting(true));
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);
         assert rsps.size() == 2;
@@ -124,7 +114,7 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
 
     /** Invoke a method on all but myself and use DONT_LOOPBACK */
     public void testInvocationWithExclusionOfSelfWithDontLoopback() throws Exception {
-        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setTransientFlags(Message.TransientFlag.DONT_LOOPBACK);
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).transientFlags(Message.TransientFlag.DONT_LOOPBACK);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);
@@ -149,7 +139,7 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
     }
 
     public void testInvocationWithExclusionOfSelfWithDontLoopbackUnicast() throws Exception {
-        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 500).setTransientFlags(Message.TransientFlag.DONT_LOOPBACK);
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 500).transientFlags(Message.TransientFlag.DONT_LOOPBACK);
         try {
             d1.callRemoteMethod(a1,"foo",null,null,options);
         }
@@ -160,7 +150,7 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
 
 
     public void testInvocationWithExclusionOfTwo() throws Exception {
-        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setExclusionList(a2, a3);
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).exclusionList(a2, a3);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
         Util.sleep(500);
         System.out.println("rsps:\n" + rsps);
@@ -170,11 +160,9 @@ public class RpcDispatcherUnitTest extends ChannelTestBase {
     }
 
     public void testInvocationOnEmptyTargetSet() throws Exception {
-        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).setExclusionList(a1, a2, a3);
+        RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 5000).exclusionList(a1, a2, a3);
         RspList rsps=d1.callRemoteMethods(null, "foo", null, null, options);
-        Util.sleep(500);
-        System.out.println("rsps:\n" + rsps);
-        assert rsps.isEmpty();
+        assert rsps != null && rsps.isEmpty();
         assert !o1.wasCalled() && !o2.wasCalled() && !o3.wasCalled();
     }
 

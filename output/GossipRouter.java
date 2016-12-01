@@ -1,19 +1,15 @@
 package org.jgroups.stack;
 
 import org.jgroups.Address;
+import org.jgroups.Message;
 import org.jgroups.PhysicalAddress;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
-import org.jgroups.blocks.cs.BaseServer;
-import org.jgroups.blocks.cs.Connection;
-import org.jgroups.blocks.cs.ConnectionListener;
-import org.jgroups.blocks.cs.TcpServer;
+import org.jgroups.blocks.cs.*;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
-import org.jgroups.blocks.cs.NioServer;
-import org.jgroups.blocks.cs.ReceiverAdapter;
 import org.jgroups.protocols.PingData;
 import org.jgroups.util.*;
 
@@ -64,6 +60,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
     protected ThreadFactory                                     thread_factory=new DefaultThreadFactory("gossip", false, true);
 
+    protected SocketFactory                                     socket_factory=new DefaultSocketFactory();
+
     @Property(description="The max queue size of backlogged connections")
     protected int                                               backlog=1000;
 
@@ -76,6 +74,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     @Property(description="Handles client disconnects: sends SUSPECT message to all other members of that group")
     protected boolean                                           emit_suspect_events=true;
 
+    @Property(description="Dumps messages (dest/src/length/headers to stdout if enabled")
+    protected boolean                                           dump_msgs;
 
     protected BaseServer                                        server;
     protected final AtomicBoolean                               running=new AtomicBoolean(false);
@@ -106,6 +106,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     public GossipRouter  socketReadTimeout(long t)          {this.sock_read_timeout=t; return this;}
     public ThreadFactory threadPoolFactory()                {return thread_factory;}
     public GossipRouter  threadPoolFactory(ThreadFactory f) {this.thread_factory=f; return this;}
+    public SocketFactory socketFactory()                    {return socket_factory;}
+    public GossipRouter  socketFactory(SocketFactory sf)    {this.socket_factory=sf; return this;}
     public int           backlog()                          {return backlog;}
     public GossipRouter  backlog(int backlog)               {this.backlog=backlog; return this;}
     public boolean       jmx()                              {return jmx;}
@@ -114,6 +116,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     public GossipRouter  useNio(boolean flag)               {use_nio=flag; return this;}
     public boolean       emitSuspectEvents()                {return emit_suspect_events;}
     public GossipRouter  emitSuspectEvents(boolean flag)    {emit_suspect_events=flag; return this;}
+    public boolean       dumpMessages()                     {return dump_msgs;}
+    public GossipRouter  dumpMessages(boolean flag)         {dump_msgs=flag; return this;}
     @ManagedAttribute(description="operational status", name="running")
     public boolean       running()                          {return running.get();}
 
@@ -135,8 +139,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
             JmxConfigurator.register(this, Util.getMBeanServer(), "jgroups:name=GossipRouter");
 
         InetAddress tmp=bind_addr != null? InetAddress.getByName(bind_addr) : null;
-        server=use_nio? new NioServer(thread_factory, tmp, port, port+50, null, 0)
-          : new TcpServer(thread_factory, new DefaultSocketFactory(), tmp, port, port+50, null, 0);
+        server=use_nio? new NioServer(thread_factory, socket_factory, tmp, port, port, null, 0)
+          : new TcpServer(thread_factory, socket_factory, tmp, port, port, null, 0);
         server.receiver(this);
         server.start();
         server.addConnectionListener(this);
@@ -220,6 +224,17 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
                     String group=Bits.readString(in);
                     Address dest=Util.readAddress(in);
                     route(group, dest, buf, offset, length);
+
+                    if(dump_msgs) {
+                        ByteArrayDataInputStream input=new ByteArrayDataInputStream(buf, offset, length);
+                        GossipData data=new GossipData();
+                        data.readFrom(input);
+                        System.out.println("");
+                        List<Message> messages=Util.parse(data.buffer, data.offset, data.length);
+                        if(messages != null)
+                            for(Message msg : messages)
+                                System.out.printf("dst=%s src=%s (%d bytes): hdrs= %s\n", msg.dest(), msg.src(), msg.getLength(), msg.printHeaders());
+                    }
                 }
                 catch(Throwable t) {
                     log.error(Util.getMessage("FailedReadingRequest"), t);
@@ -241,7 +256,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
                         rsp.addPingData(data);
                     }
                 }
-                ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(rsp.size());
+                ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(rsp.serializedSize());
                 try {
                     rsp.writeTo(out);
                     server.send(sender, out.buffer(), 0, out.position());
@@ -359,7 +374,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
 
     protected void sendToAllMembersInGroup(Set<Map.Entry<Address,Entry>> dests, GossipData request) {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.size());
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.serializedSize());
         try {
             request.writeTo(out);
         }
@@ -400,7 +415,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
 
     protected void sendToMember(Address dest, GossipData request) {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.size());
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.serializedSize());
         try {
             request.writeTo(out);
             server.send(dest, out.buffer(), 0, out.position());
@@ -462,9 +477,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
         GossipRouter router=null;
         String bind_addr=null;
-        boolean jmx=true;
-        boolean nio=true;
-        boolean suspects=true;
+        boolean jmx=true, nio=true, suspects=true, dump_msgs=false;
 
         for(int i=0; i < args.length; i++) {
             String arg=args[i];
@@ -496,12 +509,16 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
                 soTimeout=Long.parseLong(args[++i]);
                 continue;
             }
-            if("-nio".equals(args[i])) {
+            if("-nio".equals(arg)) {
                 nio=Boolean.parseBoolean(args[++i]);
                 continue;
             }
-            if("-suspect".equals(args[i])) {
+            if("-suspect".equals(arg)) {
                 suspects=Boolean.parseBoolean(args[++i]);
+                continue;
+            }
+            if("-dump_msgs".equals(arg)) {
+                dump_msgs=Boolean.parseBoolean(args[++i]);
                 continue;
             }
             help();
@@ -514,7 +531,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
           .backlog(backlog)
           .socketReadTimeout(soTimeout)
           .lingerTimeout(soLinger)
-          .emitSuspectEvents(suspects);
+          .emitSuspectEvents(suspects)
+          .dumpMessages(dump_msgs);
         router.start();
         IpAddress local=(IpAddress)router.localAddress();
         System.out.printf("\nGossipRouter listening on %s:%s\n", bind_addr != null? bind_addr : "0.0.0.0",  local.getPort());
@@ -527,28 +545,30 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
         System.out.println();
         System.out.println("Options:");
         System.out.println();
-        System.out.println("    -backlog <backlog>    - Max queue size of backlogged connections. Must be");
-        System.out.println("                            greater than zero or the default of 1000 will be");
-        System.out.println("                            used.");
+        System.out.println("    -backlog <backlog>      - Max queue size of backlogged connections. Must be");
+        System.out.println("                              greater than zero or the default of 1000 will be");
+        System.out.println("                              used.");
         System.out.println();
-        System.out.println("    -jmx <true|false>     - Expose attributes and operations via JMX.");
+        System.out.println("    -jmx <true|false>       - Expose attributes and operations via JMX.");
         System.out.println();
-        System.out.println("    -solinger <msecs>     - Time for setting SO_LINGER on connections. 0");
-        System.out.println("                            means do not set SO_LINGER. Must be greater than");
-        System.out.println("                            or equal to zero or the default of 2000 will be");
-        System.out.println("                            used.");
+        System.out.println("    -solinger <msecs>       - Time for setting SO_LINGER on connections. 0");
+        System.out.println("                              means do not set SO_LINGER. Must be greater than");
+        System.out.println("                              or equal to zero or the default of 2000 will be");
+        System.out.println("                              used.");
         System.out.println();
-        System.out.println("    -sotimeout <msecs>    - Time for setting SO_TIMEOUT on connections. 0");
-        System.out.println("                            means don't set SO_TIMEOUT. Must be greater than");
-        System.out.println("                            or equal to zero or the default of 3000 will be");
-        System.out.println("                            used.");
+        System.out.println("    -sotimeout <msecs>      - Time for setting SO_TIMEOUT on connections. 0");
+        System.out.println("                               means don't set SO_TIMEOUT. Must be greater than");
+        System.out.println("                               or equal to zero or the default of 3000 will be");
+        System.out.println("                               used.");
         System.out.println();
-        System.out.println("    -expiry <msecs>       - Time for closing idle connections. 0");
-        System.out.println("                            means don't expire.");
+        System.out.println("    -expiry <msecs>         - Time for closing idle connections. 0");
+        System.out.println("                              means don't expire.");
         System.out.println();
-        System.out.printf("     -nio <true|false>     - Whether or not to use non-blocking connections (NIO)");
+        System.out.printf("    -nio <true|false>       - Whether or not to use non-blocking connections (NIO)\n");
         System.out.println();
-        System.out.printf("     -suspect <true|false> - Whether or not to use send SUSPECT events when a conn is closed");
+        System.out.printf("    -suspect <true|false>   - Whether or not to use send SUSPECT events when a conn is closed\n");
+        System.out.println();
+        System.out.printf("    -dump_msgs <true|false> - Dumps all messages to stdout after routing them\n");
         System.out.println();
     }
 }

@@ -7,7 +7,7 @@ import org.jgroups.Header;
 import org.jgroups.Message;
 import org.jgroups.protocols.PingHeader;
 import org.jgroups.protocols.TpHeader;
-import org.jgroups.protocols.pbcast.NakAckHeader;
+import org.jgroups.protocols.pbcast.NakAckHeader2;
 import org.jgroups.util.ByteArrayDataInputStream;
 import org.jgroups.util.Range;
 import org.jgroups.util.UUID;
@@ -18,6 +18,7 @@ import org.testng.annotations.Test;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * @author Bela Ban
@@ -135,7 +136,7 @@ public class MessageTest {
 
 
     public static void testBufferSize() throws Exception {
-        Message m1=new Message(null, null, "bela");
+        Message m1=new Message(null, "bela");
         assert m1.getRawBuffer() != null;
         assert m1.getBuffer() != null;
         Assert.assertEquals(m1.getBuffer().length, m1.getLength());
@@ -150,8 +151,8 @@ public class MessageTest {
 
     public static void testBufferOffset() throws Exception {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
-        Message m1=new Message(null, null, buf, 0, 4);
-        Message m2=new Message(null, null, buf, 4, 3);
+        Message m1=new Message(null, buf, 0, 4);
+        Message m2=new Message(null, buf, 4, 3);
 
         byte[] b1, b2;
 
@@ -183,22 +184,22 @@ public class MessageTest {
     @Test(groups=Global.FUNCTIONAL, expectedExceptions=ArrayIndexOutOfBoundsException.class)
     public static void testInvalidOffset() {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
-        Message m1=new Message(null, null, buf, -1, 4);
+        Message m1=new Message(null, buf, -1, 4);
         System.out.println("message is " + m1);
     }
 
     @Test(groups=Global.FUNCTIONAL, expectedExceptions=ArrayIndexOutOfBoundsException.class)
     public static void testInvalidLength() {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
-        Message m1=new Message(null, null, buf, 3, 6);
+        Message m1=new Message(null, buf, 3, 6);
         System.out.println("we should not get here with " + m1);
     }
 
 
     public static void testGetRawBuffer() {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
-        Message m1=new Message(null, null, buf, 0, 4);
-        Message m2=new Message(null, null, buf, 4, 3);
+        Message m1=new Message(null, buf, 0, 4);
+        Message m2=new Message(null, buf, 4, 3);
 
         Assert.assertEquals(buf.length, m1.getRawBuffer().length);
         Assert.assertEquals(4, m1.getBuffer().length);
@@ -213,16 +214,16 @@ public class MessageTest {
 
     public static void testSetObject() {
         String s1="Bela Ban";
-        Message m1=new Message(null, null, s1);
+        Message m1=new Message(null, s1);
         Assert.assertEquals(0, m1.getOffset());
         Assert.assertEquals(m1.getBuffer().length, m1.getLength());
-        String s2=(String)m1.getObject();
+        String s2=m1.getObject();
         Assert.assertEquals(s2, s1);
     }
 
 
     public static void testCopy() {
-        Message m1=new Message(null, null, "Bela Ban");
+        Message m1=new Message(null, "Bela Ban");
         m1.setFlag(Message.Flag.OOB);
         m1.setTransientFlag(Message.TransientFlag.OOB_DELIVERED);
         Message m2=m1.copy();
@@ -236,8 +237,8 @@ public class MessageTest {
 
     public static void testCopyWithOffset() {
         byte[] buf={'b', 'e', 'l', 'a', 'b', 'a', 'n'};
-        Message m1=new Message(null, null, buf, 0, 4);
-        Message m2=new Message(null, null, buf, 4, 3);
+        Message m1=new Message(null, buf, 0, 4);
+        Message m2=new Message(null, buf, 4, 3);
 
         Message m3, m4;
         m3=m1.copy();
@@ -253,7 +254,7 @@ public class MessageTest {
     }
 
     public static void testCopyHeaders() {
-        Message m1=new Message(null, null, "hello");
+        Message m1=new Message(null, "hello");
         for(short id: new short[]{1, 2, 10, Global.BLOCKS_START_ID, Global.BLOCKS_START_ID +10}) {
             m1.putHeader(id, new DummyHeader(id));
         }
@@ -359,26 +360,26 @@ public class MessageTest {
 
 
     public static void testSizeMessageWithDest() throws Exception {
-        Message msg=new Message(UUID.randomUUID(), null, null);
+        Message msg=new Message(UUID.randomUUID());
         _testSize(msg);
     }
 
 
     public static void testSizeMessageWithSrc() throws Exception {
-        Message msg=new Message(null, UUID.randomUUID(), null);
+        Message msg=new Message(null).src(UUID.randomUUID());
         _testSize(msg);
     }
 
 
     public static void testSizeMessageWithDestAndSrc() throws Exception {
-        Message msg=new Message(UUID.randomUUID(), UUID.randomUUID(), null);
+        Message msg=new Message(UUID.randomUUID()).src(UUID.randomUUID());
         _testSize(msg);
     }
 
 
 
     public static void testSizeMessageWithDestAndSrcAndFlags() throws Exception {
-        Message msg=new Message(UUID.randomUUID(), UUID.randomUUID(), null);
+        Message msg=new Message(UUID.randomUUID()).src(UUID.randomUUID());
         msg.setFlag(Message.Flag.OOB);
         msg.setFlag(Message.Flag.DONT_BUNDLE);
         _testSize(msg);
@@ -386,31 +387,31 @@ public class MessageTest {
 
 
     public static void testSizeMessageWithBuffer() throws Exception {
-        Message msg=new Message(null, null, "bela".getBytes());
+        Message msg=new Message(null, "bela".getBytes());
         _testSize(msg);
     }
 
 
     public static void testSizeMessageWithBuffer2() throws Exception {
-        Message msg=new Message(null, null, new byte[]{'b', 'e', 'l', 'a'});
+        Message msg=new Message(null, new byte[]{'b', 'e', 'l', 'a'});
         _testSize(msg);
     }
 
 
     public static void testSizeMessageWithBuffer3() throws Exception {
-        Message msg=new Message(null, null, "bela");
+        Message msg=new Message(null, "bela");
         _testSize(msg);
     }
 
 
     public void testSizeMessageWithDestAndSrcAndHeaders() throws Exception {
-        Message msg=new Message(UUID.randomUUID(), UUID.randomUUID(), "bela".getBytes());
+        Message msg=new Message(UUID.randomUUID(), "bela".getBytes()).src(UUID.randomUUID());
         addHeaders(msg);
         _testSize(msg);
     }
 
-    public static void testReadFromSkipPayload() throws Exception {
-        Message msg=new Message(Util.createRandomAddress("A"), Util.createRandomAddress("B"), "bela".getBytes());
+    public void testReadFromSkipPayload() throws Exception {
+        Message msg=new Message(Util.createRandomAddress("A"), "bela".getBytes()).src(Util.createRandomAddress("B"));
         addHeaders(msg);
         byte[] buf=Util.streamableToByteBuffer(msg);
 
@@ -432,7 +433,7 @@ public class MessageTest {
     }
 
     public static void testReadFromSkipPayloadNullPayload() throws Exception {
-        Message msg=new Message(Util.createRandomAddress("A"), Util.createRandomAddress("B"), null);
+        Message msg=new Message(Util.createRandomAddress("A")).src(Util.createRandomAddress("B"));
         addHeaders(msg);
         byte[] buf=Util.streamableToByteBuffer(msg);
 
@@ -464,7 +465,7 @@ public class MessageTest {
         msg.putHeader(UDP_ID, tp_hdr);
         PingHeader ping_hdr=new PingHeader(PingHeader.GET_MBRS_REQ).clusterName("demo-cluster");
         msg.putHeader(PING_ID, ping_hdr);
-        NakAckHeader nak_hdr=NakAckHeader.createXmitRequestHeader(100, 104, null);
+        NakAckHeader2 nak_hdr=NakAckHeader2.createXmitRequestHeader(Util.createRandomAddress("S"));
         msg.putHeader(NAKACK_ID, nak_hdr);
     }
 
@@ -478,17 +479,24 @@ public class MessageTest {
 
 
     protected static class DummyHeader extends Header {
-        protected final short num;
+        protected short num;
+
+        public DummyHeader() {
+        }
 
         public DummyHeader(short num) {
             this.num=num;
+        }
+        public short getMagicId() {return 1600;}
+        public Supplier<? extends Header> create() {
+            return DummyHeader::new;
         }
 
         public short getNum() {
             return num;
         }
 
-        public int size() {
+        public int serializedSize() {
             return 0;
         }
 

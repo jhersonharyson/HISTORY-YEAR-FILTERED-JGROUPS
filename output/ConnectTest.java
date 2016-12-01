@@ -5,9 +5,9 @@ package org.jgroups.tests;
 import org.jgroups.*;
 import org.jgroups.protocols.TP;
 import org.jgroups.stack.ProtocolStack;
+import org.jgroups.util.NameCache;
 import org.jgroups.util.Promise;
 import org.jgroups.util.Util;
-import org.jgroups.util.UUID;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
@@ -20,14 +20,11 @@ public class ConnectTest extends ChannelTestBase {
     JChannel channel, coordinator;
 
 
-    @AfterMethod
-    void tearDown() throws Exception {
+    @AfterMethod void tearDown() throws Exception {
         Util.close(channel, coordinator);
     }
 
 
-
-    @Test
     public void testConnectAndDisconnect() throws Exception {
         channel=createChannel(true);
         final String GROUP=getUniqueClusterName("ConnectTest");
@@ -39,7 +36,7 @@ public class ConnectTest extends ChannelTestBase {
         }
     }
 
-    @Test
+
     public void testDisconnectConnectOne() throws Exception {
         channel=createChannel(true);
         changeProps(channel);
@@ -55,18 +52,16 @@ public class ConnectTest extends ChannelTestBase {
     /**
      * Tests connect-disconnect-connect sequence for a group with two members
      **/
-    @Test
     public void testDisconnectConnectTwo() throws Exception {
-        View     view;
-        coordinator=createChannel(true);
+        coordinator=createChannel(true, 3, "coord");
         changeProps(coordinator);
         coordinator.connect("ConnectTest.testgroup-3");
-        print(coordinator, "coordinator");
-        view=coordinator.getView();
+        print(coordinator, "coord");
+        View view=coordinator.getView();
         System.out.println("-- view for coordinator: " + view);
         assert view.size() == 1;
 
-        channel=createChannel(coordinator);
+        channel=createChannel(coordinator, "channel");
         changeProps(channel);
         channel.connect("ConnectTest.testgroup-4");
         print(channel, "channel");
@@ -87,21 +82,16 @@ public class ConnectTest extends ChannelTestBase {
     }
 
 
-    static void print(JChannel ch, String msg) {
+    protected static void print(JChannel ch, String msg) {
         System.out.println(msg + ": name=" + ch.getName() + ", addr=" + ch.getAddress() +
-                ", UUID=" + ch.getAddressAsUUID() + "\nUUID cache:\n" + UUID.printCache() +
-                "\nLogical_addr_cache:\n" + ch.getProtocolStack().getTransport().printLogicalAddressCache());
+                             ", UUID=" + ch.getAddressAsUUID() + "\nUUID cache:\n" + NameCache.printCache() +
+                             "\nLogical_addr_cache:\n" + ch.getProtocolStack().getTransport().printLogicalAddressCache());
     }
 
 
     /**
-     * Tests connect-disconnect-connect-send sequence for a group with two
-     * members. Test case introduced before fixing pbcast.NAKACK
-     * bug, which used to leave pbcast.NAKACK in a broken state after
-     * DISCONNECT. Because of this problem, the channel couldn't be used to
-     * multicast messages.
+     * Tests connect-disconnect-connect-send sequence for a group with two members
      **/
-    @Test
     public void testDisconnectConnectSendTwo() throws Exception {
         final Promise<Message> msgPromise=new Promise<>();
         coordinator=createChannel(true);
@@ -114,14 +104,14 @@ public class ConnectTest extends ChannelTestBase {
         channel.connect("ConnectTest.testgroup-6");
         channel.disconnect();
         channel.connect("ConnectTest.testgroup-5");
-        channel.send(new Message(null, null, "payload"));
+        channel.send(new Message(null, "payload"));
         Message msg=msgPromise.getResult(20000);
         assert msg != null;
         assert msg.getObject().equals("payload");
     }
 
 
-    private static void changeProps(Channel ch) {
+    private static void changeProps(JChannel ch) {
         ProtocolStack stack=ch.getProtocolStack();
         TP transport=stack.getTransport();
         transport.setLogDiscardMessages(false);

@@ -37,8 +37,6 @@ public class UNICAST_OOB_Test {
     @DataProvider
     static Object[][] configProvider() {
         return new Object[][]{
-          {UNICAST.class},
-          {UNICAST2.class},
           {UNICAST3.class}
         };
     }
@@ -68,15 +66,15 @@ public class UNICAST_OOB_Test {
         ProtocolStack stack=a.getProtocolStack();
         Protocol neighbor=stack.findProtocol(Util.getUnicastProtocols());
         System.out.println("Found unicast protocol " + neighbor.getClass().getSimpleName());
-        stack.insertProtocolInStack(discard,neighbor,ProtocolStack.BELOW);
+        stack.insertProtocolInStack(discard,neighbor,ProtocolStack.Position.BELOW);
 
         a.connect("UNICAST_OOB_Test");
         b.connect("UNICAST_OOB_Test");
-        Util.waitUntilAllChannelsHaveSameSize(10000, 1000, a,b);
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, a, b);
 
         Address dest=b.getAddress();
         for(int i=1; i <=5; i++) {
-            Message msg=new Message(dest, null,(long)i);
+            Message msg=new Message(dest,(long)i);
             if(i == 4 && oob)
                 msg.setFlag(Message.Flag.OOB);
             System.out.println("-- sending message #" + i);
@@ -118,8 +116,6 @@ public class UNICAST_OOB_Test {
 
     protected JChannel createChannel(Class<? extends Protocol> unicast_class, String name) throws Exception {
         Protocol unicast=unicast_class.newInstance().setValue("xmit_interval",500);
-        if(unicast instanceof UNICAST2)
-            unicast.setValue("stable_interval", 1000);
         return new JChannel(
           new SHARED_LOOPBACK(),
           new SHARED_LOOPBACK_PING(),
@@ -134,7 +130,7 @@ public class UNICAST_OOB_Test {
 
     public static class MyReceiver extends ReceiverAdapter {
         /** List<Long> of unicast sequence numbers */
-        List<Long> seqnos=Collections.synchronizedList(new LinkedList<Long>());
+        List<Long> seqnos=Collections.synchronizedList(new LinkedList<>());
 
         public MyReceiver() {
         }
@@ -145,7 +141,7 @@ public class UNICAST_OOB_Test {
 
         public void receive(Message msg) {
             if(msg != null) {
-                Long num=(Long)msg.getObject();
+                Long num=msg.getObject();
                 System.out.println(">> received " + num);
                 seqnos.add(num);
             }
