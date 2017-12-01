@@ -10,8 +10,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
 /** Tests {@link org.jgroups.util.Table<Integer>}
@@ -57,7 +58,7 @@ public class TableTest {
         System.out.println("buf = " + buf);
         assert rc;
         assert buf.size() == 10;
-        List<Integer> list=buf.removeMany(null, true, 0, element -> element.hashCode() == DUMMY.hashCode());
+        List<Integer> list=buf.removeMany(true, 0, element -> element.hashCode() == DUMMY.hashCode());
         System.out.println("list = " + list);
         assert list.size() == 10;
         for(int num: list)
@@ -479,7 +480,7 @@ public class TableTest {
     }
 
 
-    public static void testComputeSize() {
+    public void testComputeSize() {
         Table<Integer> table=new Table<>(3, 10, 0);
         for(int num: Arrays.asList(1,2,3,4,5,6,7,8,9,10))
             table.add(num, num);
@@ -653,7 +654,7 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 10, 0);
         for(int i=1; i <= 10; i++)
             table.add(i, i);
-        List<Integer> list=table.removeMany(null, true, 0, element -> element % 2 == 0);
+        List<Integer> list=table.removeMany(true, 0, element -> element % 2 == 0);
         System.out.println("list = " + list);
         System.out.println("table = " + table);
         assert list.size() == 5;
@@ -666,7 +667,7 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 10, 0);
         for(int i=1; i <= 10; i++)
             table.add(i, i);
-        List<Integer> list=table.removeMany(null, true, 0, element -> true);
+        List<Integer> list=table.removeMany(true, 0, element -> true);
         System.out.println("list = " + list);
         System.out.println("table = " + table);
         assert list.size() == 10;
@@ -677,7 +678,7 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 10, 0);
         for(int i=1; i <= 10; i++)
             table.add(i, i);
-        List<Integer> list=table.removeMany(null, true, 0, element -> false);
+        List<Integer> list=table.removeMany(true, 0, element -> false);
         System.out.println("list = " + list);
         System.out.println("table = " + table);
         assert list == null;
@@ -688,13 +689,53 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 10, 0);
         for(int i=1; i <= 10; i++)
             table.add(i, i);
-        List<Integer> list=table.removeMany(null,true,3,new Predicate<Integer>() {
+        List<Integer> list=table.removeMany(true, 3, new Predicate<Integer>() {
             int cnt=0;
             public boolean test(Integer element) {return ++cnt <= 2;}});
         System.out.println("list = " + list);
         System.out.println("table = " + table);
         assert list.size() == 2;
         assert table.isEmpty();
+    }
+
+
+    public void testRemoveMany3() {
+        Table<Integer> table=new Table<>(3, 10, 0);
+        for(int i=1; i <= 10; i++)
+            table.add(i, i);
+
+        List<Integer> result=table.removeMany(true, 0, null, ArrayList::new, ArrayList::add);
+        assert result != null && result.size() == 10;
+        assert table.isEmpty();
+    }
+
+    public void testRemoveManyIntoMessageBatch() {
+        Table<Message> table=new Table<>(3, 10, 0);
+        for(int i=1; i <= 10; i++)
+            table.add(i, new Message(null, "hello"));
+
+        MessageBatch batch=new MessageBatch(table.size());
+        Supplier<MessageBatch> batch_creator=() -> batch;
+        BiConsumer<MessageBatch,Message> accumulator=MessageBatch::add;
+
+        MessageBatch result=table.removeMany(true, 0, null, batch_creator, accumulator);
+        assert !batch.isEmpty();
+        assert table.isEmpty();
+        assert batch.size() == 10;
+        assert result != null && result == batch;
+
+        IntStream.rangeClosed(11,15).forEach(seqno -> table.add(seqno, new Message(null, "test")));
+
+        batch.reset();
+        result=table.removeMany(true, 0, null, batch_creator, accumulator);
+        assert !batch.isEmpty();
+        assert table.isEmpty();
+        assert batch.size() == 5;
+        assert result != null && result == batch;
+
+
+        result=table.removeMany( true, 0, null, batch_creator, accumulator);
+        assert result == null;
     }
 
 
@@ -914,9 +955,51 @@ public class TableTest {
         assert missing.size() == 25;
 
         missing=buf.getMissing(10);
-        assert missing.size() == 10;
+        assert missing.size() == 5;
+
+        missing=buf.getMissing(200);
+        assert missing.size() == 25;
     }
 
+
+    public void testGetMissingWithMaxBundleSize() {
+        final int max_bundle_size=64000, missing_msgs=1_000_000;
+        final int max_xmit_req_size=(max_bundle_size -50) * Global.LONG_SIZE;
+        Table<Integer> table=new Table<>(10, 1000, 0);
+        table.add(0, 0);
+        table.add(missing_msgs, missing_msgs);
+        System.out.println("table = " + table);
+
+        SeqnoList missing=table.getMissing(max_xmit_req_size);
+        System.out.println("missing = " + missing);
+
+        int serialized_size=missing.serializedSize();
+        assert serialized_size <= max_bundle_size :
+          String.format("serialized size of %d needs to be less than max_bundle_size of %d bytes", serialized_size, max_bundle_size);
+    }
+
+    public void testGetMissingWithMaxBundleSize2() {
+        final int max_bundle_size=64000, missing_msgs=2_000_000;
+        final int max_xmit_req_size=(max_bundle_size -50) * Global.LONG_SIZE;
+        Table<Integer> table=new Table<>(10, 1000, 0);
+        for(int i=0; i < missing_msgs/2; i++)
+            table.add(i, i);
+
+        table.add(missing_msgs, missing_msgs);
+        System.out.println("table = " + table);
+
+        SeqnoList missing=table.getMissing(max_xmit_req_size);
+        System.out.println("missing = " + missing);
+
+        int serialized_size=missing.serializedSize();
+        assert serialized_size <= max_bundle_size :
+          String.format("serialized size of %d needs to be less than max_bundle_size of %d bytes", serialized_size, max_bundle_size);
+
+        int limit=missing_msgs/2 + max_xmit_req_size;
+        for(long l: missing) {
+            assert l >= missing_msgs/2 && l < limit;
+        }
+    }
 
 
     public static void testGetMissingLast() {
@@ -946,50 +1029,62 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 10, 0);
         System.out.println("table = " + table);
         long highest_deliverable=table.getHighestDeliverable(), hd=table.getHighestDelivered();
+        int num_deliverable=table.getNumDeliverable();
         System.out.println("highest delivered=" + hd + ", highest deliverable=" + highest_deliverable);
         assert hd == 0;
         assert highest_deliverable == 0;
+        assert num_deliverable == 0;
 
         for(int num: Arrays.asList(1,2,3,4,5,6,8))
             table.add(num, num);
         System.out.println("table = " + table);
         highest_deliverable=table.getHighestDeliverable();
+        num_deliverable=table.getNumDeliverable();
         hd=table.getHighestDelivered();
         System.out.println("highest delivered=" + hd + ", highest deliverable=" + highest_deliverable);
         assert hd == 0;
         assert highest_deliverable == 6;
+        assert num_deliverable == 6;
 
         table.removeMany(true, 4);
         System.out.println("table = " + table);
         highest_deliverable=table.getHighestDeliverable();
+        num_deliverable=table.getNumDeliverable();
         hd=table.getHighestDelivered();
         System.out.println("highest delivered=" + hd + ", highest deliverable=" + highest_deliverable);
         assert hd == 4;
         assert highest_deliverable == 6;
+        assert num_deliverable == 2;
 
         table.removeMany(true, 100);
         System.out.println("table = " + table);
         highest_deliverable=table.getHighestDeliverable();
         hd=table.getHighestDelivered();
+        num_deliverable=table.getNumDeliverable();
         System.out.println("highest delivered=" + hd + ", highest deliverable=" + highest_deliverable);
         assert hd == 6;
         assert highest_deliverable == 6;
+        assert num_deliverable == 0;
 
         table.add(7,7);
         System.out.println("table = " + table);
         highest_deliverable=table.getHighestDeliverable();
+        num_deliverable=table.getNumDeliverable();
         hd=table.getHighestDelivered();
         System.out.println("highest delivered=" + hd + ", highest deliverable=" + highest_deliverable);
         assert hd == 6;
         assert highest_deliverable == 8;
+        assert num_deliverable == 2;
 
         table.removeMany(true, 100);
         System.out.println("table = " + table);
         highest_deliverable=table.getHighestDeliverable();
+        num_deliverable=table.getNumDeliverable();
         hd=table.getHighestDelivered();
         System.out.println("highest delivered=" + hd + ", highest deliverable=" + highest_deliverable);
         assert hd == 8;
         assert highest_deliverable == 8;
+        assert num_deliverable == 0;
     }
 
     public void testGetHighestDeliverable2() {
@@ -1390,8 +1485,7 @@ public class TableTest {
         assert win.size() == delta;
         assertIndices(win, orig_seqno, orig_seqno, seqno);
 
-        final AtomicBoolean processing=new AtomicBoolean(false);
-        List<Message> msgs=win.removeMany(processing, true, 200);
+        List<Message> msgs=win.removeMany(true, 200, null);
         System.out.printf("removed %d msgs\n", msgs.size());
         assert win.isEmpty();
         assertIndices(win, seqno, seqno, seqno);

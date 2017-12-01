@@ -70,7 +70,7 @@ public abstract class Discovery extends Protocol {
 
     @Property(description="When a new node joins, and we have a static discovery protocol (TCPPING), then send the " +
       "contents of the discovery cache to new and existing members if true (and we're the coord). Addresses JGRP-1903")
-    protected boolean                    send_cache_on_join;
+    protected boolean                    send_cache_on_join=true;
 
     @Property(description="The max rank of this member to respond to discovery requests, e.g. if " +
       "max_rank_to_reply=2 in {A,B,C,D,E}, only A (rank 1) and B (rank 2) will reply. A value <= 0 means " +
@@ -179,6 +179,11 @@ public abstract class Discovery extends Protocol {
         is_server=false;
     }
 
+    public void addResponse(Responses rsp) {
+        synchronized(ping_responses) {
+            ping_responses.put(System.nanoTime(), rsp);
+        }
+    }
 
     /**
      * Fetches information (e.g. physical address, logical name) for the given member addresses. Needs to add responses
@@ -296,9 +301,9 @@ public abstract class Discovery extends Protocol {
                         for(Map.Entry<Address,PhysicalAddress> entry: cache.entrySet()) {
                             Address addr=entry.getKey();
                             // JGRP-1492: only return our own address, and addresses in view.
-                            if(addr.equals(local_addr) || view.containsMember(addr)) {
+                            if(addr.equals(local_addr) || (view != null && view.containsMember(addr))) {
                                 PhysicalAddress physical_addr=entry.getValue();
-                                sendDiscoveryResponse(addr, physical_addr, NameCache.get(addr), msg.getSrc(), is_coord);
+                                sendDiscoveryResponse(addr, physical_addr, NameCache.get(addr), msg.getSrc(), isCoord(addr));
                             }
                         }
                     }
@@ -523,7 +528,7 @@ public abstract class Discovery extends Protocol {
     }
 
     protected static PingData deserialize(final byte[] data) throws Exception {
-        return (PingData)Util.streamableFromByteBuffer(PingData.class, data);
+        return Util.streamableFromByteBuffer(PingData::new, data);
     }
 
     public static Buffer marshal(PingData data) {
@@ -532,7 +537,7 @@ public abstract class Discovery extends Protocol {
 
     protected PingData readPingData(byte[] buffer, int offset, int length) {
         try {
-            return buffer != null? Util.streamableFromBuffer(PingData.class, buffer, offset, length) : null;
+            return buffer != null? Util.streamableFromBuffer(PingData::new, buffer, offset, length) : null;
         }
         catch(Exception ex) {
             log.error("%s: failed reading PingData from message: %s", local_addr, ex);

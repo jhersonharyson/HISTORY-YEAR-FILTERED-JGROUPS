@@ -460,7 +460,7 @@ public class Configurator {
     		// Method[] methods=protocol.getClass().getMethods();
             Method[] methods=Util.getAllDeclaredMethodsWithAnnotations(protocol.getClass(), Property.class);
     		for(int j = 0; j < methods.length; j++) {
-    			if (methods[j].isAnnotationPresent(Property.class) && isSetPropertyMethod(methods[j])) {
+    			if (methods[j].isAnnotationPresent(Property.class) && isSetPropertyMethod(methods[j], protocol.getClass())) {
     				String propertyName = PropertyHelper.getPropertyName(methods[j]) ;
     				String propertyValue = properties.get(propertyName);
 
@@ -480,12 +480,8 @@ public class Configurator {
 						}
     					InetAddressInfo inetinfo = new InetAddressInfo(protocol, methods[j], properties, propertyValue, converted) ;
 
-                        Map<String, InetAddressInfo> protocolInetAddressMap=inetAddressMap.get(protocolName);
-                        if(protocolInetAddressMap == null) {
-                            protocolInetAddressMap = new HashMap<>() ;
-                            inetAddressMap.put(protocolName, protocolInetAddressMap) ;
-                        }
-    					protocolInetAddressMap.put(propertyName, inetinfo) ; 
+                        Map<String,InetAddressInfo> m=inetAddressMap.computeIfAbsent(protocolName, k -> new HashMap<>());
+                        m.put(propertyName, inetinfo) ;
     				}
     			}
     		}
@@ -515,12 +511,8 @@ public class Configurator {
 							}
     						InetAddressInfo inetinfo = new InetAddressInfo(protocol, fields[j], properties, propertyValue, converted) ;
 
-                            Map<String, InetAddressInfo> protocolInetAddressMap=inetAddressMap.get(protocolName);
-                            if(protocolInetAddressMap == null) {
-                                protocolInetAddressMap = new HashMap<>() ;
-                                inetAddressMap.put(protocolName, protocolInetAddressMap) ;
-                            }
-    						protocolInetAddressMap.put(propertyName, inetinfo) ;
+                            Map<String,InetAddressInfo> m=inetAddressMap.computeIfAbsent(protocolName, k -> new HashMap<>());
+                            m.put(propertyName, inetinfo) ;
     					}// recompute
     				}
     			}
@@ -582,7 +574,7 @@ public class Configurator {
 
             Method[] methods=Util.getAllDeclaredMethodsWithAnnotations(protocol.getClass(), Property.class);
             for(int j=0; j < methods.length; j++) {
-                if(isSetPropertyMethod(methods[j])) {
+                if(isSetPropertyMethod(methods[j], protocol.getClass())) {
                     String propertyName=PropertyHelper.getPropertyName(methods[j]);
 
                     Object propertyValue=getValueFromProtocol(protocol, propertyName);
@@ -759,8 +751,7 @@ public class Configurator {
     	// get the methods for this class and add them to the list if annotated with @Property
     	Method[] methods=obj.getClass().getMethods();
     	for(int i = 0; i < methods.length; i++) {
- 
-    		if (methods[i].isAnnotationPresent(Property.class) && isSetPropertyMethod(methods[i])) {
+    		if (methods[i].isAnnotationPresent(Property.class) && isSetPropertyMethod(methods[i], obj.getClass())) {
     			String propertyName = PropertyHelper.getPropertyName(methods[i]) ;
     			unorderedFieldsAndMethods.add(methods[i]) ;
     			propertiesInventory.put(propertyName, methods[i]) ;
@@ -894,7 +885,7 @@ public class Configurator {
     public static void resolveAndInvokePropertyMethod(Object obj, Method method, Map<String,String> props) throws Exception {
     	String methodName=method.getName();
         Property annotation=method.getAnnotation(Property.class);
-    	if(annotation != null && isSetPropertyMethod(method)) {
+    	if(annotation != null && isSetPropertyMethod(method, obj.getClass())) {
     		String propertyName=PropertyHelper.getPropertyName(method) ;
     		String propertyValue=props.get(propertyName);
 
@@ -1000,11 +991,16 @@ public class Configurator {
     }
 
     public static boolean isSetPropertyMethod(Method method) {
-        return (method.getName().startsWith("set") &&
-                method.getReturnType() == java.lang.Void.TYPE &&
-                method.getParameterTypes().length == 1);
+        return (method.getName().startsWith("set")
+          && method.getReturnType() == java.lang.Void.TYPE
+          && method.getParameterTypes().length == 1);
     }
 
+    public static boolean isSetPropertyMethod(Method method, Class<?> enclosing_clazz) {
+        return (method.getName().startsWith("set")
+          && (method.getReturnType() == java.lang.Void.TYPE || enclosing_clazz.isAssignableFrom(method.getReturnType()))
+          && method.getParameterTypes().length == 1);
+    }
 
   
 
@@ -1022,6 +1018,16 @@ public class Configurator {
                 catch(SecurityException ex) {
                     log.error(Util.getMessage("SyspropFailure"), system_property_name, ex);
                 }
+
+                try {
+                    retval=System.getenv(system_property_name);
+                    if(retval != null)
+                        return retval;
+                }
+                catch(SecurityException ex) {
+                    log.error(Util.getMessage("SyspropFailure"), system_property_name, ex);
+                }
+
             }
         }
         return retval;

@@ -7,7 +7,8 @@ import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
 
 import javax.crypto.Cipher;
-import javax.crypto.SecretKey;
+import java.security.Key;
+import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Map;
@@ -22,7 +23,7 @@ import java.util.zip.Checksum;
  * Super class of symmetric ({@link SYM_ENCRYPT}) and asymmetric ({@link ASYM_ENCRYPT}) encryption protocols.
  * @author Bela Ban
  */
-public abstract class Encrypt extends Protocol {
+public abstract class Encrypt<E extends KeyStore.Entry> extends Protocol {
     protected static final String DEFAULT_SYM_ALGO="AES";
 
 
@@ -70,32 +71,35 @@ public abstract class Encrypt extends Protocol {
     protected volatile byte[]               sym_version;
 
     // shared secret key to encrypt/decrypt messages
-    protected volatile SecretKey            secret_key;
+    protected volatile Key                  secret_key;
 
     // map to hold previous keys so we can decrypt some earlier messages if we need to
     protected Map<AsciiString,Cipher>       key_map;
 
+    /**
+     * Sets the key store entry used to configure this protocol.
+     * @param entry a key store entry
+     */
+    public abstract void setKeyStoreEntry(E entry);
 
 
     public int                      asymKeylength()                 {return asym_keylength;}
-    public <T extends Encrypt> T    asymKeylength(int len)          {this.asym_keylength=len; return (T)this;}
+    public <T extends Encrypt<E>> T asymKeylength(int len)          {this.asym_keylength=len; return (T)this;}
     public int                      symKeylength()                  {return sym_keylength;}
-    public <T extends Encrypt> T    symKeylength(int len)           {this.sym_keylength=len; return (T)this;}
-    public SecretKey                secretKey()                     {return secret_key;}
-    public <T extends Encrypt> T    secretKey(SecretKey key)        {this.secret_key=key; return (T)this;}
+    public <T extends Encrypt<E>> T symKeylength(int len)           {this.sym_keylength=len; return (T)this;}
+    public Key                      secretKey()                     {return secret_key;}
     public String                   symAlgorithm()                  {return sym_algorithm;}
-    public <T extends Encrypt> T    symAlgorithm(String alg)        {this.sym_algorithm=alg; return (T)this;}
+    public <T extends Encrypt<E>> T symAlgorithm(String alg)        {this.sym_algorithm=alg; return (T)this;}
     public String                   asymAlgorithm()                 {return asym_algorithm;}
-    public <T extends Encrypt> T    asymAlgorithm(String alg)       {this.asym_algorithm=alg; return (T)this;}
+    public <T extends Encrypt<E>> T asymAlgorithm(String alg)       {this.asym_algorithm=alg; return (T)this;}
     public byte[]                   symVersion()                    {return sym_version;}
-    public <T extends Encrypt> T    symVersion(byte[] v)            {this.sym_version=Arrays.copyOf(v, v.length); return (T)this;}
-    public <T extends Encrypt> T    localAddress(Address addr)      {this.local_addr=addr; return (T)this;}
+    public <T extends Encrypt<E>> T localAddress(Address addr)      {this.local_addr=addr; return (T)this;}
     public boolean                  encryptEntireMessage()          {return encrypt_entire_message;}
-    public <T extends Encrypt> T    encryptEntireMessage(boolean b) {this.encrypt_entire_message=b; return (T)this;}
+    public <T extends Encrypt<E>> T encryptEntireMessage(boolean b) {this.encrypt_entire_message=b; return (T)this;}
     public boolean                  signMessages()                  {return this.sign_msgs;}
-    public <T extends Encrypt> T    signMessages(boolean flag)      {this.sign_msgs=flag; return (T)this;}
+    public <T extends Encrypt<E>> T signMessages(boolean flag)      {this.sign_msgs=flag; return (T)this;}
     public boolean                  adler()                         {return use_adler;}
-    public <T extends Encrypt> T    adler(boolean flag)             {this.use_adler=flag; return (T)this;}
+    public <T extends Encrypt<E>> T adler(boolean flag)             {this.use_adler=flag; return (T)this;}
     @ManagedAttribute public String version()                       {return Util.byteArrayToHexString(sym_version);}
 
     public void init() throws Exception {
@@ -189,7 +193,7 @@ public abstract class Encrypt extends Protocol {
 
 
     /** Initialises the ciphers for both encryption and decryption using the generated or supplied secret key */
-    protected synchronized void initSymCiphers(String algorithm, SecretKey secret) throws Exception {
+    protected synchronized void initSymCiphers(String algorithm, Key secret) throws Exception {
         if(secret == null)
             return;
         encoding_ciphers.clear();
@@ -199,18 +203,18 @@ public abstract class Encrypt extends Protocol {
             decoding_ciphers.offer(createCipher(Cipher.DECRYPT_MODE, secret, algorithm));
         };
 
-        //set the version
+        // set the version
         MessageDigest digest=MessageDigest.getInstance("MD5");
         digest.reset();
         digest.update(secret.getEncoded());
 
         byte[] tmp=digest.digest();
         sym_version=Arrays.copyOf(tmp, tmp.length);
-        log.debug("%s: created %d symmetric ciphers with secret key (%d bytes)", local_addr, cipher_pool_size, sym_version.length);
+        // log.debug("%s: created %d symmetric ciphers with secret key (%d bytes)", local_addr, cipher_pool_size, sym_version.length);
     }
 
 
-    protected Cipher createCipher(int mode, SecretKey secret_key, String algorithm) throws Exception {
+    protected Cipher createCipher(int mode, Key secret_key, String algorithm) throws Exception {
         Cipher cipher=provider != null && !provider.trim().isEmpty()?
           Cipher.getInstance(algorithm, provider) : Cipher.getInstance(algorithm);
         cipher.init(mode, secret_key);
@@ -274,7 +278,7 @@ public abstract class Encrypt extends Protocol {
         if(!Arrays.equals(hdr.version(), sym_version)) {
             cipher=key_map.get(new AsciiString(hdr.version()));
             if(cipher == null) {
-                handleUnknownVersion();
+                handleUnknownVersion(hdr.version);
                 return null;
             }
             log.trace("%s: decrypting msg from %s using previous cipher version", local_addr, msg.src());
@@ -315,7 +319,7 @@ public abstract class Encrypt extends Protocol {
             return msg;
         }
 
-        Message ret=Util.streamableFromBuffer(Message.class,decrypted_msg,0,decrypted_msg.length);
+        Message ret=Util.streamableFromBuffer(Message::new,decrypted_msg,0,decrypted_msg.length);
         if(ret.getDest() == null)
             ret.setDest(msg.getDest());
         if(ret.getSrc() == null)
@@ -349,6 +353,11 @@ public abstract class Encrypt extends Protocol {
         Message msgEncrypted=msg.copy(false).putHeader(this.id, hdr);
         if(msg.getLength() > 0)
             msgEncrypted.setBuffer(code(msg.getRawBuffer(),msg.getOffset(),msg.getLength(),false));
+        else { // length is 0
+            byte[] payload=msg.getRawBuffer();
+            if(payload != null) // we don't encrypt empty buffers (https://issues.jboss.org/browse/JGRP-2153)
+                msgEncrypted.setBuffer(payload, msg.getOffset(), msg.getLength());
+        }
         down_prot.down(msgEncrypted);
     }
 
@@ -394,7 +403,9 @@ public abstract class Encrypt extends Protocol {
 
 
     /** Called when the version shipped in the header can't be found */
-    protected void handleUnknownVersion() {}
+    protected void handleUnknownVersion(byte[] version) {
+
+    }
 
 
     /** Decrypts all messages in a batch, replacing encrypted messages in-place with their decrypted versions */

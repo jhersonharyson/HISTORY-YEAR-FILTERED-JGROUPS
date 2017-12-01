@@ -1,8 +1,6 @@
 package org.jgroups.protocols.dns;
 
-import java.io.IOException;
 import java.net.InetAddress;
-import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -47,7 +45,7 @@ public class DNSDiscoveryTester {
 
       for(int i = 0; i < numberOfTestedInstances; ++i) {
          DNS_PING ping = new DNS_PING();
-         ping.dns_Resolver = dnsResolverBuilder.build();
+         ping.dns_resolver = dnsResolverBuilder.build();
          ping.dns_query = dnsQuery;
          ping.dns_record_type = recordType;
          ping.dns_address = "fake.com";
@@ -82,10 +80,4 @@ public class DNSDiscoveryTester {
       return viewReceived;
    }
 
-   private int findUnusedPort() throws IOException {
-      ServerSocket s = new ServerSocket(0);
-      int port = s.getLocalPort();
-      s.close();
-      return port;
-   }
 }

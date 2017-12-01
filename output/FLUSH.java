@@ -384,7 +384,8 @@ public class FLUSH extends Protocol {
                    break;
 
                case Event.SUSPECT:
-                   onSuspect(evt.getArg());
+                   Collection<Address> suspects=evt.arg() instanceof Address? Collections.singletonList(evt.arg()) : evt.arg();
+                   onSuspect(suspects);
                    break;
 
                case Event.SUSPEND:
@@ -878,13 +879,13 @@ public class FLUSH extends Protocol {
 
 
 
-    private void onSuspect(Address address) {
+    private void onSuspect(Collection<Address> addresses) {
 
         // handles FlushTest#testFlushWithCrashedFlushCoordinator
         boolean amINeighbourOfCrashedFlushCoordinator = false;
         ArrayList<Address> flushMembersCopy = null;
         synchronized (sharedLock) {
-            boolean flushCoordinatorSuspected =Objects.equals(address, flushCoordinator);
+            boolean flushCoordinatorSuspected=addresses != null && addresses.contains(flushCoordinator);
             if (flushCoordinatorSuspected) {
                 int indexOfCoordinator = flushMembers.indexOf(flushCoordinator);
                 int myIndex = flushMembers.indexOf(localAddress);
@@ -908,16 +909,14 @@ public class FLUSH extends Protocol {
         Message m = null;
         long viewID = 0;
         synchronized (sharedLock) {
-            suspected.add(address);
+            suspected.addAll(addresses);
             flushMembers.removeAll(suspected);
             viewID = currentViewId();
-            flushOkCompleted = !flushCompletedMap.isEmpty()
-                            && flushCompletedMap.keySet().containsAll(flushMembers);
+            flushOkCompleted = !flushCompletedMap.isEmpty() && flushCompletedMap.keySet().containsAll(flushMembers);
             if (flushOkCompleted) {
                 m = new Message(flushCoordinator).src(localAddress);
             }
-            if (log.isDebugEnabled())
-                log.debug(localAddress + ": suspect is " + address + ", completed " + flushOkCompleted
+            log.debug(localAddress + ": suspects: " + addresses + ", completed " + flushOkCompleted
                         + ", flushOkSet " + flushCompletedMap + ", flushMembers " + flushMembers);
         }
         if (flushOkCompleted) {
@@ -947,8 +946,8 @@ public class FLUSH extends Protocol {
         if(buffer == null) return null;
         try {
             DataInput in=new ByteArrayDataInputStream(buffer, offset, length);
-            Collection<? extends Address> participants=Util.readAddresses(in, ArrayList.class);
-            Digest digest=Util.readStreamable(Digest.class, in);
+            Collection<Address> participants=Util.readAddresses(in, ArrayList::new);
+            Digest digest=Util.readStreamable(Digest::new, in);
             return new Tuple<>(participants, digest);
         }
         catch(Exception ex) {

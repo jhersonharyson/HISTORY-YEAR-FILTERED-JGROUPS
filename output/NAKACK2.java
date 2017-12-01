@@ -14,12 +14,15 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 
 /**
@@ -41,10 +44,6 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
 
 
-    @Property(description="Max number of messages to be removed from a RingBuffer. This property might " +
-      "get removed anytime, so don't use it !")
-    protected int     max_msg_batch_size=100;
-    
     /**
      * Retransmit messages using multicast rather than unicast. This has the advantage that, if many receivers
      * lost a message, the sender only retransmits once
@@ -84,7 +83,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     @Property(description="discards warnings about promiscuous traffic")
     protected boolean log_discard_msgs=true;
 
-    @Property(description="If true, trashes warnings about retransmission messages not found in the xmit_table (used for testing)")
+    @Property(description="If false, trashes warnings about retransmission messages not found in the xmit_table (used for testing)")
     protected boolean log_not_found_msgs=true;
 
     @Property(description="Interval (in milliseconds) at which missing messages (from all retransmit buffers) " +
@@ -149,6 +148,8 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         && !(msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK) && this.local_addr != null && this.local_addr.equals(msg.getSrc()));
 
     protected static final Predicate<Message> dont_loopback_filter=msg -> msg != null && msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK);
+
+    protected static final BiConsumer<MessageBatch,Message> BATCH_ACCUMULATOR=MessageBatch::add;
 
 
     @ManagedAttribute(description="Number of retransmit requests received")
@@ -237,18 +238,20 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     protected SuppressLog<Address>      suppress_log_non_member;
 
 
-    public long    getXmitRequestsReceived()  {return xmit_reqs_received.sum();}
-    public long    getXmitRequestsSent()      {return xmit_reqs_sent.sum();}
-    public long    getXmitResponsesReceived() {return xmit_rsps_received.sum();}
-    public long    getXmitResponsesSent()     {return xmit_rsps_sent.sum();}
-    public boolean isUseMcastXmit()           {return use_mcast_xmit;}
-    public boolean isXmitFromRandomMember()   {return xmit_from_random_member;}
-    public boolean isDiscardDeliveredMsgs()   {return discard_delivered_msgs;}
-    public boolean getLogDiscardMessages()    {return log_discard_msgs;}
+    public long    getXmitRequestsReceived()               {return xmit_reqs_received.sum();}
+    public long    getXmitRequestsSent()                   {return xmit_reqs_sent.sum();}
+    public long    getXmitResponsesReceived()              {return xmit_rsps_received.sum();}
+    public long    getXmitResponsesSent()                  {return xmit_rsps_sent.sum();}
+    public boolean isUseMcastXmit()                        {return use_mcast_xmit;}
+    public boolean isXmitFromRandomMember()                {return xmit_from_random_member;}
+    public boolean isDiscardDeliveredMsgs()                {return discard_delivered_msgs;}
+    public boolean getLogDiscardMessages()                 {return log_discard_msgs;}
     public NAKACK2 setUseMcastXmit(boolean use_mcast_xmit) {this.use_mcast_xmit=use_mcast_xmit; return this;}
-    public NAKACK2 setUseMcastXmitReq(boolean flag) {this.use_mcast_xmit_req=flag; return this;}
-    public NAKACK2 setLogDiscardMessages(boolean flag) {log_discard_msgs=flag; return this;}
-    public NAKACK2 setLogNotFoundMessages(boolean flag) {log_not_found_msgs=flag; return this;}
+    public NAKACK2 setUseMcastXmitReq(boolean flag)        {this.use_mcast_xmit_req=flag; return this;}
+    public NAKACK2 setLogDiscardMessages(boolean flag)     {log_discard_msgs=flag; return this;}
+    public NAKACK2 setLogNotFoundMessages(boolean flag)    {log_not_found_msgs=flag; return this;}
+    public NAKACK2 setResendLastSeqnoMaxTimes(int n)       {this.resend_last_seqno_max_times=n; return this;}
+
     public NAKACK2 setXmitFromRandomMember(boolean xmit_from_random_member) {
         this.xmit_from_random_member=xmit_from_random_member; return this;
     }
@@ -415,11 +418,11 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         transport.registerProbeHandler(this);
         if(!transport.supportsMulticasting()) {
             if(use_mcast_xmit) {
-                log.warn(Util.getMessage("NoMulticastTransport"), "use_mcast_xmit", transport.getName(), "use_mcast_xmit");
+                log.debug(Util.getMessage("NoMulticastTransport"), "use_mcast_xmit", transport.getName(), "use_mcast_xmit");
                 use_mcast_xmit=false;
             }
             if(use_mcast_xmit_req) {
-                log.warn(Util.getMessage("NoMulticastTransport"), "use_mcast_xmit_req", transport.getName(), "use_mcast_xmit_req");
+                log.debug(Util.getMessage("NoMulticastTransport"), "use_mcast_xmit_req", transport.getName(), "use_mcast_xmit_req");
                 use_mcast_xmit_req=false;
             }
         }
@@ -609,7 +612,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
             case NakAckHeader2.XMIT_REQ:
                 try {
-                    SeqnoList missing=Util.streamableFromBuffer(SeqnoList.class, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                    SeqnoList missing=Util.streamableFromBuffer(SeqnoList::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
                     if(missing != null)
                         handleXmitReq(msg.getSrc(), missing, hdr.sender);
                 }
@@ -657,7 +660,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                     break;
                 case NakAckHeader2.XMIT_REQ:
                     try {
-                        SeqnoList missing=Util.streamableFromBuffer(SeqnoList.class, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                        SeqnoList missing=Util.streamableFromBuffer(SeqnoList::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
                         if(missing != null)
                             handleXmitReq(msg.getSrc(), missing, hdr.sender);
                     }
@@ -827,7 +830,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                 deliver(msg, sender, hdr.seqno, "OOB message");
         }
 
-        removeAndPassUp(buf, sender, loopback, null); // at most 1 thread will execute this at any given time
+        removeAndDeliver(buf, sender, loopback, null); // at most 1 thread will execute this at any given time
     }
 
 
@@ -864,43 +867,37 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
             deliverBatch(oob_batch);
         }
 
-        removeAndPassUp(buf,sender,loopback,cluster_name); // at most 1 thread will execute this at any given time
+        removeAndDeliver(buf, sender, loopback, cluster_name); // at most 1 thread will execute this at any given time
     }
 
 
     /** Efficient way of checking whether another thread is already processing messages from sender. If that's the case,
      *  we return immediately and let the existing thread process our message (https://jira.jboss.org/jira/browse/JGRP-829).
-     *  Benefit: fewer threads blocked on the same lock, these threads an be returned to the thread pool */
-    protected void removeAndPassUp(Table<Message> buf, Address sender, boolean loopback, AsciiString cluster_name) {
-        final AtomicBoolean processing=buf.getProcessing();
-        if(!processing.compareAndSet(false, true))
+     *  Benefit: fewer threads blocked on the same lock, these threads can be returned to the thread pool
+     */
+    protected void removeAndDeliver(Table<Message> buf, Address sender, boolean loopback, AsciiString cluster_name) {
+        AtomicInteger adders=buf.getAdders();
+        if(adders.getAndIncrement() != 0)
             return;
-
         boolean remove_msgs=discard_delivered_msgs && !loopback;
-        boolean released_processing=false;
-        try {
-            while(true) {
-                // We're removing as many msgs as possible and set processing to false (if null) *atomically* (wrt to add())
+        MessageBatch batch=new MessageBatch(buf.size()).dest(null).sender(sender).clusterName(cluster_name).multicast(true);
+        Supplier<MessageBatch> batch_creator=() -> batch;
+        do {
+            try {
+                batch.reset();
                 // Don't include DUMMY and OOB_DELIVERED messages in the removed set
-                List<Message> msgs=buf.removeMany(processing, remove_msgs, max_msg_batch_size,
-                                                  no_dummy_and_no_oob_delivered_msgs_and_no_dont_loopback_msgs);
-                if(msgs == null || msgs.isEmpty()) {
-                    released_processing=true;
-                    if(rebroadcasting)
-                        checkForRebroadcasts();
-                    return;
-                }
-
-                MessageBatch batch=new MessageBatch(null, sender, cluster_name, true, msgs);
-                deliverBatch(batch);
+                buf.removeMany(remove_msgs, 0, no_dummy_and_no_oob_delivered_msgs_and_no_dont_loopback_msgs,
+                               batch_creator, BATCH_ACCUMULATOR);
             }
+            catch(Throwable t) {
+                log.error("failed removing messages from table for " + sender, t);
+            }
+            if(!batch.isEmpty())
+                deliverBatch(batch);
         }
-        finally {
-            // processing is always set in win.remove(processing) above and never here ! This code is just a
-            // 2nd line of defense should there be an exception before win.remove(processing) sets processing
-            if(!released_processing)
-                processing.set(false);
-        }
+        while(adders.decrementAndGet() != 0);
+        if(rebroadcasting)
+            checkForRebroadcasts();
     }
 
 
@@ -1163,17 +1160,19 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
     protected void checkForRebroadcasts() {
         Digest tmp=getDigest();
-        boolean cancel_rebroadcasting;
+        boolean cancel_rebroadcasting=false;
         rebroadcast_digest_lock.lock();
         try {
             cancel_rebroadcasting=isGreaterThanOrEqual(tmp, rebroadcast_digest);
         }
+        catch(Throwable t) {
+            ;
+        }
         finally {
             rebroadcast_digest_lock.unlock();
         }
-        if(cancel_rebroadcasting) {
+        if(cancel_rebroadcasting)
             cancelRebroadcasting();
-        }
     }
 
     /**

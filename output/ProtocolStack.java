@@ -143,7 +143,7 @@ public class ProtocolStack extends Protocol {
                     String neighbor_prot=key.trim();
                     Protocol neighbor=findProtocol(neighbor_prot);
                     if(neighbor == null) {
-                        log.error(Util.getMessage("NeighborProtocol") + neighbor_prot + " not found in stack");
+                        log.error(Util.getMessage("NeighborProtocol") + " " + neighbor_prot + " not found in stack");
                         break;
                     }
                     Position position=tmp.equalsIgnoreCase("above")? Position.ABOVE : Position.BELOW;
@@ -228,7 +228,7 @@ public class ProtocolStack extends Protocol {
                 Method[] methods=clazz.getDeclaredMethods();
                 for(Method method: methods) {
                     String methodName=method.getName();
-                    if(method.isAnnotationPresent(Property.class) && Configurator.isSetPropertyMethod(method)) {
+                    if(method.isAnnotationPresent(Property.class) && Configurator.isSetPropertyMethod(method, clazz)) {
                         Property annotation=method.getAnnotation(Property.class);
                         List<String> possible_names=new LinkedList<>();
                         if(annotation.name() != null)
@@ -442,7 +442,7 @@ public class ProtocolStack extends Protocol {
             Method[] methods=clazz.getDeclaredMethods();
             for(Method method: methods) {
                 String methodName=method.getName();
-                if(method.isAnnotationPresent(Property.class) && Configurator.isSetPropertyMethod(method)) {
+                if(method.isAnnotationPresent(Property.class) && Configurator.isSetPropertyMethod(method, clazz)) {
                     annotation=method.getAnnotation(Property.class);
                     List<String> possible_names=new LinkedList<>();
                     if(annotation.name() != null)

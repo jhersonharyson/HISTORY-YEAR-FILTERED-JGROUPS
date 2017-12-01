@@ -18,7 +18,9 @@ import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Replacement for UDP. Instead of sending packets via UDP, a TCP connection is opened to a Router
@@ -138,6 +140,7 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
     
     public void destroy() {        
         stubManager.destroyStubs();
+        Util.close(sock);
         super.destroy();
     }
 
@@ -178,6 +181,8 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
     public void receive(GossipData data) {
         switch (data.getType()) {
             case MESSAGE:
+                if(Objects.equals(local_addr, data.getSender()))
+                    return;
                 byte[] msg=data.getBuffer();
                 receive(data.getSender(), msg, 0, msg.length);
                 break;
@@ -185,7 +190,7 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
                 Address suspect=data.getAddress();
                 if(suspect != null) {
                     log.debug("%s: firing suspect event for %s", local_addr, suspect);
-                    up(new Event(Event.SUSPECT, suspect));
+                    up(new Event(Event.SUSPECT, Collections.singletonList(suspect)));
                 }
                 break;
         }

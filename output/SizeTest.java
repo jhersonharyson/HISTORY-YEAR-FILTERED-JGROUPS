@@ -572,6 +572,13 @@ public class SizeTest {
         _testSize(hdr);
     }
 
+    public void testFragHeader3() throws Exception {
+        Frag3Header hdr=new Frag3Header(322649, 1, 10);
+        _testSize(hdr);
+
+        hdr=new Frag3Header(322649, 2, 10, 10000, 3000);
+        _testSize(hdr);
+    }
 
     public static void testCompressHeader() throws Exception {
         COMPRESS.CompressHeader hdr=new COMPRESS.CompressHeader(2002);
@@ -719,7 +726,7 @@ public class SizeTest {
         System.out.println("\nlen=" + len + ", serialized length=" + buf.length);
         assert len == buf.length;
         DataInputStream in=new DataInputStream(new ByteArrayInputStream(buf));
-        Collection<? extends Address> new_list=Util.readAddresses(in, ArrayList.class);
+        Collection<Address> new_list=Util.readAddresses(in, ArrayList::new);
         System.out.println("old list=" + list + "\nnew list=" + new_list);
         assert list.equals(new_list);
     }
@@ -733,7 +740,7 @@ public class SizeTest {
 
         uuid=org.jgroups.util.UUID.randomUUID();
         byte[] buf=Util.streamableToByteBuffer(uuid);
-        org.jgroups.util.UUID uuid2=Util.streamableFromByteBuffer(UUID.class, buf);
+        org.jgroups.util.UUID uuid2=Util.streamableFromByteBuffer(UUID::new, buf);
         System.out.println("uuid:  " + uuid);
         System.out.println("uuid2: " + uuid2);
         assert uuid.equals(uuid2);
@@ -746,7 +753,7 @@ public class SizeTest {
 
 
 
-    public static void testRequestCorrelatorHeader() throws Exception {
+    public void testRequestCorrelatorHeader() throws Exception {
         RequestCorrelator.Header hdr;
 
         hdr=new RequestCorrelator.Header(RequestCorrelator.Header.REQ, 0, (short)1000);
@@ -800,10 +807,30 @@ public class SizeTest {
         _testSize(hdr);
     }
 
+    public void testDhHeader() throws Exception {
+        byte[] dh_key={'p','u','b','l','i','c'};
+        byte[] encr_secret={'s','e','c','r','e','t'};
+        byte[] version={'v','e','r','s','i','o','n'};
+        DH_KEY_EXCHANGE.DhHeader hdr=DH_KEY_EXCHANGE.DhHeader.createSecretKeyRequest(dh_key);
+        _test(hdr);
+
+        hdr=DH_KEY_EXCHANGE.DhHeader.createSecretKeyResponse(dh_key, encr_secret, version);
+        _test(hdr);
+    }
+
+    protected void _test(DH_KEY_EXCHANGE.DhHeader hdr) throws Exception {
+        int expected_size=hdr.serializedSize();
+        byte[] buf=Util.streamableToByteBuffer(hdr);
+        assert buf.length == expected_size;
+
+        DH_KEY_EXCHANGE.DhHeader hdr2=Util.streamableFromByteBuffer(DH_KEY_EXCHANGE.DhHeader::new, buf, 0, buf.length);
+        assert Arrays.equals(hdr.dhKey(), hdr2.dhKey());
+    }
+
 
     private static void _testMarshalling(UnicastHeader3 hdr) throws Exception {
         byte[] buf=Util.streamableToByteBuffer(hdr);
-        UnicastHeader3 hdr2=Util.streamableFromByteBuffer(UnicastHeader3.class, buf);
+        UnicastHeader3 hdr2=Util.streamableFromByteBuffer(UnicastHeader3::new, buf);
 
         assert hdr.type()       == hdr2.type();
         assert hdr.seqno()      == hdr2.seqno();
@@ -886,7 +913,7 @@ public class SizeTest {
         System.out.println("size=" + size + ", serialized size=" + serialized_form.length);
         Assert.assertEquals(serialized_form.length, size);
 
-        JoinRsp rsp2=Util.streamableFromByteBuffer(JoinRsp.class, serialized_form);
+        JoinRsp rsp2=Util.streamableFromByteBuffer(JoinRsp::new, serialized_form);
         assert Util.match(rsp.getDigest(), rsp2.getDigest());
         assert Util.match(rsp.getView(), rsp2.getView());
         assert Util.match(rsp.getFailReason(), rsp2.getFailReason());

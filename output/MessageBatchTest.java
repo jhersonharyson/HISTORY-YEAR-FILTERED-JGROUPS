@@ -83,8 +83,7 @@ public class MessageBatchTest {
         assert batch.size() == 15;
         for(Message msg: batch) {
             int num=msg.getObject();
-            if(num <= 10)
-                assert msg.isTransientFlagSet(Message.TransientFlag.OOB_DELIVERED);
+            assert num > 10 || msg.isTransientFlagSet(Message.TransientFlag.OOB_DELIVERED);
         }
     }
 
@@ -143,8 +142,7 @@ public class MessageBatchTest {
 
         index=0;
         for(Message msg: batch) {
-            if(index % 2 == 0)
-                assert msg == MSG; // every even index has MSG
+            assert index % 2 != 0 || msg == MSG; // every even index has MSG
             index++;
         }
     }
@@ -178,6 +176,16 @@ public class MessageBatchTest {
             System.out.println("found=" + name + ", expected=" + expected);
             assert name.equals(expected) : "found=" + name + ", expected=" + expected;
         }
+    }
+
+    public void testReplaceIf() {
+        List<Message> msgs=createMessages();
+        MessageBatch batch=new MessageBatch(msgs);
+        System.out.println("batch = " + batch);
+        int size=batch.size();
+        int removed=batch.replaceIf(msg -> msg.getHeader(UNICAST3_ID) != null, null, true);
+        System.out.println("batch = " + batch);
+        assert batch.size() == size - removed;
     }
 
 
@@ -288,6 +296,56 @@ public class MessageBatchTest {
     }
 
     public void testAddBatch() {
+        MessageBatch batch=new MessageBatch(3), other=new MessageBatch(3);
+        List<Message> msgs=createMessages();
+        msgs.forEach(other::add);
+        assert other.size() == msgs.size();
+        batch.add(other);
+        assert batch.size() == msgs.size() : "batch: " + batch;
+        assert batch.size() == other.size();
+    }
+
+    public void testAddNoResize() {
+        MessageBatch batch=new MessageBatch(3);
+        List<Message> msgs=createMessages();
+        for(int i=0; i < 3; i++)
+            batch.add(msgs.get(i));
+        assert batch.size() == 3;
+        assert batch.capacity() == 3;
+        int added=batch.add(msgs.get(3), false);
+        assert added == 0 && batch.size() == 3 && batch.capacity() == 3;
+    }
+
+
+    public void testAddBatchNoResizeOK() {
+        MessageBatch  batch=new MessageBatch(16);
+        List<Message> msgs=createMessages();
+        MessageBatch other=new MessageBatch(3);
+        msgs.forEach(other::add);
+        assert other.size() == msgs.size();
+        assert batch.isEmpty();
+
+        int added=batch.add(other, false);
+        assert added == other.size();
+        assert batch.size() == msgs.size() && batch.capacity() == 16;
+        assert other.size() == msgs.size();
+    }
+
+    public void testAddBatchNoResizeFail() {
+        MessageBatch  batch=new MessageBatch(3);
+        List<Message> msgs=createMessages();
+        MessageBatch other=new MessageBatch(3);
+        msgs.forEach(other::add);
+        assert other.size() == msgs.size();
+        assert batch.isEmpty();
+
+        int  added=batch.add(other, false);
+        assert added == batch.size();
+        assert batch.size() == 3 && batch.capacity() == 3;
+        assert other.size() == msgs.size();
+    }
+
+    public void testAddBatch2() {
         MessageBatch other=new MessageBatch(3);
         List<Message> msgs=createMessages();
         msgs.forEach(other::add);
@@ -298,6 +356,19 @@ public class MessageBatchTest {
         System.out.println("batch = " + batch);
         assert batch.size() == other_size;
         assert batch.capacity() >= other.capacity();
+    }
+
+    public void testAddBatchToItself() {
+        MessageBatch batch=new MessageBatch(16);
+        for(Message msg: createMessages())
+            batch.add(msg);
+        try {
+            batch.add(batch);
+            assert false: "should throw IllegalArumentException as a batch cannot be added to itself";
+        }
+        catch(IllegalArgumentException ex) {
+            System.out.printf("caught %s as expected: %s\n", ex.getClass().getSimpleName(), ex.getCause());
+        }
     }
 
     public void testGetMatchingMessages() {
@@ -484,8 +555,7 @@ public class MessageBatchTest {
 
         index=0;
         for(Message msg: batch) {
-            if(index % 2 == 0)
-                assert msg == MSG; // every even index has MSG
+            assert index % 2 != 0 || msg == MSG; // every even index has MSG
             index++;
         }
     }

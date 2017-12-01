@@ -92,6 +92,8 @@ public class MERGE3 extends Protocol {
     @ManagedAttribute(description="Number of times a MERGE event was sent up the stack")
     protected int           num_merge_events;
 
+    public int getNumMergeEvents() {return num_merge_events;}
+
     @ManagedAttribute(description="Is the view consistency checker task running")
     public synchronized boolean isViewConsistencyCheckerRunning() {
         return view_consistency_checker != null && !view_consistency_checker.isDone();
@@ -110,7 +112,7 @@ public class MERGE3 extends Protocol {
         StringBuilder sb=new StringBuilder();
         for(Map.Entry<ViewId,Set<Address>> entry: convertViews().entrySet())
             sb.append(entry.getKey()).append(": [")
-              .append(Util.printListWithDelimiter(entry.getValue(), ", ", Util.MAX_LIST_PRINT_SIZE)).append("]\n");
+              .append(Util.printListWithDelimiter(entry.getValue(), ", ", Util.MAX_LIST_PRINT_SIZE)).append("]");
         return sb.toString();
     }
 
@@ -246,8 +248,7 @@ public class MERGE3 extends Protocol {
                 if(only_coords_run_consistency_checker == false)
                     startViewConsistencyChecker();
 
-                List<Address> mbrs=view.getMembers();
-                Address coord=mbrs.isEmpty()? null : mbrs.get(0);
+                Address coord=view.getCoord();
                 if(Objects.equals(coord, local_addr)) {
                     is_coord=true;
                     if(only_coords_run_consistency_checker)
@@ -313,7 +314,7 @@ public class MERGE3 extends Protocol {
 
     protected View readView(byte[] buffer, int offset, int length) {
         try {
-            return buffer != null? Util.streamableFromBuffer(View.class, buffer, offset, length) : null;
+            return buffer != null? Util.streamableFromBuffer(View::new, buffer, offset, length) : null;
         }
         catch(Exception ex) {
             log.error("%s: failed reading View from message: %s", local_addr, ex);

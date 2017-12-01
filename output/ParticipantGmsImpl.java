@@ -88,7 +88,7 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
 
     public void suspect(Address mbr) {
         Collection<Request> suspected=new LinkedHashSet<>(1);
-        suspected.add(new Request(Request.SUSPECT,mbr,true));
+        suspected.add(new Request(Request.SUSPECT, mbr));
         handleMembershipChange(suspected);
     }
 
@@ -109,11 +109,11 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
         suspectedMembers.stream().filter(mbr -> !suspected_mbrs.contains(mbr)).forEach(suspected_mbrs::add);
 
         if(wouldIBeCoordinator()) {
-            log.debug("%s: members are %s, coord=%s: I'm the new coord !", gms.local_addr, gms.members, gms.local_addr);
+            log.debug("%s: members are %s, coord=%s: I'm the new coordinator", gms.local_addr, gms.members, gms.local_addr);
 
             gms.becomeCoordinator();
             suspected_mbrs.forEach(mbr -> {
-                gms.getViewHandler().add(new Request(Request.SUSPECT, mbr, true));
+                gms.getViewHandler().add(new Request(Request.SUSPECT, mbr));
                 gms.ack_collector.suspect(mbr);
             });
             suspected_mbrs.clear();

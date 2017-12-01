@@ -13,16 +13,16 @@ import org.jgroups.stack.DiagnosticsHandler;
 import org.jgroups.stack.MembershipChangePolicy;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
-import org.jgroups.util.Queue;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.util.*;
 import java.util.concurrent.Callable;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+
+import static org.jgroups.Message.Flag.INTERNAL;
+import static org.jgroups.Message.Flag.OOB;
 
 
 /**
@@ -70,15 +70,18 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
      * false forces each JOIN/LEAVE/SUPSECT request to be handled separately. By default these requests are processed
      * together if they are queued at approximately the same time
      */
-    @Property(description="View bundling toggle")
+    @Deprecated
+    @Property(description="View bundling toggle",deprecatedMessage="view bundling is enabled by default")
     protected boolean view_bundling=true;
 
     @Property(description="If true, then GMS is allowed to send VIEW messages with delta views, otherwise " +
       "it always sends full views. See https://issues.jboss.org/browse/JGRP-1354 for details.")
     protected boolean use_delta_views=true;
 
-    @Property(description="Max view bundling timeout if view bundling is turned on. Default is 50 msec")
-    protected long max_bundling_time=50; // 50ms max to wait for other JOIN, LEAVE or SUSPECT requests
+    @Deprecated
+    @Property(description="Max view bundling timeout if view bundling is turned on",
+      deprecatedMessage="ignored as view bundling is always on")
+    protected long max_bundling_time=50; // 50 ms max to wait for other JOIN, LEAVE or SUSPECT requests
 
     @Property(description="Max number of old members to keep in history. Default is 50")
     protected int num_prev_mbrs=50;
@@ -101,9 +104,11 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
     @Property(description="Logs warnings for reception of views less than the current, and for views which don't include self")
     protected boolean log_view_warnings=true;
 
+    /** @deprecated true by default */
     @Property(description="Whether or not to install a new view locally first before broadcasting it " +
-      "(only done in coord role). Set to true if a state transfer protocol is detected")
-    protected boolean install_view_locally_first=false;
+      "(only done at the coord ). Set to true automatically if a state transfer protocol is detected")
+    @Deprecated
+    protected boolean install_view_locally_first=true; // https://issues.jboss.org/browse/JGRP-1751
 
     /* --------------------------------------------- JMX  ---------------------------------------------- */
 
@@ -150,7 +155,8 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
     protected TimeScheduler             timer;
 
     /** Class to process JOIN, LEAVE and MERGE requests */
-    protected final ViewHandler         view_handler=new ViewHandler();
+    protected final ViewHandler<Request> view_handler=
+      new ViewHandler<>(this, this::process, Request::canBeProcessedTogether);
 
     /** To collect VIEW_ACKs from all members */
     protected final AckCollector        ack_collector=new AckCollector();
@@ -194,7 +200,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
     public long getMergeTimeout() {return merge_timeout;}
     public void setMergeTimeout(long timeout) {merge_timeout=timeout;}
     public long getMaxJoinAttempts() {return max_join_attempts;}
-    public void setMaxJoinAttempts(long t) {max_join_attempts=t;}
+    public GMS setMaxJoinAttempts(long t) {max_join_attempts=t; return this;}
 
     @ManagedAttribute(description="impl")
     public String getImplementation() {
@@ -261,21 +267,17 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
         this.view_ack_collection_timeout=view_ack_collection_timeout;
     }
 
-    public boolean isViewBundling() {
-        return view_bundling;
-    }
+    @Deprecated
+    public boolean isViewBundling() {return true;}
 
-    public void setViewBundling(boolean view_bundling) {
-        this.view_bundling=view_bundling;
-    }
+    @Deprecated
+    public void setViewBundling(@SuppressWarnings("unused") boolean ignored) {}
 
-    public long getMaxBundlingTime() {
-        return max_bundling_time;
-    }
+    @Deprecated
+    public long getMaxBundlingTime() {return 0;}
 
-    public void setMaxBundlingTime(long max_bundling_time) {
-        this.max_bundling_time=max_bundling_time;
-    }
+    @Deprecated
+    public void setMaxBundlingTime(long max_bundling_time) {}
 
     @ManagedAttribute
     public int getViewHandlerSize() {return view_handler.size();}
@@ -289,14 +291,9 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
     public String dumpViewHandlerHistory() {
         return view_handler.dumpHistory();
     }
-    @ManagedOperation
-    public void suspendViewHandler() {
-        view_handler.suspend();
-    }
-    @ManagedOperation
-    public void resumeViewHandler() {
-        view_handler.resumeForce();
-    }
+
+    @ManagedOperation public void suspendViewHandler() {view_handler.suspend();}
+    @ManagedOperation public void resumeViewHandler() {view_handler.resume();}
 
 
     protected ViewHandler getViewHandler() {return view_handler;}
@@ -319,7 +316,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
             if(Objects.equals(logical_name, suspected_member)) {
                 Address suspect=entry.getKey();
                 if(suspect != null)
-                    up(new Event(Event.SUSPECT, suspect));
+                    up(new Event(Event.SUSPECT, Collections.singletonList(suspect)));
             }
         }
     }
@@ -389,13 +386,10 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
 
     public void start() throws Exception {
         if(impl != null) impl.start();
-        Protocol state_transfer_prot=stack.findProtocol(STATE_TRANSFER.class, StreamingStateTransfer.class);
-        if(state_transfer_prot != null)
-            install_view_locally_first=true;
     }
 
     public void stop() {
-        view_handler.stop(true);
+        // view_handler.stop();
         if(impl != null) impl.stop();
         if(prev_members != null)
             prev_members.clear();
@@ -557,20 +551,23 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
 
 
     /**
-     * Broadcasts the new view and digest as a VIEW message and waits for acks from existing members
+     * Broadcasts the new view and digest as VIEW messages, possibly sends JOIN-RSP messages to joiners and then
+     * waits for acks from expected_acks
+     * @param new_view the new view ({@link View} or {@link MergeView})
+     * @param digest the digest, can be null if new_view is not a MergeView
+     * @param expected_acks the members from which to wait for VIEW_ACKs (self will be excluded)
+     * @param joiners the list of members to which to send the join response (jr). If null, no JOIN_RSPs will be sent
+     * @param jr the {@link JoinRsp}. If null (or joiners is null), no JOIN_RSPs will be sent
      */
-    public void castViewChange(View new_view, Digest digest, Collection<Address> newMembers) {
-        log.trace("%s: mcasting view %s (%d mbrs)\n", local_addr, new_view, new_view.size());
+    public void castViewChangeAndSendJoinRsps(View new_view, Digest digest, Collection<Address> expected_acks,
+                                              Collection<Address> joiners, JoinRsp jr) {
+        log.trace("%s: mcasting view %s", local_addr, new_view);
 
         // Send down a local TMP_VIEW event. This is needed by certain layers (e.g. NAKACK) to compute correct digest
         // in case client's next request (e.g. getState()) reaches us *before* our own view change multicast.
         // Check NAKACK's TMP_VIEW handling for details
         up_prot.up(new Event(Event.TMP_VIEW, new_view));
         down_prot.down(new Event(Event.TMP_VIEW, new_view));
-
-        List<Address> ackMembers=new ArrayList<>(new_view.getMembers());
-        if(newMembers != null && !newMembers.isEmpty())
-            ackMembers.removeAll(newMembers);
 
         View full_view=new_view;
         if(use_delta_views && view != null && !(new_view instanceof MergeView)) {
@@ -580,63 +577,53 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                 new_view=createDeltaView(view, new_view);
         }
 
-        // bcast to all members
         Message view_change_msg=new Message().putHeader(this.id, new GmsHeader(GmsHeader.VIEW))
-          .setBuffer(marshal(new_view, digest));
-
-        // Bypasses SEQUENCER, prevents having to forward a merge view to a remote coordinator
-        // (https://issues.jboss.org/browse/JGRP-1484)
-        if(new_view instanceof MergeView)
+          .setBuffer(marshal(new_view, digest)).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK);
+        if(new_view instanceof MergeView) // https://issues.jboss.org/browse/JGRP-1484
             view_change_msg.setFlag(Message.Flag.NO_TOTAL_ORDER);
 
-        if(install_view_locally_first)
-            ackMembers.remove(local_addr); // remove self, as we'll install the view locally
-
-        if(!ackMembers.isEmpty())
-            ack_collector.reset(ackMembers);
-
-        if(install_view_locally_first)
-            impl.handleViewChange(full_view, digest); // install the view locally first
-
+        ack_collector.reset(expected_acks, local_addr); // exclude self, as we'll install the view locally
+        long start=System.currentTimeMillis();
+        impl.handleViewChange(full_view, digest); // install the view locally first
         down_prot.down(view_change_msg);
+        sendJoinResponses(jr, joiners);
         try {
-            if(!ackMembers.isEmpty()) {
+            if(ack_collector.size() > 0) {
                 ack_collector.waitForAllAcks(view_ack_collection_timeout);
-                log.trace("%s: got all ACKs (%d) from members for view %s", local_addr, ack_collector.expectedAcks(), new_view.getViewId());
+                log.trace("%s: got all ACKs (%d) for view %s in %d ms",
+                          local_addr, ack_collector.expectedAcks(), new_view.getViewId(), System.currentTimeMillis()-start);
             }
         }
         catch(TimeoutException e) {
-            if(log_collect_msgs)
+            if(log_collect_msgs);
                 log.warn("%s: failed to collect all ACKs (expected=%d) for view %s after %dms, missing %d ACKs from %s",
                          local_addr, ack_collector.expectedAcks(), new_view.getViewId(), view_ack_collection_timeout,
                          ack_collector.size(), ack_collector.printMissing());
         }
     }
 
-    public void sendJoinResponses(JoinRsp jr, Collection<Address> newMembers) {
-        if(jr != null && newMembers != null && !newMembers.isEmpty()) {
-            final ViewId view_id=jr.getView().getViewId();
-            ack_collector.reset(new ArrayList<>(newMembers));
-            for(Address joiner: newMembers) {
-                log.trace("%s: sending join-rsp to %s: view=%s (%d mbrs)\n", local_addr, joiner, jr.getView(), jr.getView().size());
-                sendJoinResponse(jr, joiner);
-            }
-            try {
-                ack_collector.waitForAllAcks(view_ack_collection_timeout);
-                log.trace("%s: got all ACKs (%d) from joiners for view %s", local_addr, ack_collector.expectedAcks(), view_id);
-            }
-            catch(TimeoutException e) {
-                if(log_collect_msgs)
-                    log.warn("%s: failed to collect all ACKs (expected=%d) for unicast view %s after %dms, missing %d ACKs from %s",
-                             local_addr, ack_collector.expectedAcks(), view_id, view_ack_collection_timeout,
-                             ack_collector.size(), ack_collector.printMissing());
-            }
+
+
+    protected void sendJoinResponses(JoinRsp jr, Collection<Address> joiners) {
+        if(jr == null || joiners == null || joiners.isEmpty())
+            return;
+
+        Buffer marshalled_jr=marshal(jr);
+        for(Address joiner: joiners) {
+            log.trace("%s: sending join-rsp to %s: view=%s (%d mbrs)", local_addr, joiner, jr.getView(), jr.getView().size());
+            sendJoinResponse(marshalled_jr, joiner);
         }
     }
 
     public void sendJoinResponse(JoinRsp rsp, Address dest) {
         Message m=new Message(dest).putHeader(this.id, new GmsHeader(GmsHeader.JOIN_RSP))
-          .setBuffer(marshal(rsp)).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL);
+          .setBuffer(marshal(rsp)).setFlag(OOB, INTERNAL);
+        getDownProtocol().down(m);
+    }
+
+    protected void sendJoinResponse(Buffer marshalled_rsp, Address dest) {
+        Message m=new Message(dest, marshalled_rsp).putHeader(this.id, new GmsHeader(GmsHeader.JOIN_RSP))
+          .setFlag(OOB, INTERNAL);
         getDownProtocol().down(m);
     }
 
@@ -845,10 +832,15 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
         switch(evt.getType()) {
             case Event.SUSPECT:
                 Object retval=up_prot.up(evt);
-                Address suspected=evt.getArg();
-                view_handler.add(new Request(Request.SUSPECT, suspected, true));
-                ack_collector.suspect(suspected);
-                merge_ack_collector.suspect(suspected);
+                // todo: change this to only accept lists in 4.1
+                Collection<Address> suspects=evt.arg() instanceof Address? Collections.singletonList(evt.arg()) : evt.arg();
+                Request[] suspect_reqs=new Request[suspects.size()];
+                int index=0;
+                for(Address mbr: suspects)
+                    suspect_reqs[index++]=new Request(Request.SUSPECT, mbr);
+                view_handler.add(suspect_reqs);
+                ack_collector.suspect(suspects);
+                merge_ack_collector.suspect(suspects);
                 return retval;
 
             case Event.UNSUSPECT:
@@ -856,7 +848,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                 return null;                              // discard
 
             case Event.MERGE:
-                view_handler.add(new Request(Request.MERGE, null, false, evt.getArg()));
+                view_handler.add(new Request(Request.MERGE, null, evt.getArg()));
                 return null;                              // don't pass up
 
             case Event.IS_MERGE_IN_PROGRESS:
@@ -873,10 +865,10 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
 
         switch(hdr.type) {
             case GmsHeader.JOIN_REQ:
-                view_handler.add(new Request(Request.JOIN, hdr.mbr, false, null, hdr.useFlushIfPresent));
+                view_handler.add(new Request(Request.JOIN, hdr.mbr, null, hdr.useFlushIfPresent));
                 break;
             case GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER:
-                view_handler.add(new Request(Request.JOIN_WITH_STATE_TRANSFER, hdr.mbr, false, null, hdr.useFlushIfPresent));
+                view_handler.add(new Request(Request.JOIN_WITH_STATE_TRANSFER, hdr.mbr, null, hdr.useFlushIfPresent));
                 break;
             case GmsHeader.JOIN_RSP:
                 JoinRsp join_rsp=readJoinRsp(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
@@ -886,7 +878,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
             case GmsHeader.LEAVE_REQ:
                 if(hdr.mbr == null)
                     return null;
-                view_handler.add(new Request(Request.LEAVE, hdr.mbr, false));
+                view_handler.add(new Request(Request.LEAVE, hdr.mbr));
                 break;
             case GmsHeader.LEAVE_RSP:
                 impl.handleLeaveResponse();
@@ -900,7 +892,8 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                     return null;
 
                 // Discards view with id lower than or equal to our own. Will be installed without check if it is the first view
-                if(view != null && new_view.getViewId().compareToIDs(view.getViewId()) <= 0)
+                ViewId viewId = this.getViewId();
+                if (viewId != null && new_view.getViewId().compareToIDs(viewId) <= 0)
                     return null;
                 if(new_view instanceof DeltaView) {
                     try {
@@ -910,6 +903,10 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                     catch(Throwable t) {
                         if(view != null)
                             log.warn("%s: failed to create view from delta-view; dropping view: %s", local_addr, t.toString());
+                        log.trace("%s: sending request for full view to %s", local_addr, msg.src());
+                        Message full_view_req=new Message(msg.src())
+                          .putHeader(id, new GmsHeader(GmsHeader.GET_CURRENT_VIEW)).setFlag(OOB, INTERNAL);
+                        down_prot.down(full_view_req);
                         return null;
                     }
                 }
@@ -989,7 +986,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                 Digest digest=(Digest)down_prot.down(new Event(Event.GET_DIGEST, local_addr));
                 if(digest != null) {
                     Message get_digest_rsp=new Message(msg.getSrc())
-                      .setFlag(Message.Flag.OOB,Message.Flag.INTERNAL)
+                      .setFlag(OOB, Message.Flag.INTERNAL)
                       .putHeader(this.id, new GmsHeader(GmsHeader.GET_DIGEST_RSP))
                       .setBuffer(marshal(null, digest));
                     down_prot.down(get_digest_rsp);
@@ -1013,8 +1010,9 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                         return null; // my view-id doesn't differ from sender's view-id; no need to send view
                 }
                 // either my view-id differs from sender's view-id, or sender's view-id is null: send view
+                log.trace("%s: received request for full view from %s, sending view %s", local_addr, msg.src(), view);
                 Message view_msg=new Message(msg.getSrc()).putHeader(id,new GmsHeader(GmsHeader.VIEW))
-                  .setBuffer(marshal(view, null)).setFlag(Message.Flag.OOB,Message.Flag.INTERNAL);
+                  .setBuffer(marshal(view, null)).setFlag(OOB, Message.Flag.INTERNAL);
                 down_prot.down(view_msg);
                 break;
 
@@ -1089,7 +1087,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                 if(coord != null) {
                     ViewId view_id=view != null? view.getViewId() : null;
                     Message msg=new Message(coord).putHeader(id, new GmsHeader(GmsHeader.GET_CURRENT_VIEW))
-                      .setBuffer(marshal(view_id)).setFlag(Message.Flag.OOB,Message.Flag.INTERNAL);
+                      .setBuffer(marshal(view_id)).setFlag(OOB, Message.Flag.INTERNAL);
                     down_prot.down(msg);
                 }
                 return null; // don't pass the event further down
@@ -1121,8 +1119,8 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
     }
 
 
-    private void sendViewAck(Address dest) {
-        Message view_ack=new Message(dest).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
+    protected void sendViewAck(Address dest) {
+        Message view_ack=new Message(dest).setFlag(OOB, INTERNAL)
           .putHeader(this.id, new GmsHeader(GmsHeader.VIEW_ACK));
         down_prot.down(view_ack);
     }
@@ -1216,7 +1214,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
 
     protected JoinRsp readJoinRsp(byte[] buffer, int offset, int length) {
         try {
-            return buffer != null? Util.streamableFromBuffer(JoinRsp.class, buffer, offset, length) : null;
+            return buffer != null? Util.streamableFromBuffer(JoinRsp::new, buffer, offset, length) : null;
         }
         catch(Exception ex) {
             log.error("%s: failed reading JoinRsp from message: %s", local_addr, ex);
@@ -1228,7 +1226,7 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
         if(buffer == null) return null;
         try {
             DataInput in=new ByteArrayDataInputStream(buffer, offset, length);
-            return Util.readAddresses(in, ArrayList.class);
+            return Util.readAddresses(in, ArrayList::new);
         }
         catch(Exception ex) {
             log.error("%s: failed reading members from message: %s", local_addr, ex);
@@ -1286,6 +1284,26 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
             return null;
         }
     }
+
+    protected void process(Collection<Request> requests) {
+        if(requests.isEmpty())
+            return;
+        Request firstReq=requests.iterator().next();
+        switch(firstReq.type) {
+            case Request.JOIN:
+            case Request.JOIN_WITH_STATE_TRANSFER:
+            case Request.LEAVE:
+            case Request.SUSPECT:
+                impl.handleMembershipChange(requests);
+                break;
+            case Request.MERGE:
+                impl.merge(firstReq.views);
+                break;
+            default:
+                log.error("request " + firstReq.type + " is unknown; discarded");
+        }
+    }
+
 
     /* --------------------------- End of Private Methods ------------------------------- */
 
@@ -1489,194 +1507,6 @@ public class GMS extends Protocol implements DiagnosticsHandler.ProbeHandler {
                 case INSTALL_DIGEST:               return "INSTALL_DIGEST";
                 case GET_CURRENT_VIEW:             return "GET_CURRENT_VIEW";
                 default:                           return "<unknown>";
-            }
-        }
-
-    }
-
-
-
-
-
-    /**
-     * Class which processes JOIN, LEAVE and MERGE requests. Requests are queued and processed in FIFO order
-     * @author Bela Ban
-     */
-    class ViewHandler implements Runnable {
-        volatile Thread                     thread;
-        final Queue                         queue=new Queue(); // Queue<Request>
-        volatile boolean                    suspended=false;
-        final static long                   INTERVAL=5000;
-        private static final long           MAX_COMPLETION_TIME=10000;
-        /** Maintains a list of the last 20 requests */
-        private final BoundedList<String>   history=new BoundedList<>(20);
-
-        /** Current Resumer task */
-        private Future<?>                   resumer;
-
-
-        synchronized void add(Request req) {
-            if(suspended) {
-                log.trace("%s: queue is suspended; request %s is discarded",local_addr,req);
-                return;
-            }
-            start();
-            try {
-                queue.add(req);
-                history.add(new Date() + ": " + req.toString());
-            }
-            catch(QueueClosedException e) {
-                log.trace("%s: queue is closed; request %s is discarded", local_addr, req);
-            }
-        }
-
-
-        void waitUntilCompleted(long timeout) {
-            waitUntilCompleted(timeout, false);
-        }
-
-        synchronized void waitUntilCompleted(long timeout, boolean resume) {
-            if(thread != null) {
-                try {
-                    thread.join(timeout);
-                }
-                catch(InterruptedException e) {
-                    Thread.currentThread().interrupt(); // set interrupt flag again
-                }
-                thread = null; // Added after Brian noticed that ViewHandler leaks class loaders
-            }
-            if(resume)
-                resumeForce();
-        }
-
-        synchronized void start() {
-            if(queue.closed())
-                queue.reset();
-            if(thread == null || !thread.isAlive()) {
-                thread=getThreadFactory().newThread(this, "ViewHandler");
-                thread.setDaemon(false); // thread cannot terminate if we have tasks left, e.g. when we as coord leave
-                thread.start();
-            }
-        }
-
-        synchronized void stop(boolean flush) {
-            queue.close(flush);
-            if(resumer != null)
-                resumer.cancel(false);
-        }
-
-        /**
-         * Waits until the current requests in the queue have been processed, then clears the queue and discards new
-         * requests from now on
-         */
-        public synchronized void suspend() {
-            if(!suspended) {
-                suspended=true;
-                queue.clear();
-                waitUntilCompleted(MAX_COMPLETION_TIME);
-                queue.close(true);
-                resumer=timer.schedule(this::resume, resume_task_timeout, TimeUnit.MILLISECONDS, false);
-            }
-        }
-
-
-        public synchronized void resume() {
-            if(!suspended)
-                return;
-            if(resumer != null)
-                resumer.cancel(false);
-            resumeForce();
-        }
-
-        public synchronized void resumeForce() {
-            if(queue.closed())
-                queue.reset();
-            suspended=false;
-        }
-
-        public void run() {
-            long start_time, wait_time;  // ns
-            long timeout=TimeUnit.NANOSECONDS.convert(max_bundling_time, TimeUnit.MILLISECONDS);
-            List<Request> requests=new LinkedList<>();
-            while(Thread.currentThread().equals(thread) && !suspended) {
-                try {
-                    boolean keepGoing=false;
-                    start_time=System.nanoTime();
-                    do {
-                        Request firstRequest=(Request)queue.remove(INTERVAL); // throws a TimeoutException if it runs into timeout
-                        requests.add(firstRequest);
-                        if(!view_bundling)
-                            break;
-                        if(queue.size() > 0) {
-                            Request nextReq=(Request)queue.peek();
-                            keepGoing=view_bundling && firstRequest.canBeProcessedTogether(nextReq);
-                        }
-                        else {
-                            wait_time=timeout - (System.nanoTime() - start_time);
-                            if(wait_time > 0 && firstRequest.canBeProcessedTogether(firstRequest)) { // JGRP-1438
-                                long wait_time_ms=TimeUnit.MILLISECONDS.convert(wait_time, TimeUnit.NANOSECONDS);
-                                if(wait_time_ms > 0)
-                                    queue.waitUntilClosed(wait_time_ms); // misnomer: waits until element has been added or q closed
-                            }
-                            keepGoing=queue.size() > 0 && firstRequest.canBeProcessedTogether((Request)queue.peek());
-                        }
-                    }
-                    while(keepGoing && timeout - (System.nanoTime() - start_time) > 0);
-
-                    try {
-                        process(requests);
-                    }
-                    finally {
-                        requests.clear();
-                    }
-                }
-                catch(QueueClosedException e) {
-                    break;
-                }
-                catch(TimeoutException e) {
-                    break;
-                }
-                catch(Throwable catchall) {
-                    Util.sleep(50);
-                }
-            }
-        }
-
-        public int size() {return queue.size();}
-        public boolean suspended() {return suspended;}
-        public String dumpQueue() {
-            StringBuilder sb=new StringBuilder();
-            List v=queue.values();
-            for(Iterator it=v.iterator(); it.hasNext();) {
-                sb.append(it.next() + "\n");
-            }
-            return sb.toString();
-        }
-
-        public String dumpHistory() {
-            StringBuilder sb=new StringBuilder();
-            for(String line: history) {
-                sb.append(line + "\n");
-            }
-            return sb.toString();
-        }
-
-        private void process(List<Request> requests) {
-            if(requests.isEmpty())
-                return;
-            Request firstReq=requests.get(0);
-            switch(firstReq.type) {
-                case Request.JOIN:
-                case Request.JOIN_WITH_STATE_TRANSFER:
-                case Request.LEAVE:
-                case Request.SUSPECT:
-                    impl.handleMembershipChange(requests);
-                    break;
-                case Request.MERGE:
-                    impl.merge(firstReq.views);
-                    break;
-                default:
-                    log.error("request " + firstReq.type + " is unknown; discarded");
             }
         }
 

@@ -22,6 +22,24 @@ import java.util.stream.LongStream;
 public class UtilTest {
 
 
+    public void testShuffle() {
+        Integer[] array={1,2,3,4,5};
+        System.out.println("array = " + Arrays.toString(array));
+        Util.shuffle(array, 0, array.length);
+        System.out.println("array = " + Arrays.toString(array));
+
+
+        array=new Integer[]{1,2,3,4,5};
+
+        // only elements at indices 0-2 can be modified
+        for(int i=0; i < 100; i++) {
+            Util.shuffle(array, 0, 3);
+            System.out.println("array = " + Arrays.toString(array));
+            assert array[3] == 4 : String.format("element at index %d was supposed to be %d: %s", 3, 4, Arrays.toString(array));
+            assert array[4] == 5 : String.format("element at index %d was supposed to be %d: %s", 4, 5, Arrays.toString(array));
+        }
+    }
+
     public void testPermutations() {
         List<Integer> list=Arrays.asList(1,2,3,4);
         List<List<Integer>> permutations=new ArrayList<>(Util.factorial(list.size()));
@@ -113,7 +131,7 @@ public class UtilTest {
     public static void testGetProperty2() {
         String input="foo, bar,  foobar: 1000";
         String result=Util.getProperty(input);
-        assert result != null && result.equals("1000");
+        assert Objects.equals(result, "1000");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
@@ -123,31 +141,31 @@ public class UtilTest {
 
         input="foo, bar,  foobar: 1000";
         result=Util.getProperty(input);
-        assert result != null && result.equals("900");
+        assert Objects.equals(result, "900");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
-        assert result != null && result.equals("900");
+        assert Objects.equals(result, "900");
 
 
         System.setProperty("bar", "500");
         input="foo, bar,  foobar: 1000";
         result=Util.getProperty(input);
-        assert result != null && result.equals("500");
+        assert Objects.equals(result, "500");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
-        assert result != null && result.equals("500");
+        assert Objects.equals(result, "500");
 
 
         System.setProperty("foo", "200");
         input="foo, bar,  foobar: 1000";
         result=Util.getProperty(input);
-        assert result != null && result.equals("200");
+        assert Objects.equals(result, "200");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
-        assert result != null && result.equals("200");
+        assert Objects.equals(result, "200");
     }
 
     public void testReplaceProperties() {
@@ -253,12 +271,12 @@ public class UtilTest {
         num=1000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1KB", s);
+        Assert.assertEquals("1.00KB", s);
 
         num=1001;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1KB", s);
+        Assert.assertEquals("1.00KB", s);
 
         num=1010;
         s=Util.printBytes(num);
@@ -273,12 +291,12 @@ public class UtilTest {
         num=10000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("10KB", s);
+        Assert.assertEquals("10.00KB", s);
 
         num=150000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("150KB", s);
+        Assert.assertEquals("150.00KB", s);
 
         num=150023;
         s=Util.printBytes(num);
@@ -288,12 +306,12 @@ public class UtilTest {
         num=1200000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1.2MB", s);
+        Assert.assertEquals("1.20MB", s);
 
         num=150000000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("150MB", s);
+        Assert.assertEquals("150.00MB", s);
 
         num=150030000;
         s=Util.printBytes(num);
@@ -303,7 +321,7 @@ public class UtilTest {
         num=1200000000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1.2GB", s);
+        Assert.assertEquals("1.20GB", s);
     }
 
 
@@ -683,7 +701,7 @@ public class UtilTest {
         DataInputStream dis=new DataInputStream(instream);
         View v2=Util.readGenericStreamable(dis);
         Assert.assertEquals(v, v2);
-        v2=Util.readStreamable(View.class, dis);
+        v2=Util.readStreamable(View::new, dis);
         Assert.assertEquals(v, v2);
     }
 
@@ -1192,6 +1210,27 @@ public class UtilTest {
         _testMethodNameToAttributeName("is", "is");
         _testMethodNameToAttributeName("age", "age");
         _testMethodNameToAttributeName("lastName", "last_name");
+    }
+
+    public void testWaitUntilAllChannelsHaveSameView() throws Exception {
+        JChannel a=null, b=null;
+
+        try {
+            a=new JChannel(Util.getTestStack()).name("A").connect("demo");
+            b=new JChannel(Util.getTestStack()).name("B").connect("demo");
+            Util.waitUntilAllChannelsHaveSameView(10000, 1000, a,b);
+
+            try {
+                Util.waitUntilAllChannelsHaveSameView(2000, 500, a);
+                assert false;
+            }
+            catch(Exception ex) {
+                System.out.printf("threw exception as expected: %s\n", ex);
+            }
+        }
+        finally {
+            Util.close(b,a);
+        }
     }
 
     private static void _testMethodNameToAttributeName(String input, String expected_output) {

@@ -102,7 +102,7 @@ public class STABLE extends Protocol {
     protected final Lock          stability_lock=new ReentrantLock(); // to synchronize on stability_task
 
     @GuardedBy("stable_task_lock")
-    protected Future<?>           stable_task_future=null; // bcasts periodic STABLE message (added to timer below)
+    protected Future<?>           stable_task_future; // bcasts periodic STABLE message (added to timer below)
     protected final Lock          stable_task_lock=new ReentrantLock(); // to sync on stable_task
 
     protected TimeScheduler       timer; // to send periodic STABLE msgs (and STABILITY messages)
@@ -361,7 +361,7 @@ public class STABLE extends Protocol {
         lock.lock();
         try {
             this.view=v;
-            coordinator=v.getMembers().get(0);
+            coordinator=v.getCoord();
             resetDigest();
             if(!initialized)
                 initialized=true;
@@ -691,7 +691,7 @@ public class STABLE extends Protocol {
 
     protected Digest readDigest(byte[] buffer, int offset, int length) {
         try {
-            return buffer != null? Util.streamableFromBuffer(Digest.class, buffer, offset, length) : null;
+            return buffer != null? Util.streamableFromBuffer(Digest::new, buffer, offset, length) : null;
         }
         catch(Exception ex) {
             log.error("%s: failed reading Digest from message: %s", local_addr, ex);

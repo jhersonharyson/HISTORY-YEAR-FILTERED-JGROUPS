@@ -18,9 +18,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 
 
@@ -54,6 +54,8 @@ public class SEQUENCER2 extends Protocol {
 
     protected volatile boolean                  running=true;
 
+    protected static final BiConsumer<MessageBatch,Message> BATCH_ACCUMULATOR=MessageBatch::add;
+
 
     @ManagedAttribute protected long request_msgs;
     @ManagedAttribute protected long response_msgs;
@@ -68,7 +70,6 @@ public class SEQUENCER2 extends Protocol {
     @ManagedAttribute protected long received_responses;
 
     protected Table<Message>  received_msgs = new Table<>();
-    protected int             max_msg_batch_size = 100;
 
     @ManagedAttribute
     public boolean isCoordinator()   {return is_coord;}
@@ -306,11 +307,8 @@ public class SEQUENCER2 extends Protocol {
     // If we're becoming coordinator, we need to handle TMP_VIEW as
     // an immediate change of view. See JGRP-1452.
     private void handleTmpView(View v) {
-        List<Address> mbrs=v.getMembers();
-        if(mbrs.isEmpty()) return;
-
-        Address new_coord=mbrs.get(0);
-        if(!new_coord.equals(coord) && local_addr != null && local_addr.equals(new_coord))
+        Address new_coord=v.getCoord();
+        if(new_coord != null && !new_coord.equals(coord) && local_addr != null && local_addr.equals(new_coord))
             handleViewChange(v);
     }
 
@@ -359,34 +357,34 @@ public class SEQUENCER2 extends Protocol {
         
         final Table<Message> win=received_msgs;
         win.add(hdr.seqno, msg);
-
-        final AtomicBoolean processing=win.getProcessing();
-        if(processing.compareAndSet(false, true)) 
-            removeAndDeliver(processing, win, sender);
+        removeAndDeliver(win, sender);
     }
     
     
-    protected void removeAndDeliver(final AtomicBoolean processing, Table<Message> win, Address sender) {
-        boolean released_processing=false;
-        try {
-            while(true) {
-                List<Message> list=win.removeMany(processing, true, max_msg_batch_size);
-                if(list != null) // list is guaranteed to NOT contain any OOB messages as the drop_oob_msgs_filter removed them
-                    deliverBatch(new MessageBatch(local_addr, sender, null, false, list));
-                else {
-                    released_processing=true;
-                    return;
-                }
+    protected void removeAndDeliver(Table<Message> win, Address sender) {
+        AtomicInteger adders=win.getAdders();
+        if(adders.getAndIncrement() != 0)
+            return;
+
+        final MessageBatch     batch=new MessageBatch(win.size()).dest(local_addr).sender(sender).multicast(false);
+        Supplier<MessageBatch> batch_creator=() -> batch;
+        do {
+            try {
+                batch.reset();
+                win.removeMany(true, 0, null, batch_creator, BATCH_ACCUMULATOR);
+            }
+            catch(Throwable t) {
+                log.error("failed removing messages from table for " + sender, t);
+            }
+            if(!batch.isEmpty()) {
+                // batch is guaranteed to NOT contain any OOB messages as the drop_oob_msgs_filter removed them
+                deliverBatch(batch);
             }
         }
-        finally {
-            // processing is always set in win.remove(processing) above and never here ! This code is just a
-            // 2nd line of defense should there be an exception before win.removeMany(processing) sets processing
-            if(!released_processing)
-                processing.set(false);
-        }
+        while(adders.decrementAndGet() != 0);
     }
-    
+
+
     protected void deliverBatch(MessageBatch batch) {
         try {
             if(batch.isEmpty())

@@ -29,9 +29,10 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.text.NumberFormat;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.IntFunction;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -46,7 +47,7 @@ import static org.jgroups.protocols.TP.MULTICAST;
  */
 public class Util {
 
-    private static final NumberFormat f;
+    // private static final NumberFormat f;
 
     private static final Map<Class<? extends Object>,Byte> PRIMITIVE_TYPES=new HashMap<>(15);
     private static final byte TYPE_NULL         =  0;
@@ -98,10 +99,10 @@ public class Util {
     static {
         resource_bundle=ResourceBundle.getBundle("jg-messages",Locale.getDefault(),Util.class.getClassLoader());
 
-        f=NumberFormat.getNumberInstance();
-        f.setGroupingUsed(false);
+        /*f=NumberFormat.getNumberInstance();
+        f.setGroupingUsed(true);
         // f.setMinimumFractionDigits(2);
-        f.setMaximumFractionDigits(2);
+        f.setMaximumFractionDigits(2);*/
 
         PRIMITIVE_TYPES.put(Boolean.class,TYPE_BOOLEAN);
         PRIMITIVE_TYPES.put(Byte.class,TYPE_BYTE);
@@ -291,7 +292,7 @@ public class Util {
         }
         View first=channels[0].getView();
         for(View view : views)
-            if(!Objects.equals(view, first))
+            if(!Objects.equals(view, first) || view.size() != channels.length)
                 throw new TimeoutException("Timeout " + timeout + " kicked in, views are:\n" + sb);
     }
 
@@ -784,9 +785,12 @@ public class Util {
         }
     }
 
-
     public static <T extends Streamable> T streamableFromByteBuffer(Class<? extends Streamable> cl,byte[] buffer) throws Exception {
         return streamableFromByteBuffer(cl,buffer,0,buffer.length);
+    }
+
+    public static <T extends Streamable> T streamableFromByteBuffer(Supplier<T> factory, byte[] buffer) throws Exception {
+        return streamableFromByteBuffer(factory, buffer, 0, buffer.length);
     }
 
     /**
@@ -948,7 +952,6 @@ public class Util {
         }
     }
 
-
     public static <T extends Streamable> T streamableFromByteBuffer(Class<? extends Streamable> cl,byte[] buffer,int offset,int length) throws Exception {
         if(buffer == null) return null;
         DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
@@ -957,12 +960,24 @@ public class Util {
         return retval;
     }
 
+    public static <T extends Streamable> T streamableFromByteBuffer(Supplier<T> factory, byte[] buffer, int offset, int length) throws Exception {
+        if(buffer == null) return null;
+        DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
+        T retval=factory.get();
+        retval.readFrom(in);
+        return retval;
+    }
 
+    @Deprecated
     public static <T extends Streamable> T streamableFromBuffer(Class<T> clazz,byte[] buffer,int offset,int length) throws Exception {
         DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
         return Util.readStreamable(clazz, in);
     }
 
+    public static <T extends Streamable> T streamableFromBuffer(Supplier<T> factory, byte[] buffer, int offset, int length) throws Exception {
+        DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
+        return Util.readStreamable(factory, in);
+    }
 
     public static byte[] streamableToByteBuffer(Streamable obj) throws Exception {
         int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 512;
@@ -1005,9 +1020,15 @@ public class Util {
     public static String byteArrayToHexString(byte[] b) {
         if(b == null)
             return "null";
-        StringBuilder sb = new StringBuilder(b.length * 2);
-        for (int i = 0; i < b.length; i++){
-            int v = b[i] & 0xff;
+        return byteArrayToHexString(b, 0, b.length);
+    }
+
+    public static String byteArrayToHexString(byte[] b, int offset, int length) {
+        if(b == null)
+            return "null";
+        StringBuilder sb = new StringBuilder(length * 2);
+        for (int i = 0; i < length; i++){
+            int v = b[i+offset] & 0xff;
             if (v < 16) { sb.append('0'); }
             sb.append(Integer.toHexString(v));
         }
@@ -1462,10 +1483,29 @@ public class Util {
      * @return Collection of Address objects
      * @throws Exception
      */
+    @Deprecated
     public static Collection<? extends Address> readAddresses(DataInput in,Class cl) throws Exception {
         short length=in.readShort();
         if(length < 0) return null;
         Collection<Address> retval=(Collection<Address>)cl.newInstance();
+        Address addr;
+        for(int i=0; i < length; i++) {
+            addr=Util.readAddress(in);
+            retval.add(addr);
+        }
+        return retval;
+    }
+
+    /**
+     * @param in
+     * @param factory a factory for creating the returned collection, parameterized by size
+     * @return Collection of Address objects
+     * @throws Exception
+     */
+    public static <T extends Collection<Address>> T readAddresses(DataInput in, IntFunction<T> factory) throws Exception {
+        short length=in.readShort();
+        if(length < 0) return null;
+        T retval = factory.apply(length);
         Address addr;
         for(int i=0; i < length; i++) {
             addr=Util.readAddress(in);
@@ -1520,7 +1560,7 @@ public class Util {
         obj.writeTo(out);
     }
 
-
+    @Deprecated
     public static <T extends Streamable> T readStreamable(Class<T> clazz,DataInput in) throws Exception {
         T retval=null;
         if(!in.readBoolean())
@@ -1530,6 +1570,14 @@ public class Util {
         return retval;
     }
 
+    public static <T extends Streamable> T readStreamable(Supplier<T> factory, DataInput in) throws Exception {
+        T retval=null;
+        if(!in.readBoolean())
+            return null;
+        retval=factory.get();
+        retval.readFrom(in);
+        return retval;
+    }
 
     public static void writeGenericStreamable(Streamable obj, DataOutput out) throws Exception {
         short magic_number;
@@ -1851,7 +1899,7 @@ public class Util {
             return ret;
         }
         catch(IOException e) {
-            return 0;
+            return -1;
         }
     }
 
@@ -1992,6 +2040,28 @@ public class Util {
         return -1;
     }
 
+    /**
+     * Reorders elements of an array in-place. No bounds checking is performed. Null elements are shuffled, too
+     * @param array the array to be shuffled; the array will be modified
+     * @param from the start index inclusive
+     * @param to the end index (exclusive), must be >= from (not checked)
+     * @param <T> the type of the array's elements
+     */
+    public static <T> void shuffle(T[] array, int from, int to) {
+        if(array == null)
+            return;
+        for(int i=from; i < to; i++) {
+            int random=(int)random(to);
+            int other=random -1 + from;
+            // int other=(int)(random(to)-1 + from);
+            if(i != other) {
+                T tmp=array[i];
+                array[i]=array[other];
+                array[other]=tmp;
+            }
+        }
+    }
+
 
     /** Returns a random value in the range [1 - range]. If range is 0, 1 will be returned. If range is negative, an
      * exception will be thrown */
@@ -2099,30 +2169,6 @@ public class Util {
     }
 
 
-    /**
-     * MByte nowadays doesn't mean 1024 * 1024 bytes, but 1 million bytes, see http://en.wikipedia.org/wiki/Megabyte
-     * @param bytes
-     * @return
-     */
-    public static String printBytes(long bytes) {
-        double tmp;
-
-        if(bytes < 1000)
-            return bytes + "b";
-        if(bytes < 1000000) {
-            tmp=bytes / 1000.0;
-            return f.format(tmp) + "KB";
-        }
-        if(bytes < 1000000000) {
-            tmp=bytes / 1000000.0;
-            return f.format(tmp) + "MB";
-        }
-        else {
-            tmp=bytes / 1000000000.0;
-            return f.format(tmp) + "GB";
-        }
-    }
-
     public static String printNanos(long time_ns) {
         double us=time_ns / 1_000.0;
         return String.format("%d ns (%.2f us)", time_ns, us);
@@ -2175,34 +2221,58 @@ public class Util {
         else if((index=input.indexOf("kb")) != -1)
             factor=1000;
         else if((index=input.indexOf('m')) != -1)
-            factor=1000000;
+            factor=1_000_000;
         else if((index=input.indexOf("mb")) != -1)
-            factor=1000000;
+            factor=1_000_000;
         else if((index=input.indexOf('g')) != -1)
-            factor=1000000000;
+            factor=1_000_000_000;
         else if((index=input.indexOf("gb")) != -1)
-            factor=1000000000;
+            factor=1_000_000_000;
 
         String str=index != -1? input.substring(0,index) : input;
         return new Tuple<>(str,factor);
+    }
+
+    /**
+     * MByte nowadays doesn't mean 1024 * 1024 bytes, but 1 million bytes, see http://en.wikipedia.org/wiki/Megabyte
+     * @param bytes
+     * @return
+     */
+    public static String printBytes(long bytes) {
+        double tmp;
+
+        if(bytes < 1000)
+            return String.format("%db", bytes);
+        if(bytes < 1_000_000) {
+            tmp=bytes / 1000.0;
+            return String.format("%,.2fKB", tmp);
+        }
+        if(bytes < 1_000_000_000) {
+            tmp=bytes / 1_000_000.0;
+            return String.format("%,.2fMB", tmp);
+        }
+        else {
+            tmp=bytes / 1_000_000_000.0;
+            return String.format("%,.2fGB", tmp);
+        }
     }
 
     public static String printBytes(double bytes) {
         double tmp;
 
         if(bytes < 1000)
-            return bytes + "b";
-        if(bytes < 1000000) {
+            return String.format("%.2fb", bytes);
+        if(bytes < 1_000_000) {
             tmp=bytes / 1000.0;
-            return f.format(tmp) + "KB";
+            return String.format("%,.2fKB", tmp);
         }
-        if(bytes < 1000000000) {
-            tmp=bytes / 1000000.0;
-            return f.format(tmp) + "MB";
+        if(bytes < 1_000_000_000) {
+            tmp=bytes / 1000_000.0;
+            return String.format("%,.2fMB", tmp);
         }
         else {
-            tmp=bytes / 1000000000.0;
-            return f.format(tmp) + "GB";
+            tmp=bytes / 1_000_000_000.0;
+            return String.format("%,.2fGB", tmp);
         }
     }
 
@@ -2263,18 +2333,18 @@ public class Util {
      * @return List. A List<Range> of offset/length pairs
      */
     public static List<Range> computeFragOffsets(int offset,int length,int frag_size) {
-        List<Range> retval=new ArrayList<>();
+        int num_frags=(int)Math.ceil(length / (double)frag_size);
+        List<Range> retval=new ArrayList<>(num_frags);
         long total_size=(long)length + offset;
         int index=offset;
         int tmp_size=0;
-        Range r;
 
         while(index < total_size) {
             if(index + frag_size <= total_size)
                 tmp_size=frag_size;
             else
                 tmp_size=(int)(total_size - index);
-            r=new Range(index,tmp_size);
+            Range r=new Range(index,tmp_size);
             retval.add(r);
             index+=tmp_size;
         }
@@ -2841,6 +2911,15 @@ public class Util {
     }
 
     public static Field getField(final Class clazz, String field_name) {
+        try {
+            return getField(clazz, field_name, false);
+        }
+        catch(NoSuchFieldException e) {
+            return null;
+        }
+    }
+
+    public static Field getField(final Class clazz, String field_name, boolean throw_exception) throws NoSuchFieldException {
         if(clazz == null || field_name == null)
             return null;
 
@@ -2852,6 +2931,8 @@ public class Util {
             catch(NoSuchFieldException e) {
             }
         }
+        if(field == null && throw_exception)
+            throw new NoSuchFieldException(String.format("%s not found in %s or superclasses", field_name, clazz.getName()));
         return field;
     }
 
@@ -3431,7 +3512,7 @@ public class Util {
                 if(start_port == end_port)
                     throw new BindException(String.format("no port available in range [%d .. %d] (bind_addr=%s)",
                                                           original_start_port, end_port, bind_addr));
-                if(bind_addr != null && !bind_addr.isLoopbackAddress()) {
+                if(bind_addr != null && !(bind_addr.isLoopbackAddress() || bind_addr.isAnyLocalAddress())) {
                     NetworkInterface nic=NetworkInterface.getByInetAddress(bind_addr);
                     if(nic == null)
                         throw new BindException("bind_addr " + bind_addr + " is not a valid interface: " + bind_ex);
@@ -4077,16 +4158,10 @@ public class Util {
     public static boolean isCoordinator(View view,Address local_addr) {
         if(view == null || local_addr == null)
             return false;
-        List<Address> mbrs=view.getMembers();
-        return !(mbrs == null || mbrs.isEmpty()) && local_addr.equals(mbrs.iterator().next());
+        Address coord=view.getCoord();
+        return coord != null && local_addr.equals(coord);
     }
 
-    public static Address getCoordinator(View view) {
-        if(view == null)
-            return null;
-        List<Address> mbrs=view.getMembers();
-        return !mbrs.isEmpty()? mbrs.get(0) : null;
-    }
 
     public static MBeanServer getMBeanServer() {
         List<MBeanServer> servers=MBeanServerFactory.findMBeanServer(null);
@@ -4400,6 +4475,8 @@ public class Util {
             try {
                 retval=System.getProperty(prop);
                 if(retval != null)
+                    return retval;
+                if((retval=System.getenv(prop)) != null)
                     return retval;
             }
             catch(Throwable e) {
