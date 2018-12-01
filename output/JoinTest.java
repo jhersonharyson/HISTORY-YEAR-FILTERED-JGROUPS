@@ -69,7 +69,7 @@ public class JoinTest extends ChannelTestBase {
         MyReceiver r2=new MyReceiver("c2");
         a.setReceiver(r1);
         b.setReceiver(r2);
-        Message m1=new Message(null, "message-1"), m2=new Message(null, "message-2");
+        Message m1=new Message(null, null, "message-1"), m2=new Message(null, null, "message-2");
         a.connect("JoinTest-2");
         View view=a.getView();
         assert view.size() == 2 : "c1's view: " + view;
@@ -137,14 +137,14 @@ public class JoinTest extends ChannelTestBase {
         b.connect("JoinTest");
 
         ProtocolStack stack=b.getProtocolStack();
-        GMS gms=stack.findProtocol(GMS.class);
+        GMS gms=(GMS)stack.findProtocol(GMS.class);
         if(gms != null)
             gms.setJoinTimeout(join_timeout);
 
 
         stack=a.getProtocolStack();
         DELAY_JOIN_REQ delay=new DELAY_JOIN_REQ().delay(delay_join_req);
-        stack.insertProtocol(delay, ProtocolStack.Position.BELOW, GMS.class);
+        stack.insertProtocol(delay, ProtocolStack.BELOW, GMS.class);
 
         System.out.println(new Date() + ": joining c2");
         long start=System.currentTimeMillis(), stop;
@@ -164,7 +164,7 @@ public class JoinTest extends ChannelTestBase {
 
         public MyReceiver(String name) {
             this.name=name;
-            msgs = Collections.synchronizedList(new ArrayList<>());
+            msgs = Collections.synchronizedList(new ArrayList<String>());
         }
 
         public List<String> getMsgs() {
@@ -185,32 +185,37 @@ public class JoinTest extends ChannelTestBase {
     }
 
 
-    protected static class DELAY_JOIN_REQ extends Protocol {
+    protected class DELAY_JOIN_REQ extends Protocol {
         private long        delay=4000;
         private final short gms_id=ClassConfigurator.getProtocolId(GMS.class);
 
         public long           delay()           {return delay;}
         public DELAY_JOIN_REQ delay(long delay) {this.delay=delay; return this;}
 
-        public Object up(final Message msg) {
-            final GMS.GmsHeader hdr=msg.getHeader(gms_id);
-            if(hdr != null) {
-                switch(hdr.getType()) {
-                    case GMS.GmsHeader.JOIN_REQ:
-                    case GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER:
-                        System.out.println(new Date() + ": delaying JOIN-REQ by " + delay + " ms");
-                        Thread thread=new Thread() {
-                            public void run() {
-                                Util.sleep(delay);
-                                System.out.println(new Date() + ": sending up delayed JOIN-REQ by " + hdr.getMember());
-                                up_prot.up(msg);
-                            }
-                        };
-                        thread.start();
-                        return null;
-                }
+        public Object up(final Event evt) {
+            switch(evt.getType()) {
+                case Event.MSG:
+                    Message msg=(Message)evt.getArg();
+                    final GMS.GmsHeader hdr=(GMS.GmsHeader)msg.getHeader(gms_id);
+                    if(hdr != null) {
+                        switch(hdr.getType()) {
+                            case GMS.GmsHeader.JOIN_REQ:
+                            case GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER:
+                                System.out.println(new Date() + ": delaying JOIN-REQ by " + delay + " ms");
+                                Thread thread=new Thread() {
+                                    public void run() {
+                                        Util.sleep(delay);
+                                        System.out.println(new Date() + ": sending up delayed JOIN-REQ by " + hdr.getMember());
+                                        up_prot.up(evt);
+                                    }
+                                };
+                                thread.start();
+                                return null;
+                        }
+                    }
+                    break;
             }
-            return up_prot.up(msg);
+            return up_prot.up(evt);
         }
     }
 

@@ -4,7 +4,6 @@ import org.jgroups.*;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.SenderSendsBundler;
 import org.jgroups.protocols.TP;
-import org.jgroups.util.MessageBatch;
 import org.jgroups.util.Util;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -30,8 +29,10 @@ public class HeadersResizeTest {
     }
 
     @BeforeMethod protected void setup() throws Exception {
-        a=new JChannel(Util.getTestStack()).name("A").connect(HeadersResizeTest.class.getSimpleName());
-        b=new JChannel(Util.getTestStack()).name("B").connect(HeadersResizeTest.class.getSimpleName());
+        a=new JChannel(Util.getTestStack()).name("A");
+        a.connect(HeadersResizeTest.class.getSimpleName());
+        b=new JChannel(Util.getTestStack()).name("B");
+        b.connect(HeadersResizeTest.class.getSimpleName());
         Util.waitUntilAllChannelsHaveSameView(10000, 500, a,b);
     }
 
@@ -97,10 +98,6 @@ public class HeadersResizeTest {
             Header hdr=msg.getHeader(transport_id);
             if(hdr != null)
                 num_transport_headers++;
-        }
-
-        public void receive(MessageBatch batch) {
-            System.out.printf("received batch of %d msgs\n", batch.size());
         }
     }
 }

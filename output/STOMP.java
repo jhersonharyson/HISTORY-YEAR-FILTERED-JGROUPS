@@ -12,7 +12,6 @@ import java.net.*;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentMap;
-import java.util.function.Supplier;
 
 /**
  * Protocol which provides STOMP (http://stomp.codehaus.org/) support. Very simple implementation, with a
@@ -35,10 +34,11 @@ public class STOMP extends Protocol implements Runnable {
     @Property(name="bind_addr",
               description="The bind address which should be used by the server socket. The following special values " +
                       "are also recognized: GLOBAL, SITE_LOCAL, LINK_LOCAL and NON_LOOPBACK",
-              defaultValueIPv4="0.0.0.0", defaultValueIPv6="::", writable=false)
-    protected InetAddress bind_addr;
+              defaultValueIPv4="0.0.0.0", defaultValueIPv6="::",
+              systemProperty={Global.STOMP_BIND_ADDR},writable=false)
+    protected InetAddress bind_addr=null;
 
-    @Property(description="If set, then endpoint will be set to this address")
+    @Property(description="If set, then endpoint will be set to this address",systemProperty=Global.STOMP_ENDPOINT_ADDR)
     protected String endpoint_addr;
 
     @Property(description="Port on which the STOMP protocol listens for requests",writable=false)
@@ -56,13 +56,13 @@ public class STOMP extends Protocol implements Runnable {
     protected boolean forward_non_client_generated_msgs=false;
 
     /* ---------------------------------------------   JMX      ---------------------------------------------------*/
-    @ManagedAttribute(description="Number of client connections")
+    @ManagedAttribute(description="Number of client connections",writable=false)
     public int getNumConnections() {return connections.size();}
 
-    @ManagedAttribute(description="Number of subscriptions")
+    @ManagedAttribute(description="Number of subscriptions",writable=false)
     public int getNumSubscriptions() {return subscriptions.size();}
 
-    @ManagedAttribute(description="Print subscriptions")
+    @ManagedAttribute(description="Print subscriptions",writable=false)
     public String getSubscriptions() {return subscriptions.keySet().toString();}
 
     @ManagedAttribute
@@ -71,7 +71,7 @@ public class STOMP extends Protocol implements Runnable {
     /* --------------------------------------------- Fields ------------------------------------------------------ */
     protected Address                   local_addr;
     protected ServerSocket              srv_sock;
-    @ManagedAttribute
+    @ManagedAttribute(writable=false)
     protected String                    endpoint;
     protected Thread                    acceptor;
     protected final List<Connection>    connections=new LinkedList<>();
@@ -96,7 +96,7 @@ public class STOMP extends Protocol implements Runnable {
 
     public void start() throws Exception {
         super.start();
-        srv_sock=Util.createServerSocket(getSocketFactory(), "jgroups.stomp.srv_sock", bind_addr, port, port+50);
+        srv_sock=Util.createServerSocket(getSocketFactory(), "jgroups.stomp.srv_sock", bind_addr, port);
         if(log.isDebugEnabled())
             log.debug("server socket listening on " + srv_sock.getLocalSocketAddress());
 
@@ -123,7 +123,8 @@ public class STOMP extends Protocol implements Runnable {
             }
         }
         synchronized(connections) {
-            connections.forEach(Connection::stop);
+            for(Connection conn: connections)
+                conn.stop();
             connections.clear();
         }
         acceptor=null;
@@ -159,10 +160,10 @@ public class STOMP extends Protocol implements Runnable {
     public Object down(Event evt) {
         switch(evt.getType()) {
             case Event.VIEW_CHANGE:
-                handleView(evt.getArg());
+                handleView((View)evt.getArg());
                 break;
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=evt.getArg();
+                local_addr=(Address)evt.getArg();
                 break;
         }
         return down_prot.down(evt);
@@ -170,59 +171,60 @@ public class STOMP extends Protocol implements Runnable {
 
     public Object up(Event evt) {
         switch(evt.getType()) {
-            case Event.VIEW_CHANGE:
-                handleView(evt.getArg());
-                break;
-        }
-        return up_prot.up(evt);
-    }
-
-    public Object up(Message msg) {
-        StompHeader hdr=msg.getHeader(id);
-        if(hdr == null) {
-            if(forward_non_client_generated_msgs) {
-                HashMap<String, String> hdrs=new HashMap<>();
-                hdrs.put("sender", msg.getSrc().toString());
-                sendToClients(hdrs, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-            }
-            return up_prot.up(msg);
-        }
-
-        switch(hdr.type) {
-            case MESSAGE:
-                sendToClients(hdr.headers, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-                break;
-            case ENDPOINT:
-                String tmp_endpoint=hdr.headers.get("endpoint");
-                if(tmp_endpoint != null) {
-                    boolean update_clients;
-                    String old_endpoint=null;
-                    synchronized(endpoints) {
-                        endpoints.put(msg.getSrc(), tmp_endpoint);
+            case Event.MSG:
+                Message msg=(Message)evt.getArg();
+                StompHeader hdr=(StompHeader)msg.getHeader(id);
+                if(hdr == null) {
+                    if(forward_non_client_generated_msgs) {
+                        HashMap<String, String> hdrs=new HashMap<>();
+                        hdrs.put("sender", msg.getSrc().toString());
+                        sendToClients(hdrs, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
                     }
-                    update_clients=!Objects.equals(old_endpoint, tmp_endpoint);
-                    if(update_clients && this.send_info) {
-                        synchronized(connections) {
-                            for(Connection conn: connections) {
-                                conn.writeResponse(ServerVerb.INFO, "endpoints", getAllEndpoints());
+                    break;
+                }
+
+                switch(hdr.type) {
+                    case MESSAGE:
+                        sendToClients(hdr.headers, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                        break;
+                    case ENDPOINT:
+                        String tmp_endpoint=hdr.headers.get("endpoint");
+                        if(tmp_endpoint != null) {
+                            boolean update_clients;
+                            String old_endpoint=null;
+                            synchronized(endpoints) {
+                                endpoints.put(msg.getSrc(), tmp_endpoint);
+                            }
+                            update_clients=old_endpoint == null || !old_endpoint.equals(tmp_endpoint);
+                            if(update_clients && this.send_info) {
+                                synchronized(connections) {
+                                    for(Connection conn: connections) {
+                                        conn.writeResponse(ServerVerb.INFO, "endpoints", getAllEndpoints());
+                                    }
+                                }
                             }
                         }
-                    }
+                        return null;
+                    default:
+                        throw new IllegalArgumentException("type " + hdr.type + " is not known");
                 }
-                return null;
-            default:
-                throw new IllegalArgumentException("type " + hdr.type + " is not known");
+                break;
+
+            case Event.VIEW_CHANGE:
+                handleView((View)evt.getArg());
+                break;
         }
-        return up_prot.up(msg);
+
+        return up_prot.up(evt);
     }
 
     public void up(MessageBatch batch) {
         for(Message msg: batch) {
-            StompHeader hdr=msg.getHeader(id);
+            StompHeader hdr=(StompHeader)msg.getHeader(id);
             if(hdr != null || forward_non_client_generated_msgs) {
                 try {
                     batch.remove(msg);
-                    up(msg);
+                    up(new Event(Event.MSG, msg));
                 }
                 catch(Throwable t) {
                     log.error(Util.getMessage("FailedPassingUpMessage"), t);
@@ -251,7 +253,7 @@ public class STOMP extends Protocol implements Runnable {
                 throw new EOFException("reading header");
             if(header.isEmpty())
                 break;
-            int index=header.indexOf(':');
+            int index=header.indexOf(":");
             if(index != -1)
                 headers.put(header.substring(0, index).trim(), header.substring(index+1).trim());
         }
@@ -307,7 +309,8 @@ public class STOMP extends Protocol implements Runnable {
         }
 
         synchronized(connections) {
-            connections.forEach(Connection::sendInfo);
+            for(Connection conn: connections)
+                conn.sendInfo();
         }
     }
 
@@ -338,7 +341,7 @@ public class STOMP extends Protocol implements Runnable {
     protected void broadcastEndpoint() {
         if(endpoint != null) {
             Message msg=new Message().putHeader(id, StompHeader.createHeader(StompHeader.Type.ENDPOINT, "endpoint", endpoint));
-            down_prot.down(msg);
+            down_prot.down(new Event(Event.MSG, msg));
         }
     }
 
@@ -383,8 +386,10 @@ public class STOMP extends Protocol implements Runnable {
         }
         else {
             if(!exact_destination_match) {
-                subscriptions.entrySet().stream().filter(entry -> entry.getKey().startsWith(destination))
-                  .forEach(entry -> target_connections.addAll(entry.getValue()));
+                for(Map.Entry<String,Set<Connection>> entry: subscriptions.entrySet()) {
+                    if(entry.getKey().startsWith(destination))
+                        target_connections.addAll(entry.getValue());
+                }
             }
             else {
                 Set<Connection> conns=subscriptions.get(destination);
@@ -474,7 +479,7 @@ public class STOMP extends Protocol implements Runnable {
                     Message msg=new Message(null, frame.getBody());
                     Header hdr=StompHeader.createHeader(StompHeader.Type.MESSAGE, headers);
                     msg.putHeader(id, hdr);
-                    down_prot.down(msg);
+                    down_prot.down(new Event(Event.MSG, msg));
                     String receipt=headers.get("receipt");
                     if(receipt != null)
                         writeResponse(ServerVerb.RECEIPT, "receipt-id", receipt);
@@ -496,8 +501,10 @@ public class STOMP extends Protocol implements Runnable {
                     destination=headers.get("destination");
                     if(destination != null) {
                         Set<Connection> conns=subscriptions.get(destination);
-                        if(conns != null && conns.remove(this) && conns.isEmpty())
-                            subscriptions.remove(destination);
+                        if(conns != null) {
+                            if(conns.remove(this) && conns.isEmpty())
+                                subscriptions.remove(destination);
+                        }
                     }
                     break;
                 case BEGIN:
@@ -615,8 +622,6 @@ public class STOMP extends Protocol implements Runnable {
         public StompHeader() {
         }
 
-        public Supplier<? extends Header> create() {return StompHeader::new;}
-        public short getMagicId() {return 71;}
         private StompHeader(Type type) {
             this.type=type;
         }
@@ -648,7 +653,7 @@ public class STOMP extends Protocol implements Runnable {
 
 
 
-        public int serializedSize() {
+        public int size() {
             int retval=Global.INT_SIZE *2; // type + size of hashmap
             for(Map.Entry<String,String> entry: headers.entrySet()) {
                 retval+=entry.getKey().length() +2;

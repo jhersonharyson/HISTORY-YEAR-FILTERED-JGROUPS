@@ -1,6 +1,7 @@
 package org.jgroups.util;
 
 import org.jgroups.*;
+import org.jgroups.TimeoutException;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.logging.Log;
@@ -11,7 +12,6 @@ import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.protocols.relay.SiteMaster;
 import org.jgroups.protocols.relay.SiteUUID;
 import org.jgroups.stack.IpAddress;
-import org.jgroups.stack.IpAddressUUID;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
 
@@ -22,22 +22,23 @@ import java.lang.annotation.Annotation;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
-import java.lang.reflect.*;
+import java.lang.reflect.Array;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.text.NumberFormat;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.function.IntFunction;
-import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static java.lang.System.nanoTime;
-import static org.jgroups.protocols.TP.LIST;
 import static org.jgroups.protocols.TP.MULTICAST;
 
 
@@ -47,7 +48,7 @@ import static org.jgroups.protocols.TP.MULTICAST;
  */
 public class Util {
 
-    // private static final NumberFormat f;
+    private static final NumberFormat f;
 
     private static final Map<Class<? extends Object>,Byte> PRIMITIVE_TYPES=new HashMap<>(15);
     private static final byte TYPE_NULL         =  0;
@@ -63,11 +64,12 @@ public class Util {
     private static final byte TYPE_SHORT        = 17;
     private static final byte TYPE_STRING       = 18; // ascii
     private static final byte TYPE_BYTEARRAY    = 19;
-    private static final byte TYPE_EXCEPTION    = 20;
+    // private static final byte TYPE_EXCEPTION    = 20;
     private static final byte TYPE_UTF_STRING   = 21; // multibyte charset
 
     // constants
     public static final int MAX_PORT=65535; // highest port allocatable
+    @Deprecated  static boolean resolve_dns=false;
 
     private static final Pattern METHOD_NAME_TO_ATTR_NAME_PATTERN=Pattern.compile("[A-Z]+");
     private static final Pattern ATTR_NAME_TO_METHOD_NAME_PATTERN=Pattern.compile("_.");
@@ -88,21 +90,35 @@ public class Util {
     private static final byte[] TYPE_BOOLEAN_TRUE={TYPE_BOOLEAN, 1};
     private static final byte[] TYPE_BOOLEAN_FALSE={TYPE_BOOLEAN, 0};
 
-    public static final Class<? extends Protocol>[] getUnicastProtocols() {return new Class[]{UNICAST3.class};}
+    public static final Class<?>[] getUnicastProtocols() {
+        return new Class<?>[]{UNICAST.class,UNICAST2.class,UNICAST3.class};
+    }
 
     public enum AddressScope {GLOBAL,SITE_LOCAL,LINK_LOCAL,LOOPBACK,NON_LOOPBACK}
 
+    ;
+
     private static StackType ip_stack_type=_getIpStackType();
 
+
     protected static ResourceBundle resource_bundle;
+
 
     static {
         resource_bundle=ResourceBundle.getBundle("jg-messages",Locale.getDefault(),Util.class.getClassLoader());
 
-        /*f=NumberFormat.getNumberInstance();
-        f.setGroupingUsed(true);
+        /* Trying to get value of resolve_dns. PropertyPermission not granted if
+        * running in an untrusted environment with JNLP */
+        try {
+            resolve_dns=Boolean.valueOf(System.getProperty("resolve.dns","false"));
+        }
+        catch(SecurityException ex) {
+            resolve_dns=false;
+        }
+        f=NumberFormat.getNumberInstance();
+        f.setGroupingUsed(false);
         // f.setMinimumFractionDigits(2);
-        f.setMaximumFractionDigits(2);*/
+        f.setMaximumFractionDigits(2);
 
         PRIMITIVE_TYPES.put(Boolean.class,TYPE_BOOLEAN);
         PRIMITIVE_TYPES.put(Byte.class,TYPE_BYTE);
@@ -152,7 +168,7 @@ public class Util {
 
         try {
             String tmp=System.getProperty(Global.DEFAULT_HEADERS);
-            DEFAULT_HEADERS=tmp != null? Integer.valueOf(tmp) : 4;
+            DEFAULT_HEADERS=tmp != null? new Integer(tmp) : 4;
         }
         catch(Throwable t) {
             throw new IllegalArgumentException(String.format("property %s has an incorrect value", Global.DEFAULT_HEADERS), t);
@@ -266,14 +282,14 @@ public class Util {
      * @param channels The channels which should form the view. The expected view size is channels.length.
      *                 Must be non-null
      */
-    public static void waitUntilAllChannelsHaveSameView(long timeout, long interval, JChannel... channels) throws TimeoutException {
+    public static void waitUntilAllChannelsHaveSameView(long timeout, long interval, Channel... channels) throws TimeoutException {
         if(interval >= timeout || timeout <= 0)
             throw new IllegalArgumentException("interval needs to be smaller than timeout or timeout needs to be > 0");
         long target_time=System.currentTimeMillis() + timeout;
         while(System.currentTimeMillis() <= target_time) {
             boolean all_channels_have_correct_view=true;
             View first=channels[0].getView();
-            for(JChannel ch : channels) {
+            for(Channel ch : channels) {
                 View view=ch.getView();
                 if(!Objects.equals(view, first) || view.size() != channels.length) {
                     all_channels_have_correct_view=false;
@@ -292,7 +308,7 @@ public class Util {
         }
         View first=channels[0].getView();
         for(View view : views)
-            if(!Objects.equals(view, first) || view.size() != channels.length)
+            if(!Objects.equals(view, first))
                 throw new TimeoutException("Timeout " + timeout + " kicked in, views are:\n" + sb);
     }
 
@@ -313,7 +329,7 @@ public class Util {
     public static String printViews(JChannel ... channels) {
         StringBuilder sb=new StringBuilder();
         for(JChannel ch: channels)
-            sb.append(String.format("%s: %s\n", ch.name(), ch.getView()));
+            sb.append(String.format("%s: %s\n", ch.getName(), ch.getView()));
         return sb.toString();
     }
 
@@ -339,6 +355,17 @@ public class Util {
         assert list.size() == expected_size : "list doesn't have the expected (" + expected_size + ") elements: " + list;
     }
 
+
+    public static void setScope(Message msg,short scope) {
+        SCOPE.ScopeHeader hdr=SCOPE.ScopeHeader.createMessageHeader(scope);
+        msg.putHeader(Global.SCOPE_ID,hdr);
+        msg.setFlag(Message.Flag.SCOPED);
+    }
+
+    public static short getScope(Message msg) {
+        SCOPE.ScopeHeader hdr=(SCOPE.ScopeHeader)msg.getHeader(Global.SCOPE_ID);
+        return hdr != null? hdr.getScope() : 0;
+    }
 
     public static byte[] createAuthenticationDigest(String passcode,long t1,double q1) throws IOException,
                                                                                               NoSuchAlgorithmException {
@@ -421,16 +448,16 @@ public class Util {
      * Drops messages to/from other members and then closes the channel. Note that this member won't get excluded from
      * the view until failure detection has kicked in and the new coord installed the new view
      */
-    public static void shutdown(JChannel ch) throws Exception {
+    public static void shutdown(Channel ch) throws Exception {
         DISCARD discard=new DISCARD();
         discard.setLocalAddress(ch.getAddress());
         discard.setDiscardAll(true);
         ProtocolStack stack=ch.getProtocolStack();
         TP transport=stack.getTransport();
-        stack.insertProtocol(discard,ProtocolStack.Position.ABOVE,transport.getClass());
+        stack.insertProtocol(discard,ProtocolStack.ABOVE,transport.getClass());
 
         //abruptly shutdown FD_SOCK just as in real life when member gets killed non gracefully
-        FD_SOCK fd=ch.getProtocolStack().findProtocol(FD_SOCK.class);
+        FD_SOCK fd=(FD_SOCK)ch.getProtocolStack().findProtocol(FD_SOCK.class);
         if(fd != null)
             fd.stopServerSocket(false);
 
@@ -443,7 +470,7 @@ public class Util {
             View new_view=new View(new_vid,members);
 
             // inject view in which the shut down member is the only element
-            GMS gms=stack.findProtocol(GMS.class);
+            GMS gms=(GMS)stack.findProtocol(GMS.class);
             gms.installView(new_view);
         }
         Util.close(ch);
@@ -468,17 +495,17 @@ public class Util {
     /**
      * Creates an object from a byte buffer
      */
-    public static <T extends Object> T objectFromByteBuffer(byte[] buffer) throws Exception {
+    public static Object objectFromByteBuffer(byte[] buffer) throws Exception {
         if(buffer == null) return null;
         return objectFromByteBuffer(buffer,0,buffer.length);
     }
 
-    public static <T extends Object> T objectFromByteBuffer(byte[] buffer,int offset,int length) throws Exception {
+    public static Object objectFromByteBuffer(byte[] buffer,int offset,int length) throws Exception {
         return objectFromByteBuffer(buffer, offset, length, null);
     }
 
 
-    public static <T extends Object> T objectFromByteBuffer(byte[] buffer,int offset,int length, ClassLoader loader) throws Exception {
+    public static Object objectFromByteBuffer(byte[] buffer,int offset,int length, ClassLoader loader) throws Exception {
         if(buffer == null) return null;
         byte type=buffer[offset++];
         length--;
@@ -490,27 +517,24 @@ public class Util {
             case TYPE_SERIALIZABLE: // the object is Externalizable or Serializable
                 InputStream in_stream=new ByteArrayInputStream(buffer,offset,length);
                 try(ObjectInputStream oin=new ObjectInputStreamWithClassloader(in_stream, loader)) {
-                    return (T)oin.readObject();
+                    return oin.readObject();
                 }
-            case TYPE_BOOLEAN: return (T)(Boolean)(buffer[offset] == 1);
-            case TYPE_BYTE:    return (T)(Byte)buffer[offset];
-            case TYPE_CHAR:    return (T)(Character)Bits.readChar(buffer, offset);
-            case TYPE_DOUBLE:  return (T)(Double)Bits.readDouble(buffer, offset);
-            case TYPE_FLOAT:   return (T)(Float)Bits.readFloat(buffer, offset);
-            case TYPE_INT:     return (T)(Integer)Bits.readInt(buffer, offset);
-            case TYPE_LONG:    return (T)(Long)Bits.readLong(buffer, offset);
-            case TYPE_SHORT:   return (T)(Short)Bits.readShort(buffer, offset);
-            case TYPE_STRING:  return (T)new String(buffer, offset, length);
+            case TYPE_BOOLEAN: return (Boolean)(buffer[offset] == 1);
+            case TYPE_BYTE:    return (Byte)buffer[offset];
+            case TYPE_CHAR:    return (Character)Bits.readChar(buffer, offset);
+            case TYPE_DOUBLE:  return (Double)Bits.readDouble(buffer, offset);
+            case TYPE_FLOAT:   return (Float)Bits.readFloat(buffer, offset);
+            case TYPE_INT:     return (Integer)Bits.readInt(buffer, offset);
+            case TYPE_LONG:    return (Long)Bits.readLong(buffer, offset);
+            case TYPE_SHORT:   return (Short)Bits.readShort(buffer, offset);
+            case TYPE_STRING:  return new String(buffer, offset, length);
             case TYPE_UTF_STRING:
                 in=new ByteArrayDataInputStream(buffer, offset, length);
-                return (T)in.readUTF();
+                return in.readUTF();
             case TYPE_BYTEARRAY:
                 byte[] tmp=new byte[length];
                 System.arraycopy(buffer,offset,tmp,0,length);
-                return (T)tmp;
-            case TYPE_EXCEPTION:
-                in=new ByteArrayDataInputStream(buffer,offset,length);
-                return (T)Util.exceptionFromStream(in);
+                return tmp;
             default:
                 throw new IllegalArgumentException("type " + type + " is invalid");
         }
@@ -525,18 +549,8 @@ public class Util {
         if(obj == null)
             return TYPE_NULL_ARRAY;
 
-        if(obj instanceof Throwable) {
-            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512, true);
-            out.write(TYPE_EXCEPTION);
-            Util.exceptionToStream((Throwable)obj, out);
-            byte[] ret=new byte[out.position()];
-            System.arraycopy(out.buffer(), 0, ret, 0, out.position());
-            return ret;
-        }
-
         if(obj instanceof Streamable) {
-            int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 512;
-            final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size, true);
+            final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512, true);
             out.write(TYPE_STREAMABLE);
             writeGenericStreamable((Streamable)obj,out);
             return Arrays.copyOf(out.buf,out.position());
@@ -561,16 +575,8 @@ public class Util {
         if(obj == null)
             return new Buffer(TYPE_NULL_ARRAY);
 
-        if(obj instanceof Throwable) {
-            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512, true);
-            out.write(TYPE_EXCEPTION);
-            Util.exceptionToStream((Throwable)obj, out);
-            return out.getBuffer();
-        }
-
         if(obj instanceof Streamable) {
-            int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 512;
-            final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size, true);
+            final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512, true);
             out.write(TYPE_STREAMABLE);
             writeGenericStreamable((Streamable)obj,out);
             return out.getBuffer();
@@ -656,15 +662,9 @@ public class Util {
 
 
 
-    public static void objectToStream(Object obj, DataOutput out) throws Exception {
+    public static void objectToStream(Object obj,DataOutput out) throws Exception {
         if(obj == null) {
             out.write(TYPE_NULL);
-            return;
-        }
-
-        if(obj instanceof Throwable) {
-            out.write(TYPE_EXCEPTION);
-            Util.exceptionToStream((Throwable)obj, out);
             return;
         }
 
@@ -738,11 +738,11 @@ public class Util {
         }
     }
 
-    public static <T extends Object> T objectFromStream(DataInput in) throws Exception {
+    public static Object objectFromStream(DataInput in) throws Exception {
         return objectFromStream(in, null);
     }
 
-    public static <T extends Object> T objectFromStream(DataInput in, ClassLoader loader) throws Exception {
+    public static Object objectFromStream(DataInput in, ClassLoader loader) throws Exception {
         if(in == null) return null;
         byte b=in.readByte();
 
@@ -753,188 +753,39 @@ public class Util {
                 InputStream is=in instanceof ByteArrayDataInputStream?
                   new org.jgroups.util.InputStreamAdapter((ByteArrayDataInputStream)in) : (InputStream)in;
                 try(ObjectInputStream tmp=new ObjectInputStreamWithClassloader(is, loader)) {
-                    return (T)tmp.readObject();
+                    return tmp.readObject();
                 }
-            case TYPE_BOOLEAN:    return (T)(Boolean)in.readBoolean();
-            case TYPE_BYTE:       return (T)(Byte)in.readByte();
-            case TYPE_CHAR:       return (T)(Character)in.readChar();
-            case TYPE_DOUBLE:     return (T)(Double)in.readDouble();
-            case TYPE_FLOAT:      return (T)(Float)in.readFloat();
-            case TYPE_INT:        return (T)(Integer)in.readInt();
-            case TYPE_LONG:       return (T)(Long)in.readLong();
-            case TYPE_SHORT:      return (T)(Short)in.readShort();
+            case TYPE_BOOLEAN:    return in.readBoolean();
+            case TYPE_BYTE:       return in.readByte();
+            case TYPE_CHAR:       return in.readChar();
+            case TYPE_DOUBLE:     return in.readDouble();
+            case TYPE_FLOAT:      return in.readFloat();
+            case TYPE_INT:        return in.readInt();
+            case TYPE_LONG:       return in.readLong();
+            case TYPE_SHORT:      return in.readShort();
             case TYPE_STRING:
                 int str_len=in.readInt();
-                if(str_len == 0) return (T)"";
+                if(str_len == 0) return "";
                 byte[] tmp=new byte[str_len];
                 for(int i=0; i < str_len; i++) {
                     tmp[i]=in.readByte();
                 }
-                return (T)new String(tmp);
+                return new String(tmp);
             case TYPE_UTF_STRING:
-                return (T)in.readUTF();
+                return in.readUTF();
             case TYPE_BYTEARRAY:
                 int len=in.readInt();
                 byte[] tmpbuf=new byte[len];
                 in.readFully(tmpbuf,0,tmpbuf.length);
-                return (T)tmpbuf;
-            case TYPE_EXCEPTION:
-                return (T)Util.exceptionFromStream(in);
+                return tmpbuf;
             default:
                 throw new IllegalArgumentException("type " + b + " is invalid");
         }
     }
 
-    public static <T extends Streamable> T streamableFromByteBuffer(Class<? extends Streamable> cl,byte[] buffer) throws Exception {
+
+    public static Streamable streamableFromByteBuffer(Class<? extends Streamable> cl,byte[] buffer) throws Exception {
         return streamableFromByteBuffer(cl,buffer,0,buffer.length);
-    }
-
-    public static <T extends Streamable> T streamableFromByteBuffer(Supplier<T> factory, byte[] buffer) throws Exception {
-        return streamableFromByteBuffer(factory, buffer, 0, buffer.length);
-    }
-
-    /**
-     * Poor man's serialization of an exception. Serializes only the message, stack trace and cause (not suppressed exceptions)
-     */
-    public static void exceptionToStream(Throwable t, DataOutput out) throws Exception {
-        Set<Throwable> causes=new HashSet<>();
-        exceptionToStream(causes, t, out);
-    }
-
-    protected static void exceptionToStream(Set<Throwable> causes, Throwable t, DataOutput out) throws Exception {
-        // 1. null check
-        if( t == null) {
-            out.writeBoolean(true);
-            return;
-        }
-        out.writeBoolean(false);
-
-        // 2. InvocationTargetException
-        boolean invocation_target_ex=t instanceof InvocationTargetException;
-        out.writeBoolean(invocation_target_ex);
-        if(invocation_target_ex) {
-            writeException(causes, t.getCause(), out);
-            return;
-        }
-
-        writeException(causes, t, out);
-    }
-
-    public static Buffer exceptionToBuffer(Throwable t) throws Exception {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512, true);
-        exceptionToStream(t, out);
-        return out.getBuffer();
-    }
-
-
-    public static Throwable exceptionFromStream(DataInput in) throws Exception {
-        return exceptionFromStream(in, 0);
-    }
-
-
-    protected static Throwable exceptionFromStream(DataInput in, int recursion_count) throws Exception {
-        // 1. null check
-        if(in.readBoolean())
-            return null;
-
-        // 2. InvocationTargetException
-        if(in.readBoolean())
-            return new InvocationTargetException(readException(in, recursion_count));
-        return readException(in, recursion_count);
-    }
-
-    protected static void writeException(Set<Throwable> causes, Throwable t, DataOutput out) throws Exception {
-        // 3. classname
-        Bits.writeString(t.getClass().getName(), out);
-
-        // 4. message
-        Bits.writeString(t.getMessage(), out);
-
-        // 5. stack trace
-        StackTraceElement[] stack_trace=t.getStackTrace();
-        int depth=stack_trace == null? 0 : stack_trace.length;
-        out.writeShort(depth);
-        if(depth > 0) {
-            for(int i=0; i < stack_trace.length; i++) {
-                StackTraceElement trace=stack_trace[i];
-                Bits.writeString(trace.getClassName(), out);
-                Bits.writeString(trace.getMethodName(), out);
-                Bits.writeString(trace.getFileName(), out);
-                Bits.writeInt(trace.getLineNumber(), out);
-            }
-        }
-
-        // 6. cause
-        Throwable cause=t.getCause();
-        boolean serialize_cause=cause != null && causes.add(cause);
-        out.writeBoolean(serialize_cause);
-        if(serialize_cause)
-            exceptionToStream(causes, cause, out);
-    }
-
-
-    protected static Throwable readException(DataInput in, int recursion_count) throws Exception {
-        // 3. classname
-        String classname=Bits.readString(in);
-        Class<? extends Throwable> clazz=(Class<? extends Throwable>)Util.loadClass(classname, (ClassLoader)null);
-
-        // 4. message
-        String message=Bits.readString(in);
-
-        Throwable retval=null;
-        Constructor<? extends Throwable> ctor=null;
-
-        try {
-            ctor=clazz.getDeclaredConstructor(String.class);
-            if(ctor != null) {
-                if(!ctor.isAccessible())
-                    ctor.setAccessible(true);
-                retval=ctor.newInstance(message);
-            }
-        }
-        catch(Throwable t) {
-        }
-
-        if(retval == null)
-            retval=clazz.newInstance();
-
-        // 5. stack trace
-        int depth=in.readShort();
-        if(depth > 0) {
-            StackTraceElement[] stack_trace=new StackTraceElement[depth];
-            for(int i=0; i < depth; i++) {
-                String class_name=Bits.readString(in);
-                String method_name=Bits.readString(in);
-                String filename=Bits.readString(in);
-                int line_number=Bits.readInt(in);
-                StackTraceElement trace=new StackTraceElement(class_name, method_name, filename, line_number);
-                stack_trace[i]=trace;
-            }
-            retval.setStackTrace(stack_trace);
-        }
-
-        // 6. cause
-        if(in.readBoolean()) {
-            // if malicious code constructs an exception whose causes have circles, then that would blow up the stack, so
-            // we make sure here that we stop after a certain number of recursive calls
-            if(++recursion_count > 20)
-                throw new IllegalStateException(String.format("failed deserializing exception: recursion count=%d",
-                                                              recursion_count));
-            Throwable cause=exceptionFromStream(in, recursion_count);
-            try {
-                retval.initCause(cause); // will throw an exception if cause is already set
-            }
-            catch(Throwable t) {
-                return retval;
-            }
-        }
-        return retval;
-    }
-
-
-    public static Throwable exceptionFromBuffer(byte[] buf, int offset, int length) throws Exception {
-        ByteArrayDataInputStream in=new ByteArrayDataInputStream(buf, offset,length);
-        return exceptionFromStream(in);
     }
 
 
@@ -952,7 +803,8 @@ public class Util {
         }
     }
 
-    public static <T extends Streamable> T streamableFromByteBuffer(Class<? extends Streamable> cl,byte[] buffer,int offset,int length) throws Exception {
+
+    public static <T extends Streamable> Streamable streamableFromByteBuffer(Class<? extends Streamable> cl,byte[] buffer,int offset,int length) throws Exception {
         if(buffer == null) return null;
         DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
         T retval=(T)cl.newInstance();
@@ -960,35 +812,21 @@ public class Util {
         return retval;
     }
 
-    public static <T extends Streamable> T streamableFromByteBuffer(Supplier<T> factory, byte[] buffer, int offset, int length) throws Exception {
-        if(buffer == null) return null;
-        DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
-        T retval=factory.get();
-        retval.readFrom(in);
-        return retval;
-    }
 
-    @Deprecated
     public static <T extends Streamable> T streamableFromBuffer(Class<T> clazz,byte[] buffer,int offset,int length) throws Exception {
         DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
-        return Util.readStreamable(clazz, in);
+        return (T)Util.readStreamable(clazz,in);
     }
 
-    public static <T extends Streamable> T streamableFromBuffer(Supplier<T> factory, byte[] buffer, int offset, int length) throws Exception {
-        DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
-        return Util.readStreamable(factory, in);
-    }
 
     public static byte[] streamableToByteBuffer(Streamable obj) throws Exception {
-        int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 512;
-        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size);
+        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512);
         obj.writeTo(out);
         return Arrays.copyOf(out.buffer(), out.position());
     }
 
     public static Buffer streamableToBuffer(Streamable obj) {
-        int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() +1 : 512;
-        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size);
+        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512);
         try {
             Util.writeStreamable(obj,out);
             return out.getBuffer();
@@ -1000,7 +838,7 @@ public class Util {
 
 
     public static byte[] collectionToByteBuffer(Collection<Address> c) throws Exception {
-        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream((int)Util.size(c));
+        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512);
         Util.writeAddresses(c,out);
         return Arrays.copyOf(out.buffer(), out.position());
     }
@@ -1057,20 +895,6 @@ public class Util {
         return left.length - right.length;
     }
 
-    public static Object convert(String arg, Class<?> type) {
-        if(type == String.class) return arg;
-        if(type == boolean.class || type == Boolean.class) return Boolean.valueOf(arg);
-        if(type == byte.class    || type == Byte.class)    return Byte.valueOf(arg);
-        if(type == short.class   || type == Short.class)   return Short.valueOf(arg);
-        if(type == int.class     || type == Integer.class) return Integer.valueOf(arg);
-        if(type == long.class    || type == Long.class)    return Long.valueOf(arg);
-        if(type == float.class   || type == Float.class)   return Float.valueOf(arg);
-        if(type == double.class  || type == Double.class)  return Double.valueOf(arg);
-        return arg;
-    }
-
-
-
     /**
      * This method needs to be synchronized on out_stream when it is called
      * @param msg
@@ -1090,6 +914,7 @@ public class Util {
         msg.readFrom(instream);
         return msg;
     }
+
 
 
 
@@ -1121,9 +946,9 @@ public class Util {
     public static void writeMessageListHeader(Address dest, Address src, byte[] cluster_name, int numMsgs, DataOutput dos, boolean multicast) throws Exception {
         dos.writeShort(Version.version);
 
-        byte flags=LIST;
+        byte flags=TP.LIST;
         if(multicast)
-            flags+=MULTICAST;
+            flags+=TP.MULTICAST;
 
         dos.writeByte(flags);
 
@@ -1182,6 +1007,7 @@ public class Util {
         MessageBatch[] batches=new MessageBatch[4]; // [0]: reg, [1]: OOB, [2]: internal-oob, [3]: internal
         Address dest=Util.readAddress(in);
         Address src=Util.readAddress(in);
+        // AsciiString cluster_name=Bits.readAsciiString(in);
         short length=in.readShort();
         byte[] cluster_name=length >= 0? new byte[length] : null;
         if(cluster_name != null)
@@ -1214,69 +1040,6 @@ public class Util {
             batches[index].add(msg);
         }
         return batches;
-    }
-
-    public static List<Message> parse(byte[] buf, int offset, int length) {
-        return parse(new ByteArrayInputStream(buf, offset, length));
-    }
-
-    public static List<Message> parse(String filename) throws FileNotFoundException {
-        return parse(new FileInputStream(filename));
-    }
-
-    public static List<Message> parse(InputStream input) {
-        List<Message>   retval=new ArrayList<>();
-        DataInputStream dis=null;
-        try {
-            dis=new DataInputStream(input);
-
-            short version;
-            for(;;) {
-                try {
-                    version=dis.readShort();
-                }
-                catch(IOException io_ex) {
-                    break;
-                }
-
-                System.out.println("version = " + version + " (" + Version.print(version) + ")");
-                byte flags=dis.readByte();
-                // System.out.println("flags: " + Message.flagsToString(flags));
-
-                boolean is_message_list=(flags & LIST) == LIST;
-                boolean multicast=(flags & MULTICAST) == MULTICAST;
-
-                if(is_message_list) { // used if message bundling is enabled
-                    final MessageBatch[] batches=Util.readMessageBatch(dis,multicast);
-                    for(MessageBatch batch: batches) {
-                        if(batch != null)
-                            for(Message msg: batch)
-                                retval.add(msg);
-                    }
-                }
-                else {
-                    Message msg=Util.readMessage(dis);
-                    retval.add(msg);
-                }
-            }
-            return retval;
-        }
-        catch(Throwable t) {
-            t.printStackTrace();
-            return null;
-        }
-        finally {
-            Util.close(dis);
-        }
-    }
-
-    public static String dump(byte[] buf, int offset, int length) {
-        StringBuilder sb=new StringBuilder();
-        List<Message> msgs=parse(new ByteArrayInputStream(buf, offset, length));
-        if(msgs != null)
-            for(Message msg: msgs)
-                sb.append(String.format("dst=%s src=%s (%d bytes): hdrs= %s\n", msg.dest(), msg.src(), msg.getLength(), msg.printHeaders()));
-        return sb.toString();
     }
 
 
@@ -1343,10 +1106,8 @@ public class Util {
             else
                 streamable_addr=false;
         }
-        else if(addr.getClass().equals(IpAddress.class))
+        else if(addr instanceof IpAddress)
             flags=Util.setFlag(flags,Address.IP_ADDR);
-        else if(addr.getClass().equals(IpAddressUUID.class))
-            flags=Util.setFlag(flags, Address.IP_ADDR_UUID);
         else
             streamable_addr=false;
         out.writeByte(flags);
@@ -1378,10 +1139,6 @@ public class Util {
             addr=new IpAddress();
             addr.readFrom(in);
         }
-        else if(Util.isFlagSet(flags, Address.IP_ADDR_UUID)) {
-            addr=new IpAddressUUID();
-            addr.readFrom(in);
-        }
         else {
             addr=readOtherAddress(in);
         }
@@ -1396,13 +1153,13 @@ public class Util {
         if(addr instanceof UUID) {
             Class<? extends Address> clazz=addr.getClass();
             if(clazz.equals(UUID.class) || clazz.equals(SiteUUID.class) || clazz.equals(SiteMaster.class))
-                return retval + addr.serializedSize();
+                return retval + addr.size();
         }
         if(addr instanceof IpAddress)
-            return retval + addr.serializedSize();
+            return retval + addr.size();
 
         retval+=Global.SHORT_SIZE; // magic number
-        retval+=addr.serializedSize();
+        retval+=addr.size();
         return retval;
     }
 
@@ -1429,12 +1186,19 @@ public class Util {
     }
 
     public static int size(byte[] buf) {
+       /* int retval=Global.BYTE_SIZE + Global.INT_SIZE;
+        if(buf != null)
+            retval+=buf.length;
+        return retval;*/
         return buf == null? Global.BYTE_SIZE : Global.BYTE_SIZE + Global.INT_SIZE + buf.length;
     }
 
     private static Address readOtherAddress(DataInput in) throws Exception {
         short magic_number=in.readShort();
-        Address addr=ClassConfigurator.create(magic_number);
+        Class<?> cl=ClassConfigurator.get(magic_number);
+        if(cl == null)
+            throw new RuntimeException("class for magic number " + magic_number + " not found");
+        Address addr=(Address)cl.newInstance();
         addr.readFrom(in);
         return addr;
     }
@@ -1483,29 +1247,10 @@ public class Util {
      * @return Collection of Address objects
      * @throws Exception
      */
-    @Deprecated
     public static Collection<? extends Address> readAddresses(DataInput in,Class cl) throws Exception {
         short length=in.readShort();
         if(length < 0) return null;
         Collection<Address> retval=(Collection<Address>)cl.newInstance();
-        Address addr;
-        for(int i=0; i < length; i++) {
-            addr=Util.readAddress(in);
-            retval.add(addr);
-        }
-        return retval;
-    }
-
-    /**
-     * @param in
-     * @param factory a factory for creating the returned collection, parameterized by size
-     * @return Collection of Address objects
-     * @throws Exception
-     */
-    public static <T extends Collection<Address>> T readAddresses(DataInput in, IntFunction<T> factory) throws Exception {
-        short length=in.readShort();
-        if(length < 0) return null;
-        T retval = factory.apply(length);
         Address addr;
         for(int i=0; i < length; i++) {
             addr=Util.readAddress(in);
@@ -1560,26 +1305,18 @@ public class Util {
         obj.writeTo(out);
     }
 
-    @Deprecated
-    public static <T extends Streamable> T readStreamable(Class<T> clazz,DataInput in) throws Exception {
-        T retval=null;
+
+    public static Streamable readStreamable(Class clazz,DataInput in) throws Exception {
+        Streamable retval=null;
         if(!in.readBoolean())
             return null;
-        retval=clazz.newInstance();
+        retval=(Streamable)clazz.newInstance();
         retval.readFrom(in);
         return retval;
     }
 
-    public static <T extends Streamable> T readStreamable(Supplier<T> factory, DataInput in) throws Exception {
-        T retval=null;
-        if(!in.readBoolean())
-            return null;
-        retval=factory.get();
-        retval.readFrom(in);
-        return retval;
-    }
 
-    public static void writeGenericStreamable(Streamable obj, DataOutput out) throws Exception {
+    public static void writeGenericStreamable(Streamable obj,DataOutput out) throws Exception {
         short magic_number;
         String classname;
 
@@ -1598,12 +1335,12 @@ public class Util {
         obj.writeTo(out); // write the contents
     }
 
-    public static <T extends Streamable> T readGenericStreamable(DataInput in) throws Exception {
+    public static Streamable readGenericStreamable(DataInput in) throws Exception {
         return readGenericStreamable(in, null);
     }
 
-    public static <T extends Streamable> T readGenericStreamable(DataInput in, ClassLoader loader) throws Exception {
-        T retval=null;
+    public static Streamable readGenericStreamable(DataInput in, ClassLoader loader) throws Exception {
+        Streamable retval=null;
         int b=in.readByte();
         if(b == 0)
             return null;
@@ -1612,14 +1349,16 @@ public class Util {
 
         Class<?> clazz;
         if(magic_number != -1) {
-            retval=ClassConfigurator.create(magic_number);
+            clazz=ClassConfigurator.get(magic_number);
+            if(clazz == null)
+                throw new ClassNotFoundException("Class for magic number " + magic_number + " cannot be found.");
         }
         else {
             String classname=in.readUTF();
             clazz=ClassConfigurator.get(classname, loader);
-            retval=(T)clazz.newInstance();
         }
 
+        retval=(Streamable)clazz.newInstance();
         retval.readFrom(in);
         return retval;
     }
@@ -1646,7 +1385,35 @@ public class Util {
         return retval;
     }
 
+    public static void writeClass(Class<?> classObject,DataOutput out) throws Exception {
+        short magic_number=ClassConfigurator.getMagicNumber(classObject);
+        // write the magic number or the class name
+        if(magic_number == -1) {
+            out.writeBoolean(false);
+            out.writeUTF(classObject.getName());
+        }
+        else {
+            out.writeBoolean(true);
+            out.writeShort(magic_number);
+        }
+    }
 
+    public static Class<?> readClass(DataInput in) throws Exception {
+        Class<?> clazz;
+        boolean use_magic_number=in.readBoolean();
+        if(use_magic_number) {
+            short magic_number=in.readShort();
+            clazz=ClassConfigurator.get(magic_number);
+            if(clazz == null)
+                throw new ClassNotFoundException("Class for magic number " + magic_number + " cannot be found.");
+        }
+        else {
+            String classname=in.readUTF();
+            clazz=ClassConfigurator.get(classname);
+        }
+
+        return clazz;
+    }
 
     public static void writeObject(Object obj,DataOutput out) throws Exception {
         if(obj instanceof Streamable) {
@@ -1778,8 +1545,9 @@ public class Util {
             out.writeInt(length);
             out.write(buf,offset,length);
         }
-        else
+        else {
             out.write(0);
+        }
     }
 
     public static byte[] readByteBuffer(DataInput in) throws Exception {
@@ -1795,7 +1563,7 @@ public class Util {
 
 
     public static Buffer messageToByteBuffer(Message msg) throws Exception {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream((int)msg.size()+1);
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512);
 
         out.writeBoolean(msg != null);
         if(msg != null)
@@ -1884,8 +1652,8 @@ public class Util {
         else {
             //this isn't a superb metronome either, but allows a granularity
             //with a reasonable precision in the order of 50ths of millisecond
-            long initialTime=nanoTime() - 200;
-            while(nanoTime() < initialTime + nanos) ;
+            long initialTime=System.nanoTime() - 200;
+            while(System.nanoTime() < initialTime + nanos) ;
         }
     }
 
@@ -1899,7 +1667,7 @@ public class Util {
             return ret;
         }
         catch(IOException e) {
-            return -1;
+            return 0;
         }
     }
 
@@ -1908,165 +1676,10 @@ public class Util {
         return nanoTime() / 1000;
     }
 
-    public static int factorial(int n) {
-        if(n == 1) return n;
-        return n * factorial(n-1);
-    }
 
-    /**
-     * Inefficient permutation of a generic list; uses too much copying among other things. PR welcome! :-)
-     * @param list The list
-     * @param permutations All permutations will be added to this list (as copies)
-     * @param <E> the type of the list elements
-     */
-    public static <E> void permute(List<E> list, List<List<E>> permutations) {
-        if(list.size() == 1) {
-            permutations.add(list);
-            return;
-        }
-        for(int i=0; i < list.size(); i++) {
-            permute(null, list, i, permutations);
-        }
-    }
-
-    protected static <E> void permute(List<E> prefix, List<E> list, int index, final List<List<E>> permutations) {
-        if(list.size() <= 1)
-            permutations.add(combine(prefix, list));
-        else {
-            List<E> swapped=swap(list, index);
-            List<E> first=car(swapped);
-            List<E> rest=cdr(swapped);
-            for(int i=0; i < rest.size(); i++)
-                permute(combine(prefix, first), rest, i, permutations);
-        }
-    }
-
-    public static <E> List<E> car(List<E> l) {
-        return l.isEmpty()? Collections.emptyList() : Collections.singletonList(l.get(0));
-    }
-
-    public static <E> List<E> cdr(List<E> l) {
-        return l.isEmpty()? Collections.emptyList() : l.subList(1, l.size());
-    }
-
-    public static <E> List<E> combine(List<E> l1, List<E> l2) {
-        ArrayList<E> retval=new ArrayList<>();
-        if(l1 != null)
-            retval.addAll(l1);
-        if(l2 != null)
-            retval.addAll(l2);
-        return retval;
-    }
-
-    // moves el at index to the front, returns a copy
-    protected static <E> List<E> swap(List<E> l, int index) {
-        List<E> swapped=new ArrayList<>();
-        E el=l.get(index);
-        swapped.add(el);
-        for(int i=0; i < l.size(); i++) {
-            el=l.get(i);
-            if(i != index)
-                swapped.add(el);
-        }
-        return swapped;
-    }
-
-
-    /**
-     * Performs an ordered permutation of the elements of a and b such that the order of elements in list a and b is
-     * preserved. Example: {A1,A2} and {B1,B2} -> {A1,B1,A2,B2} but not {A1,B2,B1,A2}
-     */
-    public static <E> Collection<List<E>> orderedPermutation(List<E> a, List<E> b) {
-        Collection<List<E>> perms=new LinkedHashSet<>();
-        for(int i=0; i <= a.size(); i++) {
-            for(int j=0; j <= b.size(); j++) {
-                if(i == 0 && j == 0)
-                    continue;
-                List<E> l1=new ArrayList<>(a), l2=new ArrayList<>(b);
-                List<E> perm=permute(l1, l2, i, j);
-                perms.add(perm);
-            }
-        }
-
-        for(int i=0; i <= b.size(); i++) {
-            for(int j=0; j <= a.size(); j++) {
-                if(i == 0 && j == 0)
-                    continue;
-                List<E> l1=new ArrayList<>(b), l2=new ArrayList<>(a);
-                List<E> perm=permute(l1, l2, i, j);
-                perms.add(perm);
-            }
-        }
-        return perms;
-    }
-
-    protected static <E> List<E> permute(List<E> l1, List<E> l2, int remove_from_l1, int remove_from_l2) {
-        List<E> retval=new ArrayList<>();
-        while(!(l1.isEmpty() || l2.isEmpty())) {
-            int a=remove_from_l1, b=remove_from_l2;
-            while(a-- > 0 && !l1.isEmpty())
-                retval.add(l1.remove(0));
-            while(b-- > 0 && !l2.isEmpty())
-                retval.add(l2.remove(0));
-        }
-        retval.addAll(l1);
-        retval.addAll(l2);
-        return retval;
-    }
-
-    @SafeVarargs
-    public static <E> boolean checkOrder(Collection<E> perm, List<E> ... lists) {
-        for(List<E> list: lists) {
-            if(!perm.containsAll(list))
-                return false;
-            int pos=0;
-            for(E el: list) {
-                int index=index(perm, el);
-                if(index < pos)
-                    return false;
-                pos=index;
-            }
-        }
-        return true;
-    }
-
-    protected static <E> int index(Collection<E> list, E el) {
-        int index=0;
-        for(E element: list) {
-            if(element.equals(el))
-                return index;
-            index++;
-        }
-        return -1;
-    }
-
-    /**
-     * Reorders elements of an array in-place. No bounds checking is performed. Null elements are shuffled, too
-     * @param array the array to be shuffled; the array will be modified
-     * @param from the start index inclusive
-     * @param to the end index (exclusive), must be >= from (not checked)
-     * @param <T> the type of the array's elements
-     */
-    public static <T> void shuffle(T[] array, int from, int to) {
-        if(array == null)
-            return;
-        for(int i=from; i < to; i++) {
-            int random=(int)random(to);
-            int other=random -1 + from;
-            // int other=(int)(random(to)-1 + from);
-            if(i != other) {
-                T tmp=array[i];
-                array[i]=array[other];
-                array[other]=tmp;
-            }
-        }
-    }
-
-
-    /** Returns a random value in the range [1 - range]. If range is 0, 1 will be returned. If range is negative, an
-     * exception will be thrown */
+    /** Returns a random value in the range [1 - range] */
     public static long random(long range) {
-        return range == 0? 1 : ThreadLocalRandom.current().nextLong(range) + 1;
+        return (long)((Math.random() * range) % range) + 1;
     }
 
 
@@ -2151,6 +1764,71 @@ public class Util {
     }
 
 
+    /**
+     * Debugging method used to dump the content of a protocol queue in a
+     * condensed form. Useful to follow the evolution of the queue's content in
+     * time.
+     */
+    public static String dumpQueue(Queue q) {
+        StringBuilder sb=new StringBuilder();
+        Collection values=q.values();
+        if(values.isEmpty()) {
+            sb.append("empty");
+        }
+        else {
+            for(Object o : values) {
+                String s=null;
+                if(o instanceof Event) {
+                    Event event=(Event)o;
+                    int type=event.getType();
+                    s=Event.type2String(type);
+                    if(type == Event.VIEW_CHANGE)
+                        s+=" " + event.getArg();
+                    if(type == Event.MSG)
+                        s+=" " + event.getArg();
+
+                    if(type == Event.MSG) {
+                        s+="[";
+                        Message m=(Message)event.getArg();
+                        Map<Short,Header> headers=new HashMap<>(m.getHeaders());
+                        for(Map.Entry<Short,Header> entry : headers.entrySet()) {
+                            short id=entry.getKey();
+                            Header value=entry.getValue();
+                            String headerToString=null;
+                            if(value instanceof FD.FdHeader) {
+                                headerToString=value.toString();
+                            }
+                            else if(value instanceof PingHeader) {
+                                headerToString=ClassConfigurator.getProtocol(id) + "-";
+                                if(((PingHeader)value).type() == PingHeader.GET_MBRS_REQ) {
+                                    headerToString+="GMREQ";
+                                }
+                                else if(((PingHeader)value).type() == PingHeader.GET_MBRS_RSP) {
+                                    headerToString+="GMRSP";
+                                }
+                                else {
+                                    headerToString+="UNKNOWN";
+                                }
+                            }
+                            else {
+                                headerToString=ClassConfigurator.getProtocol(id) + "-" + (value == null? "null" : value.toString());
+                            }
+                            s+=headerToString;
+                            s+=" ";
+                        }
+                        s+="]";
+                    }
+                }
+                else {
+                    s=o.toString();
+                }
+                sb.append(s).append("\n");
+            }
+        }
+        return sb.toString();
+    }
+
+
     public static String mapToString(Map<? extends Object,? extends Object> map) {
         if(map == null)
             return "null";
@@ -2169,10 +1847,30 @@ public class Util {
     }
 
 
-    public static String printNanos(long time_ns) {
-        double us=time_ns / 1_000.0;
-        return String.format("%d ns (%.2f us)", time_ns, us);
+    /**
+     * MByte nowadays doesn't mean 1024 * 1024 bytes, but 1 million bytes, see http://en.wikipedia.org/wiki/Megabyte
+     * @param bytes
+     * @return
+     */
+    public static String printBytes(long bytes) {
+        double tmp;
+
+        if(bytes < 1000)
+            return bytes + "b";
+        if(bytes < 1000000) {
+            tmp=bytes / 1000.0;
+            return f.format(tmp) + "KB";
+        }
+        if(bytes < 1000000000) {
+            tmp=bytes / 1000000.0;
+            return f.format(tmp) + "MB";
+        }
+        else {
+            tmp=bytes / 1000000000.0;
+            return f.format(tmp) + "GB";
+        }
     }
+
 
     public static String printNanos(double time_ns) {
         double us=time_ns / 1_000.0;
@@ -2189,6 +1887,11 @@ public class Util {
         if(ms > 0) return ms + "ms";
         if(us > 0) return us + " us";
         return ns + "ns";
+    }
+
+
+    public static String format(double value) {
+        return f.format(value);
     }
 
 
@@ -2216,63 +1919,39 @@ public class Util {
         int index=-1;
         long factor=1;
 
-        if((index=input.indexOf('k')) != -1)
+        if((index=input.indexOf("k")) != -1)
             factor=1000;
         else if((index=input.indexOf("kb")) != -1)
             factor=1000;
-        else if((index=input.indexOf('m')) != -1)
-            factor=1_000_000;
+        else if((index=input.indexOf("m")) != -1)
+            factor=1000000;
         else if((index=input.indexOf("mb")) != -1)
-            factor=1_000_000;
-        else if((index=input.indexOf('g')) != -1)
-            factor=1_000_000_000;
+            factor=1000000;
+        else if((index=input.indexOf("g")) != -1)
+            factor=1000000000;
         else if((index=input.indexOf("gb")) != -1)
-            factor=1_000_000_000;
+            factor=1000000000;
 
         String str=index != -1? input.substring(0,index) : input;
         return new Tuple<>(str,factor);
-    }
-
-    /**
-     * MByte nowadays doesn't mean 1024 * 1024 bytes, but 1 million bytes, see http://en.wikipedia.org/wiki/Megabyte
-     * @param bytes
-     * @return
-     */
-    public static String printBytes(long bytes) {
-        double tmp;
-
-        if(bytes < 1000)
-            return String.format("%db", bytes);
-        if(bytes < 1_000_000) {
-            tmp=bytes / 1000.0;
-            return String.format("%,.2fKB", tmp);
-        }
-        if(bytes < 1_000_000_000) {
-            tmp=bytes / 1_000_000.0;
-            return String.format("%,.2fMB", tmp);
-        }
-        else {
-            tmp=bytes / 1_000_000_000.0;
-            return String.format("%,.2fGB", tmp);
-        }
     }
 
     public static String printBytes(double bytes) {
         double tmp;
 
         if(bytes < 1000)
-            return String.format("%.2fb", bytes);
-        if(bytes < 1_000_000) {
+            return bytes + "b";
+        if(bytes < 1000000) {
             tmp=bytes / 1000.0;
-            return String.format("%,.2fKB", tmp);
+            return f.format(tmp) + "KB";
         }
-        if(bytes < 1_000_000_000) {
-            tmp=bytes / 1000_000.0;
-            return String.format("%,.2fMB", tmp);
+        if(bytes < 1000000000) {
+            tmp=bytes / 1000000.0;
+            return f.format(tmp) + "MB";
         }
         else {
-            tmp=bytes / 1_000_000_000.0;
-            return String.format("%,.2fGB", tmp);
+            tmp=bytes / 1000000000.0;
+            return f.format(tmp) + "GB";
         }
     }
 
@@ -2295,7 +1974,7 @@ public class Util {
      * Fragments a byte buffer into smaller fragments of (max.) frag_size.
      * Example: a byte buffer of 1024 bytes and a frag_size of 248 gives 4 fragments
      * of 248 bytes each and 1 fragment of 32 bytes.
-     * @return An array of byte buffers ({@code byte[]}).
+     * @return An array of byte buffers (<code>byte[]</code>).
      */
     public static byte[][] fragmentBuffer(byte[] buf,int frag_size,final int length) {
         byte[] retval[];
@@ -2333,18 +2012,18 @@ public class Util {
      * @return List. A List<Range> of offset/length pairs
      */
     public static List<Range> computeFragOffsets(int offset,int length,int frag_size) {
-        int num_frags=(int)Math.ceil(length / (double)frag_size);
-        List<Range> retval=new ArrayList<>(num_frags);
-        long total_size=(long)length + offset;
+        List<Range> retval=new ArrayList<>();
+        long total_size=length + offset;
         int index=offset;
         int tmp_size=0;
+        Range r;
 
         while(index < total_size) {
             if(index + frag_size <= total_size)
                 tmp_size=frag_size;
             else
                 tmp_size=(int)(total_size - index);
-            Range r=new Range(index,tmp_size);
+            r=new Range(index,tmp_size);
             retval.add(r);
             index+=tmp_size;
         }
@@ -2357,7 +2036,7 @@ public class Util {
 
     /**
      * Concatenates smaller fragments into entire buffers.
-     * @param fragments An array of byte buffers ({@code byte[]})
+     * @param fragments An array of byte buffers (<code>byte[]</code>)
      * @return A byte buffer
      */
     public static byte[] defragmentBuffer(byte[] fragments[]) {
@@ -2491,6 +2170,29 @@ public class Util {
         if(old_list != null)
             retval.removeAll(old_list);
         return retval;
+    }
+
+
+    /**
+     * Selects a random subset of members according to subset_percentage and returns them.
+     * Picks no member twice from the same membership. If the percentage is smaller than 1 -> picks 1 member.
+     */
+    public static List<Address> pickSubset(List<Address> members,double subset_percentage) {
+        List<Address> ret=new ArrayList<>(), tmp_mbrs;
+        int num_mbrs=members.size(), subset_size, index;
+
+        if(num_mbrs == 0) return ret;
+        subset_size=(int)Math.ceil(num_mbrs * subset_percentage);
+
+        tmp_mbrs=new ArrayList<>(members);
+
+        for(int i=subset_size; i > 0 && !tmp_mbrs.isEmpty(); i--) {
+            index=(int)((Math.random() * num_mbrs) % tmp_mbrs.size());
+            ret.add(tmp_mbrs.get(index));
+            tmp_mbrs.remove(index);
+        }
+
+        return ret;
     }
 
 
@@ -2642,29 +2344,34 @@ public class Util {
 
 
     public static <T> T pickRandomElement(List<T> list) {
-        if(list == null || list.isEmpty()) return null;
+        if(list == null) return null;
         int size=list.size();
-        int index=(int)Util.random(size)-1;
+        int index=(int)((Math.random() * size * 10) % size);
         return list.get(index);
     }
 
     public static <T> T pickRandomElement(T[] array) {
         if(array == null) return null;
         int size=array.length;
-        int index=(int)Util.random(size)-1;
+        int index=(int)((Math.random() * size * 10) % size);
         return array[index];
     }
 
-
+    /**
+     * Returns the object next to element in list
+     * @param list
+     * @param obj
+     * @param <T>
+     * @return
+     */
     public static <T> T pickNext(List<T> list,T obj) {
         if(list == null || obj == null)
             return null;
-        int size=list.size();
-
-        for(int i=0; i < size; i++) {
-            T tmp=list.get(i);
-            if(Objects.equals(tmp, obj))
-                return list.get((i + 1) % size);
+        Object[] array=list.toArray();
+        for(int i=0; i < array.length; i++) {
+            T tmp=(T)array[i];
+            if(tmp != null && tmp.equals(obj))
+                return (T)array[(i + 1) % array.length];
         }
         return null;
     }
@@ -2685,6 +2392,18 @@ public class Util {
         return retval;
     }
 
+
+    public static JChannel createChannel(Protocol... prots) throws Exception {
+        JChannel ch=new JChannel(false);
+        ProtocolStack stack=new ProtocolStack();
+        ch.setProtocolStack(stack);
+        for(Protocol prot : prots) {
+            stack.addProtocol(prot);
+            prot.setProtocolStack(stack);
+        }
+        stack.init();
+        return ch;
+    }
 
     public static byte[] generateArray(int size) {
         byte[] retval=new byte[size];
@@ -2716,13 +2435,16 @@ public class Util {
 
     public static Address createRandomAddress(String name) {
         UUID retval=UUID.randomUUID();
-        NameCache.add(retval,name);
+        UUID.add(retval,name);
         return retval;
     }
 
     public static Object[][] createTimer() {
         return new Object[][]{
+          {new DefaultTimeScheduler(5)},
+          {new TimeScheduler2()},
           {new TimeScheduler3()},
+          {new HashedTimingWheel(5)}
         };
     }
 
@@ -2850,8 +2572,7 @@ public class Util {
         return getAllDeclaredFieldsWithAnnotations(clazz);
     }
 
-    @SafeVarargs
-    public static Field[] getAllDeclaredFieldsWithAnnotations(final Class clazz, Class<? extends Annotation>... annotations) {
+    public static Field[] getAllDeclaredFieldsWithAnnotations(final Class clazz,Class<? extends Annotation>... annotations) {
         List<Field> list=new ArrayList<>(30);
         for(Class curr=clazz; curr != null; curr=curr.getSuperclass()) {
             Field[] fields=curr.getDeclaredFields();
@@ -2875,8 +2596,7 @@ public class Util {
         return retval;
     }
 
-    @SafeVarargs
-    public static Method[] getAllDeclaredMethodsWithAnnotations(final Class clazz, Class<? extends Annotation>... annotations) {
+    public static Method[] getAllDeclaredMethodsWithAnnotations(final Class clazz,Class<? extends Annotation>... annotations) {
         List<Method> list=new ArrayList<>(30);
         for(Class curr=clazz; curr != null; curr=curr.getSuperclass()) {
             Method[] methods=curr.getDeclaredMethods();
@@ -2911,15 +2631,6 @@ public class Util {
     }
 
     public static Field getField(final Class clazz, String field_name) {
-        try {
-            return getField(clazz, field_name, false);
-        }
-        catch(NoSuchFieldException e) {
-            return null;
-        }
-    }
-
-    public static Field getField(final Class clazz, String field_name, boolean throw_exception) throws NoSuchFieldException {
         if(clazz == null || field_name == null)
             return null;
 
@@ -2931,8 +2642,6 @@ public class Util {
             catch(NoSuchFieldException e) {
             }
         }
-        if(field == null && throw_exception)
-            throw new NoSuchFieldException(String.format("%s not found in %s or superclasses", field_name, clazz.getName()));
         return field;
     }
 
@@ -3144,7 +2853,7 @@ public class Util {
         if(s == null) return null;
         tok=new StringTokenizer(s,",");
         while(tok.hasMoreTokens()) {
-            l= Integer.valueOf(tok.nextToken());
+            l=new Integer(tok.nextToken());
             v.add(l);
         }
         if(v.isEmpty()) return null;
@@ -3167,7 +2876,7 @@ public class Util {
         if(s == null) return null;
         tok=new StringTokenizer(s,",");
         while(tok.hasMoreTokens()) {
-            l=Long.valueOf(tok.nextToken());
+            l=new Long(tok.nextToken());
             v.add(l);
         }
         if(v.isEmpty()) return null;
@@ -3380,9 +3089,9 @@ public class Util {
      * @param randomSleepTimeoutFloor   the minimum sleep time between attempts in ms
      * @param randomSleepTimeoutCeiling the maximum sleep time between attempts in ms
      * @return true if channel was flushed successfully, false otherwise
-     * @see JChannel#startFlush(List,boolean)
+     * @see Channel#startFlush(List,boolean)
      */
-    public static boolean startFlush(JChannel c,List<Address> flushParticipants,
+    public static boolean startFlush(Channel c,List<Address> flushParticipants,
                                      int numberOfAttempts,long randomSleepTimeoutFloor,long randomSleepTimeoutCeiling) {
         int attemptCount=0;
         while(attemptCount < numberOfAttempts) {
@@ -3402,9 +3111,9 @@ public class Util {
      * Performs the flush of the given channel and the specified flush participants
      * @param c                 the channel
      * @param flushParticipants the flush participants in this flush attempt
-     * @see JChannel#startFlush(List,boolean)
+     * @see Channel#startFlush(List,boolean)
      */
-    public static boolean startFlush(JChannel c,List<Address> flushParticipants) {
+    public static boolean startFlush(Channel c,List<Address> flushParticipants) {
         return startFlush(c,flushParticipants,4,1000,5000);
     }
 
@@ -3416,9 +3125,9 @@ public class Util {
      * @param randomSleepTimeoutFloor   the minimum sleep time between attempts in ms
      * @param randomSleepTimeoutCeiling the maximum sleep time between attempts in ms
      * @return true if channel was flushed successfully, false otherwise
-     * @see JChannel#startFlush(boolean)
+     * @see Channel#startFlush(boolean)
      */
-    public static boolean startFlush(JChannel c,int numberOfAttempts,long randomSleepTimeoutFloor,long randomSleepTimeoutCeiling) {
+    public static boolean startFlush(Channel c,int numberOfAttempts,long randomSleepTimeoutFloor,long randomSleepTimeoutCeiling) {
         int attemptCount=0;
         while(attemptCount < numberOfAttempts) {
             try {
@@ -3437,15 +3146,20 @@ public class Util {
      * Performs the flush of the given channel
      * @param c the channel
      * @return true if channel was flushed successfully, false otherwise
-     * @see JChannel#startFlush(boolean)
+     * @see Channel#startFlush(boolean)
      */
-    public static boolean startFlush(JChannel c) {
+    public static boolean startFlush(Channel c) {
         return startFlush(c,4,1000,5000);
     }
 
     public static String shortName(InetAddress hostname) {
         if(hostname == null) return null;
-        return hostname.getHostAddress();
+        StringBuilder sb=new StringBuilder();
+        if(resolve_dns)
+            sb.append(hostname.getHostName());
+        else
+            sb.append(hostname.getHostAddress());
+        return sb.toString();
     }
 
     public static String generateLocalName() {
@@ -3464,7 +3178,7 @@ public class Util {
             }
         }
 
-        long counter=Util.random((long)Short.MAX_VALUE * 2);
+        long counter=Util.random(Short.MAX_VALUE * 2);
         return retval + "-" + counter;
     }
 
@@ -3483,14 +3197,20 @@ public class Util {
 
     public static ServerSocket createServerSocket(SocketFactory factory, String service_name, InetAddress bind_addr, int start_port) {
         ServerSocket ret=null;
-        try {
-            ret=factory.createServerSocket(service_name);
-            Util.bind(ret, bind_addr, start_port, start_port+1000, 50);
-            return ret;
+
+        while(true) {
+            try {
+                ret=factory.createServerSocket(service_name,start_port,50,bind_addr);
+            }
+            catch(BindException bind_ex) {
+                start_port++;
+                continue;
+            }
+            catch(IOException io_ex) {
+            }
+            break;
         }
-        catch(Exception e) {
-            return null;
-        }
+        return ret;
     }
 
 
@@ -3512,7 +3232,7 @@ public class Util {
                 if(start_port == end_port)
                     throw new BindException(String.format("no port available in range [%d .. %d] (bind_addr=%s)",
                                                           original_start_port, end_port, bind_addr));
-                if(bind_addr != null && !(bind_addr.isLoopbackAddress() || bind_addr.isAnyLocalAddress())) {
+                if(bind_addr != null && !bind_addr.isLoopbackAddress()) {
                     NetworkInterface nic=NetworkInterface.getByInetAddress(bind_addr);
                     if(nic == null)
                         throw new BindException("bind_addr " + bind_addr + " is not a valid interface: " + bind_ex);
@@ -3532,7 +3252,6 @@ public class Util {
         bind(ret, bind_addr, start_port, end_port);
         return ret;
     }
-
 
     public static void bind(ServerSocket srv_sock, InetAddress bind_addr,
                             int start_port, int end_port) throws Exception {
@@ -3571,7 +3290,7 @@ public class Util {
         return channel;
     }
 
-    public static ServerSocketChannel createServerSocketChannel(SocketFactory factory,String service_name, InetAddress bind_addr,
+    public static ServerSocketChannel createServerSocketChannel(InetAddress bind_addr,
                                                                 int start_port, int end_port) throws Exception {
         int original_start_port=start_port;
         ServerSocketChannel ch=null;
@@ -3579,7 +3298,7 @@ public class Util {
             try {
                 if(ch != null)
                     Util.close(ch);
-                ch=factory.createServerSocketChannel(service_name);
+                ch=ServerSocketChannel.open();
                 ch.bind(new InetSocketAddress(bind_addr, start_port), 50);
                 return ch;
             }
@@ -4105,11 +3824,7 @@ public class Util {
             if(addr.equals(bind_addr))
                 return;
         }
-        StringBuilder sb=new StringBuilder();
-        if(prot_name != null)
-            sb.append('[').append(prot_name).append("] ");
-        sb.append(bind_addr).append(" is not a valid address on any local network interface");
-        throw new BindException(sb.toString());
+        throw new BindException("[" + prot_name + "] " + bind_addr + " is not a valid address on any local network interface");
     }
 
 
@@ -4158,10 +3873,16 @@ public class Util {
     public static boolean isCoordinator(View view,Address local_addr) {
         if(view == null || local_addr == null)
             return false;
-        Address coord=view.getCoord();
-        return coord != null && local_addr.equals(coord);
+        List<Address> mbrs=view.getMembers();
+        return !(mbrs == null || mbrs.isEmpty()) && local_addr.equals(mbrs.iterator().next());
     }
 
+    public static Address getCoordinator(View view) {
+        if(view == null)
+            return null;
+        List<Address> mbrs=view.getMembers();
+        return !mbrs.isEmpty()? mbrs.get(0) : null;
+    }
 
     public static MBeanServer getMBeanServer() {
         List<MBeanServer> servers=MBeanServerFactory.findMBeanServer(null);
@@ -4201,28 +3922,41 @@ public class Util {
 
 
     /**
-     * Go through the input string and replace any occurance of ${p} with the props.getProperty(p) value.
-     * If there is no such property p defined, then the ${p} reference will remain unchanged.
+     * Go through the input string and replace any occurance of ${p} with the
+     * props.getProperty(p) value. If there is no such property p defined, then
+     * the ${p} reference will remain unchanged.
      * <p/>
      * If the property reference is of the form ${p:v} and there is no such
      * property p, then the default value v will be returned.
      * <p/>
-     * If the property reference is of the form ${p1,p2} or ${p1,p2:v} then the primary and the secondary properties
-     * will be tried in turn, before returning either the unchanged input, or the default value.
+     * If the property reference is of the form ${p1,p2} or ${p1,p2:v} then the
+     * primary and the secondary properties will be tried in turn, before
+     * returning either the unchanged input, or the default value.
      * <p/>
-     * The property ${/} is replaced with System.getProperty("file.separator") value and the property ${:} is replaced
-     * with System.getProperty("path.separator").
-     * @param string the string with possible ${} references
-     * @param props  the source for ${x} property ref values, null means use
+     * The property ${/} is replaced with System.getProperty("file.separator")
+     * value and the property ${:} is replaced with
+     * System.getProperty("path.separator").
+     * @param string -
+     *               the string with possible ${} references
+     * @param props  -
+     *               the source for ${x} property ref values, null means use
      *               System.getProperty()
      * @return the input string with all property references replaced if any. If
-     *         there are no valid references the input string will be returned.
-     * @throws {@link java.security.AccessControlException} when not authorised to retrieved system properties
+     * there are no valid references the input string will be returned.
+     * @throws {@link java.security.AccessControlException}
+     *                when not authorised to retrieved system properties
      */
     public static String replaceProperties(final String string,final Properties props) {
+        // File separator value
         final String FILE_SEPARATOR=File.separator;
+
+        // Path separator value
         final String PATH_SEPARATOR=File.pathSeparator;
+
+        // File separator alias
         final String FILE_SEPARATOR_ALIAS="/";
+
+        // Path separator alias
         final String PATH_SEPARATOR_ALIAS=":";
 
         // States used in property parsing
@@ -4238,17 +3972,12 @@ public class Util {
             char c=chars[i];
 
             // Dollar sign outside brackets
-            if(c == '$' && state != IN_BRACKET) {
-
-                // check for escape char '\':
-                if(i > 0 && chars[i-1] != '\\')
-                    state=SEEN_DOLLAR;
-            }
+            if(c == '$' && state != IN_BRACKET)
+                state=SEEN_DOLLAR;
 
                 // Open bracket immediatley after dollar
             else if(c == '{' && state == SEEN_DOLLAR) {
-                // buffer.append(string.substring(start,i - 1));
-                append(buffer, string.substring(start,i - 1));
+                buffer.append(string.substring(start,i - 1));
                 state=IN_BRACKET;
                 start=i - 1;
             }
@@ -4320,24 +4049,16 @@ public class Util {
         }
 
         // No properties
-       // if(!properties)
-         //   return string;
+        if(!properties)
+            return string;
 
         // Collect the trailing characters
-        if(start != chars.length) {
-            // buffer.append(string.substring(start,chars.length));
-            append(buffer, string.substring(start, chars.length));
-        }
+        if(start != chars.length)
+            buffer.append(string.substring(start,chars.length));
 
+        // Done
         return buffer.toString();
     }
-
-    protected static void append(StringBuilder sb, String str) {
-        if(sb == null || str == null)
-            return;
-        sb.append(str.replace("\\${", "${"));
-    }
-
 
     /**
      * Try to resolve a "key" from the provided properties by checking if it is
@@ -4438,7 +4159,7 @@ public class Util {
 
     public static String getProperty(String s) {
         String var, default_val, retval=null;
-        int index=s.indexOf(':');
+        int index=s.indexOf(":");
         if(index >= 0) {
             var=s.substring(0,index);
             default_val=s.substring(index + 1);
@@ -4475,8 +4196,6 @@ public class Util {
             try {
                 retval=System.getProperty(prop);
                 if(retval != null)
-                    return retval;
-                if((retval=System.getenv(prop)) != null)
                     return retval;
             }
             catch(Throwable e) {

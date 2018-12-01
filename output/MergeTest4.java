@@ -56,7 +56,7 @@ public class MergeTest4 {
     /**
      * Tests a simple split: {A,B} and {C,D} need to merge back into one subgroup. Checks how many MergeViews are installed
      */
-    public void testSplitInTheMiddle() throws Exception {
+    public void testSplitInTheMiddle() {
         View v1=View.create(a.getAddress(), 10, a.getAddress(), b.getAddress());
         View v2=View.create(c.getAddress(), 10, c.getAddress(), d.getAddress());
 
@@ -74,12 +74,12 @@ public class MergeTest4 {
                 break;
 
             for(JChannel ch: Arrays.asList(a,b,c,d)) {
-                MERGE3 merge=ch.getProtocolStack().findProtocol(MERGE3.class);
+                MERGE3 merge=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
                 merge.sendInfo(); // multicasts an INFO msg to everybody else
             }
 
             for(JChannel ch: Arrays.asList(findChannel(merge_leader_one), findChannel(merge_leader_two))) {
-                MERGE3 merge=ch.getProtocolStack().findProtocol(MERGE3.class);
+                MERGE3 merge=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
                 merge.checkInconsistencies();
             }
             Util.sleep(1000);
@@ -112,12 +112,12 @@ public class MergeTest4 {
         Util.waitUntilAllChannelsHaveSameView(30000, 1000, a, b, c, d);
         System.out.println("\nResulting views:");
         for(JChannel ch: Arrays.asList(a,b,c,d)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             System.out.println(mv);
         }
         for(JChannel ch: Arrays.asList(a,b,c,d)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             assert mv instanceof MergeView;
             assert mv.size() == 4;
@@ -130,7 +130,7 @@ public class MergeTest4 {
     }
 
 
-    public void testMergeWithAsymetricViewsCoordIsolated() throws Exception {
+    public void testMergeWithAsymetricViewsCoordIsolated() {
         // Isolate the coord
         Address coord = a.getView().getCreator();
         System.out.println("Isolating coord: " + coord);
@@ -138,14 +138,14 @@ public class MergeTest4 {
         members.add(coord);
         View coord_view=new View(coord, 4, members);
         System.out.println("coord_view: " + coord_view);
-        JChannel coord_channel = findChannel(coord);
+        Channel coord_channel = findChannel(coord);
         System.out.println("coord_channel: " + coord_channel.getAddress());
         
         MutableDigest digest=new MutableDigest(coord_view.getMembersRaw());
-        NAKACK2 nakack=coord_channel.getProtocolStack().findProtocol(NAKACK2.class);
+        NAKACK2 nakack=(NAKACK2)coord_channel.getProtocolStack().findProtocol(NAKACK2.class);
         digest.merge(nakack.getDigest(coord));
         
-        GMS gms=coord_channel.getProtocolStack().findProtocol(GMS.class);
+        GMS gms=(GMS)coord_channel.getProtocolStack().findProtocol(GMS.class);
         gms.installView(coord_view, digest);
         System.out.println("gms.getView() " + gms.getView());
         
@@ -166,7 +166,7 @@ public class MergeTest4 {
         merge_views.put(c.getAddress(), c.getView());
         merge_views.put(d.getAddress(), d.getView());
         
-        gms=merge_leader.getProtocolStack().findProtocol(GMS.class);
+        gms=(GMS)merge_leader.getProtocolStack().findProtocol(GMS.class);
         gms.up(new Event(Event.MERGE, merge_views));
         
         Util.waitUntilAllChannelsHaveSameView(10000, 1000, a, b, c, d);
@@ -189,7 +189,7 @@ public class MergeTest4 {
     /**
      * Tests a merge between ViewIds of the same coord, e.g. A|6, A|7, A|8, A|9
      */
-    public void testViewsBySameCoord() throws Exception {
+    public void testViewsBySameCoord() {
         View v1=View.create(a.getAddress(), 6, a.getAddress(),b.getAddress(),c.getAddress(),d.getAddress()); // {A,B,C,D}
         View v2=View.create(a.getAddress(), 7, a.getAddress(),b.getAddress(),c.getAddress());                // {A,B,C}
         View v3=View.create(a.getAddress(), 8, a.getAddress(),b.getAddress());                               // {A,B}
@@ -197,11 +197,11 @@ public class MergeTest4 {
 
         Util.close(b,c,d); // not interested in those...
 
-        MERGE3 merge=a.getProtocolStack().findProtocol(MERGE3.class);
+        MERGE3 merge=(MERGE3)a.getProtocolStack().findProtocol(MERGE3.class);
         for(View view: Arrays.asList(v1,v2,v4,v3)) {
             MERGE3.MergeHeader hdr=MERGE3.MergeHeader.createInfo(view.getViewId(), null, null);
-            Message msg=new Message(null).src(a.getAddress()).putHeader(merge.getId(), hdr);
-            merge.up(msg);
+            Message msg=new Message(null, a.getAddress(), null).putHeader(merge.getId(), hdr);
+            merge.up(new Event(Event.MSG, msg));
         }
 
         merge.checkInconsistencies(); // no merge will happen
@@ -239,22 +239,22 @@ public class MergeTest4 {
         assert a.getView().equals(a4);
         assert b.getView().equals(b3);
 
-        List<Message> merge_msgs=new ArrayList<>();
+        List<Event> merge_events=new ArrayList<>();
         for(View view: Arrays.asList(a3,a4,a2,a1)) {
             MERGE3.MergeHeader hdr=MERGE3.MergeHeader.createInfo(view.getViewId(), null, null);
-            Message msg=new Message(null).src(a.getAddress()).putHeader(merge_id, hdr);
-            merge_msgs.add(msg);
+            Message msg=new Message(null, a.getAddress(), null).putHeader(merge_id, hdr);
+            merge_events.add(new Event(Event.MSG, msg));
         }
         for(View view: Arrays.asList(b2,b3,b1)) {
             MERGE3.MergeHeader hdr=MERGE3.MergeHeader.createInfo(view.getViewId(), null, null);
-            Message msg=new Message(null).src(b.getAddress()).putHeader(merge_id, hdr);
-            merge_msgs.add(msg);
+            Message msg=new Message(null, b.getAddress(), null).putHeader(merge_id, hdr);
+            merge_events.add(new Event(Event.MSG, msg));
         }
 
         // A and B can communicate again
         discard(false, a,b);
 
-        injectMergeEvents(merge_msgs, a,b);
+        injectMergeEvents(merge_events, a,b);
         checkInconsistencies(a,b); // merge will happen between A and B
         Util.waitUntilAllChannelsHaveSameView(10000, 500, a, b);
         System.out.println("A's view: " + a.getView() + "\nB's view: " + b.getView());
@@ -305,12 +305,12 @@ public class MergeTest4 {
         Util.waitUntilAllChannelsHaveSameView(30000, 1000, a, b, c, d, e, f, g, h, i, j);
         System.out.println("\nResulting views:");
         for(JChannel ch: Arrays.asList(a,b,c,d,e,f,g,h,i,j)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             System.out.println(mv);
         }
         for(JChannel ch: Arrays.asList(a,b,c,d,e,f,g,h,i,j)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             assert mv instanceof MergeView;
             assert mv.size() == 10;
@@ -345,21 +345,22 @@ public class MergeTest4 {
             System.out.println(ch.getName() + ": " + ch.getView());
 
         MERGE3.MergeHeader hdr=MERGE3.MergeHeader.createInfo(one.getViewId(), null, null);
-        Message msg=new Message(null).src(b.getAddress()).putHeader(merge_id, hdr); // B sends the INFO message to C
-        MERGE3 merge=c.getProtocolStack().findProtocol(MERGE3.class);
-        merge.up(msg);
+        Message msg=new Message(null, b.getAddress(), null).putHeader(merge_id, hdr); // B sends the INFO message to C
+        Event merge_event=new Event(Event.MSG, msg);
+        MERGE3 merge=(MERGE3)c.getProtocolStack().findProtocol(MERGE3.class);
+        merge.up(merge_event);
         enableInfoSender(true,a,b,c);
         System.out.println("\nEnabling INFO sending in merge protocols to merge subclusters");
 
         Util.waitUntilAllChannelsHaveSameView(30000, 1000, a, b, c);
         System.out.println("\nResulting views:");
         for(JChannel ch: Arrays.asList(a,b,c)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             System.out.println(mv);
         }
         for(JChannel ch: Arrays.asList(a,b,c)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             assert mv instanceof MergeView;
             assert mv.size() == 3;
@@ -390,7 +391,7 @@ public class MergeTest4 {
         injectView(v3, g,h);
         enableInfoSender(false, a,b,c,d,e,f,g,h); // stops INFO sending in MERGE3
         Util.waitUntilAllChannelsHaveSameView(10000, 500, a, b, c, d);
-        for(int x=0; x < 10; x++) { // can't use waitUntilAllChannelsHaveSameSize() as the channel list's length != view !
+        for(int x=0; x < 10; x++) { // can't use waitUntilAllChannelsHaveSameView() as the channel list's length != view !
             if(e.getView().size() == v2.size() && f.getView().size() == v2.size())
                 break;
             Util.sleep(500);
@@ -409,12 +410,12 @@ public class MergeTest4 {
         Util.waitUntilAllChannelsHaveSameView(30000, 1000, a, b, c, d, e, f, g, h);
         System.out.println("\nResulting views:");
         for(JChannel ch: Arrays.asList(a,b,c,d,e,f,g,h)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             System.out.println(mv);
         }
         for(JChannel ch: Arrays.asList(a,b,c,d,e,f,g,h)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             assert mv instanceof MergeView;
             assert mv.size() == 8;
@@ -460,12 +461,12 @@ public class MergeTest4 {
         Util.waitUntilAllChannelsHaveSameView(30000, 1000, s, t, u, v);
         System.out.println("\nResulting views:");
         for(JChannel ch: Arrays.asList(s,t,u,v)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             System.out.println(mv);
         }
         for(JChannel ch: Arrays.asList(s,t,u,v)) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             assert mv instanceof MergeView;
             assert mv.size() == 4;
@@ -518,18 +519,18 @@ public class MergeTest4 {
         Collection<Address> coords=Util.determineActualMergeCoords(different_views);
         Address merge_leader=new Membership().add(coords).sort().elementAt(0);
         System.out.printf("--> coords=%s, merge_leader=%s\n", coords, merge_leader);
-        GMS gms=findChannel(merge_leader).getProtocolStack().findProtocol(GMS.class);
+        GMS gms=(GMS)findChannel(merge_leader).getProtocolStack().findProtocol(GMS.class);
         gms.up(new Event(Event.MERGE, different_views));
 
         Util.waitUntilAllChannelsHaveSameView(30000, 1000, s, t, u, v);
         System.out.println("\nResulting views:");
         for(JChannel ch: Arrays.asList(s,t,u,v)) {
-            gms=ch.getProtocolStack().findProtocol(GMS.class);
+            gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             System.out.println(mv);
         }
         for(JChannel ch: Arrays.asList(s,t,u,v)) {
-            gms=ch.getProtocolStack().findProtocol(GMS.class);
+            gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             View mv=gms.view();
             assert mv instanceof MergeView;
             assert mv.size() == 4;
@@ -613,39 +614,40 @@ public class MergeTest4 {
     }
 
 
-    protected void injectMergeEvents(List<Message> msgs, JChannel ... channels) {
+    protected void injectMergeEvents(List<Event> events, JChannel ... channels) {
         for(JChannel ch: channels) {
-            MERGE3 merge=ch.getProtocolStack().findProtocol(MERGE3.class);
-            msgs.forEach(merge::up);
+            MERGE3 merge=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
+            for(Event evt: events)
+                merge.up(evt);
         }
     }
 
     protected void discard(boolean flag, JChannel ... channels) throws Exception {
         for(JChannel ch: channels) {
             ProtocolStack stack=ch.getProtocolStack();
-            DISCARD discard=stack.findProtocol(DISCARD.class);
+            DISCARD discard=(DISCARD)stack.findProtocol(DISCARD.class);
             if(discard == null)
-                stack.insertProtocol(discard=new DISCARD(), ProtocolStack.Position.ABOVE, stack.getTransport().getClass());
+                stack.insertProtocol(discard=new DISCARD(), ProtocolStack.ABOVE, stack.getTransport().getClass());
             discard.setDiscardAll(flag);
         }
     }
 
     protected void injectView(View view, JChannel ... channels) {
         for(JChannel ch: channels) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             gms.installView(view);
         }
     }
 
     protected void checkInconsistencies(JChannel ... channels) {
         for(JChannel ch: channels) {
-            MERGE3 merge=ch.getProtocolStack().findProtocol(MERGE3.class);
+            MERGE3 merge=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
             merge.checkInconsistencies();
         }
     }
 
     protected View getViewFromGMS(JChannel ch) {
-        GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+        GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
         return gms.view();
     }
 
@@ -658,7 +660,7 @@ public class MergeTest4 {
 
     protected void enableInfoSender(boolean enable, JChannel... channels) throws Exception {
         for(JChannel ch: channels) {
-            MERGE3 merge=ch.getProtocolStack().findProtocol(MERGE3.class);
+            MERGE3 merge=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
             Method meth=enable? startInfoSender : stopInfoSender;
             meth.invoke(merge);
         }

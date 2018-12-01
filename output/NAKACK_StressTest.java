@@ -57,19 +57,21 @@ public class NAKACK_StressTest {
         nak.setDownProtocol(new Protocol() {public Object down(Event evt) {return null;}});
 
         nak.setUpProtocol(new Protocol() {
-            public Object up(Message msg) {
-                delivered_msgs.incrementAndGet();
-                NakAckHeader2 hdr=msg.getHeader(NAKACK_ID);
-                if(hdr != null)
-                    delivered_msg_list.add(hdr.getSeqno());
+            public Object up(Event evt) {
+                if(evt.getType() == Event.MSG) {
+                    delivered_msgs.incrementAndGet();
+                    NakAckHeader2 hdr=(NakAckHeader2)((Message)evt.getArg()).getHeader(NAKACK_ID);
+                    if(hdr != null)
+                        delivered_msg_list.add(hdr.getSeqno());
 
-                if(delivered_msgs.get() >= num_msgs) {
-                    lock.lock();
-                    try {
-                        all_msgs_delivered.signalAll();
-                    }
-                    finally {
-                        lock.unlock();
+                    if(delivered_msgs.get() >= num_msgs) {
+                        lock.lock();
+                        try {
+                            all_msgs_delivered.signalAll();
+                        }
+                        finally {
+                            lock.unlock();
+                        }
                     }
                 }
                 return null;
@@ -135,7 +137,7 @@ public class NAKACK_StressTest {
 
         long time=System.currentTimeMillis() - start;
         double requests_sec=num_msgs / (time / 1000.0);
-        System.out.printf("\nTime: %d ms, %.2f requests / sec\n", time, requests_sec);
+        System.out.println("\nTime: " + time + " ms, " + Util.format(requests_sec) + " requests / sec\n");
         System.out.println("Delivered messages: " + delivered_msg_list.size());
         if(delivered_msg_list.size() < 100)
             System.out.println("Elements: " + delivered_msg_list);
@@ -162,7 +164,7 @@ public class NAKACK_StressTest {
     }
 
     private static Message createMessage(Address dest, Address src, long seqno, boolean oob) {
-        Message msg=new Message(dest, "hello world").src(src);
+        Message msg=new Message(dest, src, "hello world");
         NakAckHeader2 hdr=NakAckHeader2.createMessageHeader(seqno) ;
         msg.putHeader(NAKACK_ID, hdr);
         if(oob)
@@ -203,7 +205,7 @@ public class NAKACK_StressTest {
             while(num_msgs.getAndDecrement() > 0) {
                 long seqno=current_seqno.getAndIncrement();
                 Message msg=createMessage(null, sender, seqno, oob);
-                nak.up(msg);
+                nak.up(new Event(Event.MSG, msg));
             }
         }
     }

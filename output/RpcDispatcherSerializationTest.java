@@ -4,12 +4,16 @@ import org.jgroups.Address;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.tests.ChannelTestBase;
-import org.jgroups.util.*;
+import org.jgroups.util.Buffer;
+import org.jgroups.util.Rsp;
+import org.jgroups.util.RspList;
+import org.jgroups.util.Util;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.io.*;
+import java.lang.reflect.InvocationTargetException;
 import java.util.Iterator;
 import java.util.List;
 
@@ -35,7 +39,11 @@ public class RpcDispatcherSerializationTest extends ChannelTestBase {
 
     @AfterClass
     protected void tearDown() throws Exception {
-        Util.close(disp2, channel2, disp, channel);
+        channel2.close();
+        disp2.stop();
+
+        disp.stop();
+        channel.close();
     }
 
     public void testNonSerializableArgument() throws Exception {
@@ -56,14 +64,20 @@ public class RpcDispatcherSerializationTest extends ChannelTestBase {
                                             new RequestOptions(ResponseMode.GET_ALL, 8000));
         System.out.println("responses:\n" + rsps + ", channel.view: " + channel.getView() + ", channel2.view: " + channel2.getView());
         assert members.size() == rsps.size() : "expected " + members.size() + " responses, but got " + rsps + " (" + rsps.size() + ")";
-        for(Rsp rsp: rsps.values())
-            assert rsp.getException() instanceof NoSuchMethodException;
+
+        for(Rsp rsp: rsps.values()) {
+            assert rsp.getException() instanceof InvocationTargetException;
+            Throwable cause=rsp.getException().getCause();
+            assert cause instanceof NoSuchMethodException;
+        }
     }
 
     public void testMarshaller() throws Exception {
-        Marshaller m=new MyMarshaller();
-        disp.setMarshaller(m);
-        disp2.setMarshaller(m);
+        RpcDispatcher.Marshaller m=new MyMarshaller();
+        disp.setRequestMarshaller(m);
+        disp.setResponseMarshaller(m);
+        disp2.setRequestMarshaller(m);
+        disp2.setResponseMarshaller(m);
 
         RspList rsps;
         rsps=disp.callRemoteMethods(null, "methodA", new Object[]{Boolean.TRUE, new Long(322649)},
@@ -98,55 +112,74 @@ public class RpcDispatcherSerializationTest extends ChannelTestBase {
             assertFalse(rsp.wasSuspected());
         }
 
-        disp.setMarshaller(null);
-        disp2.setMarshaller(null);
+        disp.setRequestMarshaller(null);
+        disp.setResponseMarshaller(null);
+        disp2.setRequestMarshaller(null);
+        disp2.setResponseMarshaller(null);
     }
 
 
 
-    static class MyMarshaller implements Marshaller {
-        static final byte NULL   = 0;
-        static final byte BOOL   = 1;
-        static final byte LONG   = 2;
-        static final byte OBJ    = 3;
+    static class MyMarshaller implements RpcDispatcher.Marshaller {
+        static final byte NULL  = 0;
+        static final byte BOOL  = 1;
+        static final byte LONG  = 2;
+        static final byte OBJ   = 3;
 
-        public void objectToStream(Object obj, DataOutput out) throws Exception {
-            if(obj == null)
-                out.writeByte(NULL);
-            else if(obj instanceof Boolean) {
-                out.writeByte(BOOL);
-                out.writeBoolean((Boolean)obj);
+        public Buffer objectToBuffer(Object obj) throws Exception {
+            ByteArrayOutputStream out=new ByteArrayOutputStream(24);
+            ObjectOutputStream oos=new ObjectOutputStream(out);
+
+            try {
+                if(obj == null) {
+                    oos.writeByte(NULL);
+                }
+                else if(obj instanceof Boolean) {
+                    oos.writeByte(BOOL);
+                    oos.writeBoolean(((Boolean)obj).booleanValue());
+                }
+                else if(obj instanceof Long) {
+                    oos.writeByte(LONG);
+                    oos.writeLong(((Long)obj).longValue());
+                }
+                else {
+                    oos.writeByte(OBJ);
+                    oos.writeObject(obj);
+                }
+                oos.flush();
+                return new Buffer(out.toByteArray());
             }
-            else if(obj instanceof Long) {
-                out.writeByte(LONG);
-                out.writeLong((Long)obj);
-            }
-            else {
-                out.writeByte(OBJ);
-                Buffer buf=Util.objectToBuffer(obj);
-                out.write(buf.getBuf(), buf.getOffset(), buf.getLength());
+            finally {
+                Util.close(oos);
             }
         }
 
-        public Object objectFromStream(DataInput in) throws Exception {
-            int type=in.readByte();
-            switch(type) {
-                case NULL:
-                    return null;
-                case BOOL:
-                    return in.readBoolean();
-                case LONG:
-                    return in.readLong();
-                case OBJ:
-                    return Util.objectFromStream(in);
-                default:
-                    throw new IllegalArgumentException("incorrect type " + type);
+        public Object objectFromBuffer(byte[] buf, int offset, int length) throws Exception {
+            ByteArrayInputStream inp=new ByteArrayInputStream(buf, offset, length);
+            ObjectInputStream in=new ObjectInputStream(inp);
+
+            try {
+                int type=in.readByte();
+                switch(type) {
+                    case NULL:
+                        return null;
+                    case BOOL:
+                        return Boolean.valueOf(in.readBoolean());
+                    case LONG:
+                        return new Long(in.readLong());
+                    case OBJ:
+                        return in.readObject();
+                    default:
+                        throw new IllegalArgumentException("incorrect type " + type);
+                }
+            }
+            finally {
+                Util.close(in);
             }
         }
     }
 
     static class Target {
-        @SuppressWarnings("UnusedParameters")
         public static void methodA(boolean b, long l) {
             ;
         }
@@ -162,7 +195,7 @@ public class RpcDispatcherSerializationTest extends ChannelTestBase {
 
 
     static class NonSerializable {
-        @SuppressWarnings("unused") int i;
+        int i;
     }
 
 }

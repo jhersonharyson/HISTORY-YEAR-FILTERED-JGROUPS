@@ -6,11 +6,16 @@ import org.jgroups.PhysicalAddress;
 import org.jgroups.View;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
+import org.jgroups.stack.IpAddress;
 import org.jgroups.util.AsciiString;
-import org.jgroups.util.NameCache;
+import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
 
-import java.util.*;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -21,10 +26,11 @@ import java.util.concurrent.ConcurrentMap;
  * @author Bela Ban
  */
 public class SHARED_LOOPBACK extends TP {
+    protected short            port=1;
     protected PhysicalAddress  physical_addr;
 
     @ManagedAttribute(description="The current view",writable=false)
-    protected volatile View    curr_view;
+    protected volatile View    view;
 
     protected volatile boolean is_server=false, is_coord=false;
 
@@ -36,7 +42,7 @@ public class SHARED_LOOPBACK extends TP {
         return true; // kind of...
     }
 
-    public View    getView()  {return curr_view;}
+    public View    getView()  {return view;}
     public boolean isServer() {return is_server;}
     public boolean isCoord()  {return is_coord;}
 
@@ -56,16 +62,17 @@ public class SHARED_LOOPBACK extends TP {
     }
 
 
-    public void sendMulticast(byte[] data, int offset, int length) throws Exception {
+    public void sendMulticast(AsciiString cluster_name, byte[] data, int offset, int length) throws Exception {
         Map<Address,SHARED_LOOPBACK> dests=routing_table.get(this.cluster_name);
         if(dests == null) {
-            log.trace("no destination found for " + this.cluster_name);
+            if(log.isTraceEnabled())
+                log.trace("no destination found for " + this.cluster_name);
             return;
         }
         for(Map.Entry<Address,SHARED_LOOPBACK> entry: dests.entrySet()) {
             Address dest=entry.getKey();
             SHARED_LOOPBACK target=entry.getValue();
-            if(Objects.equals(local_addr, dest))
+            if(local_addr != null && local_addr.equals(dest))
                 continue; // message was already looped back
             try {
                 target.receive(local_addr, data, offset, length);
@@ -104,7 +111,7 @@ public class SHARED_LOOPBACK extends TP {
             for(Map.Entry<Address,SHARED_LOOPBACK> entry: mbrs.entrySet()) {
                 Address addr=entry.getKey();
                 SHARED_LOOPBACK slp=entry.getValue();
-                PingData data=new PingData(addr, slp.isServer(), NameCache.get(addr), null).coord(slp.isCoord());
+                PingData data=new PingData(addr, slp.isServer(), UUID.get(addr), null).coord(slp.isCoord());
                 rsps.add(data);
             }
         }
@@ -135,22 +142,27 @@ public class SHARED_LOOPBACK extends TP {
                 break;
 
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=evt.getArg();
+                local_addr=(Address)evt.getArg();
                 break;
             case Event.BECOME_SERVER: // called after client has joined and is fully working group member
                 is_server=true;
                 break;
             case Event.VIEW_CHANGE:
             case Event.TMP_VIEW:
-                curr_view=evt.getArg();
+                view=(View)evt.getArg();
                 Address[] mbrs=((View)evt.getArg()).getMembersRaw();
                 is_coord=local_addr != null && mbrs != null && mbrs.length > 0 && local_addr.equals(mbrs[0]);
                 break;
             case Event.GET_PING_DATA:
-                return getDiscoveryResponsesFor(evt.getArg()); // don't pass further down
+                return getDiscoveryResponsesFor((String)evt.getArg()); // don't pass further down
         }
 
         return retval;
+    }
+
+    public void init() throws Exception {
+        super.init();
+        physical_addr=new IpAddress(InetAddress.getLoopbackAddress(), port++);
     }
 
     public void stop() {

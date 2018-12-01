@@ -94,7 +94,7 @@ public class GMS_MergeTest {
         _testMergeAsymmetricPartitions(true, "testMergeAsymmetricPartitionsWithFlush");
     }
 
-    public void testMergeAsymmetricPartitions2() throws Exception {
+    public static void testMergeAsymmetricPartitions2() throws Exception {
         _testMergeAsymmetricPartitions2(false, "testMergeAsymmetricPartitions2");
     }
 
@@ -113,12 +113,12 @@ public class GMS_MergeTest {
             c1.connect(cluster_name);
             Message merge_request=new Message()
               .putHeader(GMS_ID, new GMS.GmsHeader(GMS.GmsHeader.MERGE_REQ).mergeId(MergeId.create(c1.getAddress())));
-            GMS gms=c1.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)c1.getProtocolStack().findProtocol(GMS.class);
             gms.setMergeTimeout(2000);
             MergeId merge_id=gms._getMergeId();
             assert merge_id == null;
             System.out.println("starting merge");
-            gms.up(merge_request);
+            gms.up(new Event(Event.MSG, merge_request));
 
             long timeout=gms.getMergeTimeout() * 10;
             System.out.println("sleeping for " + timeout + " ms, then fetching merge_id: should be null (cancelled by the MergeCanceller)");
@@ -326,7 +326,7 @@ public class GMS_MergeTest {
              discard.addIgnoreMember(c.getAddress());
 
              // A should drop all traffic from B or C
-             a.getProtocolStack().insertProtocol(discard, ProtocolStack.Position.ABOVE, SHARED_LOOPBACK.class);
+             a.getProtocolStack().insertProtocol(discard, ProtocolStack.ABOVE, SHARED_LOOPBACK.class);
 
              System.out.println("B and C exchange " + NUM + " messages, A discards them");
              for(int i=0; i < NUM; i++)
@@ -385,13 +385,14 @@ public class GMS_MergeTest {
      }
 
 
-    /**
+/**
      * Tests the merge of the following partitions:
      * <ul>
      * <li>A: {A,B}
      * <li>B: {B}
      * </ol>
      * JIRA: https://jira.jboss.org/jira/browse/JGRP-1031
+     * @throws Exception
      */
     static void _testMergeAsymmetricPartitions2(boolean use_flush_props, String cluster_name) throws Exception {
         JChannel[] channels=null;
@@ -463,7 +464,7 @@ public class GMS_MergeTest {
     private static void applyView(JChannel[] channels, String member, String ... members) throws Exception {
         JChannel ch=findChannel(member, channels);
         View view=createView(members, channels);
-        GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+        GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
         gms.installView(view);
     }
 
@@ -551,7 +552,7 @@ public class GMS_MergeTest {
         }
 
         JChannel coord=findChannel(leader_addr, channels);
-        GMS gms=coord.getProtocolStack().findProtocol(GMS.class);
+        GMS gms=(GMS)coord.getProtocolStack().findProtocol(GMS.class);
         gms.setLevel("trace");
         gms.up(new Event(Event.MERGE, views));
     }
@@ -583,7 +584,7 @@ public class GMS_MergeTest {
 
     protected static void disableTracing(JChannel[] channels) {
         for(JChannel ch: channels) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             gms.setLevel("warn");
         }
     }
@@ -647,7 +648,7 @@ public class GMS_MergeTest {
             for(JChannel ch: channels) {
                 Address addr=ch.getAddress();
                 if(members.contains(addr)) {
-                    GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+                    GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
                     gms.installView(view);
                 }
             }
@@ -662,7 +663,7 @@ public class GMS_MergeTest {
 
     private static void printDigests(JChannel[] channels) {
         for(JChannel ch: channels) {
-            NAKACK2 nak=ch.getProtocolStack().findProtocol(NAKACK2.class);
+            NAKACK2 nak=(NAKACK2)ch.getProtocolStack().findProtocol(NAKACK2.class);
             Digest digest=nak.getDigest();
             System.out.println(ch.getName() + ": " + digest.toString());
         }
@@ -737,7 +738,7 @@ public class GMS_MergeTest {
             this.id=id;
         }
 
-        protected MyChannel setAddress() {
+        protected void setAddress() {
             Address old_addr=local_addr;
             local_addr=new org.jgroups.util.UUID(id, id);
 
@@ -746,13 +747,12 @@ public class GMS_MergeTest {
             if(name == null || name.isEmpty()) // generate a logical name if not set
                 name=Util.generateLocalName();
             if(name != null && !name.isEmpty())
-                org.jgroups.util.NameCache.add(local_addr, name);
+                org.jgroups.util.UUID.add(local_addr, name);
 
             Event evt=new Event(Event.SET_LOCAL_ADDRESS, local_addr);
             down(evt);
             if(up_handler != null)
                 up_handler.up(evt);
-            return this;
         }
     }
 

@@ -27,7 +27,8 @@ public class ReconciliationTest {
 
     @AfterMethod void tearDown() throws Exception {
         if(channels != null)
-            channels.forEach(Util::close);
+            for(Closeable closeable: channels)
+                Util.close(closeable);
     }
 
     /**
@@ -44,17 +45,19 @@ public class ReconciliationTest {
      * </ul>
      */
     public void testReconciliationFlushTriggeredByNewMemberJoin() throws Exception {
-        FlushTrigger t=() -> {
-            System.out.println("Joining D, this will trigger FLUSH and a subsequent view change to {A,B,C,D}");
-            JChannel newChannel;
-            try {
-                newChannel=createChannel("X");
-                newChannel.connect("ReconciliationTest");
-                channels.add(newChannel);
-            }
-            catch(Exception e) {
-                e.printStackTrace();
-            }
+        FlushTrigger t=new FlushTrigger() {
+            public void triggerFlush() {
+                System.out.println("Joining D, this will trigger FLUSH and a subsequent view change to {A,B,C,D}");
+                JChannel newChannel;
+                try {
+                    newChannel=createChannel("X");
+                    newChannel.connect("ReconciliationTest");
+                    channels.add(newChannel);
+                }
+                catch(Exception e) {
+                    e.printStackTrace();
+                }
+            };
         };
         reconciliationHelper(new String[]{"A", "B", "C"}, t);
     }
@@ -73,11 +76,14 @@ public class ReconciliationTest {
      * </ul>
      */
     public void testReconciliationFlushTriggeredByManualFlush() throws Exception {
-        FlushTrigger t=() -> {
-            JChannel channel=channels.get(0);
-            boolean rc=Util.startFlush(channel);
-            System.out.println("manual flush success=" + rc);
-            channel.stopFlush();
+
+        FlushTrigger t=new FlushTrigger() {
+            public void triggerFlush() {
+                JChannel channel=channels.get(0);
+                boolean rc=Util.startFlush(channel);
+                System.out.println("manual flush success=" + rc);
+                channel.stopFlush();
+            };
         };
         String apps[]={"A", "B", "C"};
         reconciliationHelper(apps, t);
@@ -97,14 +103,17 @@ public class ReconciliationTest {
      * </ul>
      */
     public void testReconciliationFlushTriggeredByMemberCrashing() throws Exception {
-        FlushTrigger t=() -> {
-            JChannel channel=channels.remove(channels.size() - 1);
-            try {
-                Util.shutdown(channel);
-            }
-            catch(Exception e) {
-                e.printStackTrace();
-            }
+
+        FlushTrigger t=new FlushTrigger() {
+            public void triggerFlush() {
+                JChannel channel=channels.remove(channels.size() - 1);
+                try {
+                    Util.shutdown(channel);
+                }
+                catch(Exception e) {
+                    e.printStackTrace();
+                }
+            };
         };
         String apps[]={"A", "B", "C"};
         reconciliationHelper(apps, t);
@@ -152,7 +161,7 @@ public class ReconciliationTest {
         // now last sends 5 messages:
         System.out.println("\n" + lastsName + " sending 5 messages; " + nextToLastName + " will ignore them, but others will receive them");
         for(int i=1;i <= 5;i++)
-            last.send(null, i);
+            last.send(null, new Integer(i));
 
         Util.sleep(1000); // until al messages have been received, this is asynchronous so we need to wait a bit
 
@@ -246,7 +255,7 @@ public class ReconciliationTest {
         DISCARD discard=new DISCARD().localAddress(ch.getAddress());
         discard.setExcludeItself(true);
         discard.addIgnoreMember(exclude); // ignore messages from this member
-        ch.getProtocolStack().insertProtocol(discard, ProtocolStack.Position.BELOW, NAKACK2.class);
+        ch.getProtocolStack().insertProtocol(discard, ProtocolStack.BELOW, NAKACK2.class);
     }
 
     private static void removeDISCARD(JChannel...channels) throws Exception {
@@ -260,10 +269,10 @@ public class ReconciliationTest {
 
     protected static class MyReceiver extends ReceiverAdapter {
         protected final Map<Address,List<Integer>> msgs=new HashMap<>(10);
-        protected final JChannel channel;
+        protected final Channel channel;
         protected final String  name;
 
-        public MyReceiver(JChannel ch, String name) {
+        public MyReceiver(Channel ch,String name) {
             this.channel=ch;
             this.name=name;
         }
@@ -320,7 +329,7 @@ public class ReconciliationTest {
         Util.close(b,a);
     }
 
-    protected static void flush(JChannel channel) {
+    protected static void flush(Channel channel) {
         try {
             assert Util.startFlush(channel);
         }
@@ -331,10 +340,10 @@ public class ReconciliationTest {
 
     protected static class Cache extends ReceiverAdapter {
         protected final Map<Object,Object> data;
-        protected JChannel ch;
+        protected Channel                  ch;
         protected String                   name;
 
-        public Cache(JChannel ch, String name) {
+        public Cache(Channel ch,String name) {
             this.data=new HashMap<>();
             this.ch=ch;
             this.name=name;
@@ -348,7 +357,7 @@ public class ReconciliationTest {
         }
 
         protected void put(Object key, Object val) throws Exception {
-            ch.send(new Message(null, new Object[]{key,val}));
+            ch.send(new Message(null, null, new Object[]{key,val}));
         }
 
         protected int size() {

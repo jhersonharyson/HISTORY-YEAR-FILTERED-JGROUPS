@@ -4,10 +4,7 @@ import org.jgroups.Global;
 import org.jgroups.tests.rt.RtReceiver;
 import org.jgroups.tests.rt.RtTransport;
 import org.jgroups.tests.rt.transports.*;
-import org.jgroups.util.AverageMinMax;
-import org.jgroups.util.Bits;
-import org.jgroups.util.Promise;
-import org.jgroups.util.Util;
+import org.jgroups.util.*;
 
 import java.util.HashMap;
 import java.util.List;
@@ -65,10 +62,10 @@ public class RoundTrip implements RtReceiver {
 
     /** On the server: receive a request, send a response. On the client: send a request, wait for the response */
     public void receive(Object sender, byte[] req_buf, int offset, int length) {
-        switch(req_buf[offset]) {
+        switch(req_buf[0]) {
             case REQ:
-                short id=Bits.readShort(req_buf, 1+offset);
-                long time=time(use_ms) - Bits.readLong(req_buf, 3+offset);
+                short id=Bits.readShort(req_buf, 1);
+                long time=time(use_ms) - Bits.readLong(req_buf, 3);
                 byte[] rsp_buf=new byte[PAYLOAD];
                 rsp_buf[0]=RSP;
                 Bits.writeShort(id, rsp_buf, 1);
@@ -123,7 +120,6 @@ public class RoundTrip implements RtReceiver {
                         details=!details;
                         break;
                     case 'x':
-                    case -1:
                         looping=false;
                         break;
                 }

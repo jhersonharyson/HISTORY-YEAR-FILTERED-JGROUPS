@@ -35,7 +35,7 @@ public class MPerfRpc extends ReceiverAdapter {
 
     protected int                                 num_msgs=1000 * 1000;
     protected int                                 msg_size=1000;
-    protected int                                 num_threads=25;
+    protected int                                 num_threads=1;
     protected int                                 log_interval=num_msgs / 10; // log every 10%
     protected int                                 receive_log_interval=num_msgs / 10;
     protected int                                 num_senders=-1; // <= 0: all
@@ -108,28 +108,34 @@ public class MPerfRpc extends ReceiverAdapter {
 
         channel=new JChannel(props);
         channel.setName(name);
-        disp=new RpcDispatcher(channel, this).setMembershipListener(this).setMethodLookup(id -> METHODS[id])
-          .setMarshaller(new MperfMarshaller());
+        disp=new RpcDispatcher(channel, null, this, this);
+        disp.setMethodLookup(new MethodLookup() {
+            public Method findMethod(short id) {
+                return METHODS[id];
+            }
+        });
+        disp.setRequestMarshaller(new MperfMarshaller());
+        disp.setResponseMarshaller(new MperfMarshaller());
 
-        send_options.mode(sync? ResponseMode.GET_ALL : ResponseMode.GET_NONE);
+        send_options.setMode(sync? ResponseMode.GET_ALL : ResponseMode.GET_NONE);
         if(oob)
-            send_options.flags(Message.Flag.OOB);
+            send_options.setFlags(Message.Flag.OOB);
 
         channel.connect("mperf");
         local_addr=channel.getAddress();
         JmxConfigurator.registerChannel(channel, Util.getMBeanServer(), "jgroups", "mperf", true);
 
         // send a CONFIG_REQ to the current coordinator, so we can get the current config
-        Address coord=channel.getView().getCoord();
+        Address coord=channel.getView().getMembers().get(0);
         if(coord != null && !local_addr.equals(coord))
-            invokeRpc(configReq, coord, RequestOptions.ASYNC().flags(Message.Flag.RSVP), local_addr);
+            invokeRpc(configReq, coord, RequestOptions.ASYNC().setFlags(Message.Flag.RSVP), local_addr);
     }
 
 
     protected void loop() {
         int c;
 
-        final String INPUT="[1] Invoke [2] View\n" +
+        final String INPUT="[1] Send [2] View\n" +
           "[3] Set num RPCs (%d) [4] Set msg size (%s) [5] Set threads (%d)\n" +
           "[6] Number of senders (%s) [s] Toggle sync (%s) [o] Toggle OOB (%s)\n" +
           "[x] Exit this [X] Exit all";
@@ -143,7 +149,7 @@ public class MPerfRpc extends ReceiverAdapter {
                     case '1':
                         initiator=true;
                         results.reset(getSenders());
-                        invokeRpc(clearResults,RequestOptions.SYNC().flags(Message.Flag.RSVP));
+                        invokeRpc(clearResults,RequestOptions.SYNC().setFlags(Message.Flag.RSVP));
                         invokeRpc(startSending, RequestOptions.ASYNC(), local_addr);
                         break;
                     case '2':
@@ -163,14 +169,13 @@ public class MPerfRpc extends ReceiverAdapter {
                         break;
                     case 's':
                         ConfigChange change=new ConfigChange("sync", !sync);
-                        invokeRpc(configChange, RequestOptions.SYNC().flags(Message.Flag.RSVP), change);
+                        invokeRpc(configChange,RequestOptions.SYNC().setFlags(Message.Flag.RSVP), change);
                         break;
                     case 'o':
                         change=new ConfigChange("oob", !oob);
-                        invokeRpc(configChange, RequestOptions.SYNC().flags(Message.Flag.RSVP), change);
+                        invokeRpc(configChange,RequestOptions.SYNC().setFlags(Message.Flag.RSVP), change);
                         break;
                     case 'x':
-                    case -1:
                         looping=false;
                         break;
                     case 'X':
@@ -196,10 +201,10 @@ public class MPerfRpc extends ReceiverAdapter {
         }
 
         long total_msgs=0, total_time=0, num=0;
-        for(Result res: tmp_results.values()) {
-            if(res != null) {
-                total_time+=res.time;
-                total_msgs+=res.msgs;
+        for(Result result: tmp_results.values()) {
+            if(result != null) {
+                total_time+=result.time;
+                total_msgs+=result.msgs;
                 num++;
             }
         }
@@ -220,7 +225,7 @@ public class MPerfRpc extends ReceiverAdapter {
     protected void configChange(String name) throws Exception {
         int tmp=Util.readIntFromStdin(name + ": ");
         ConfigChange change=new ConfigChange(name, tmp);
-        invokeRpc(configChange, RequestOptions.SYNC().flags(Message.Flag.RSVP), change);
+        invokeRpc(configChange,RequestOptions.SYNC().setFlags(Message.Flag.RSVP),change);
     }
 
 
@@ -315,17 +320,17 @@ public class MPerfRpc extends ReceiverAdapter {
         // as the time the first message was received and the time the last message was received
         if(all_done && result_collector != null) {
             long start=0, stop=0, msgs=0;
-            for(Stats res: received_msgs.values()) {
-                if(res.start > 0)
-                    start=start == 0? res.start : Math.min(start, res.start);
-                if(res.stop > 0)
-                    stop=stop == 0? res.stop : Math.max(stop, res.stop);
-                msgs+=res.num_msgs_received;
+            for(Stats result: received_msgs.values()) {
+                if(result.start > 0)
+                    start=start == 0? result.start : Math.min(start, result.start);
+                if(result.stop > 0)
+                    stop=stop == 0? result.stop : Math.max(stop, result.stop);
+                msgs+=result.num_msgs_received;
             }
             Result tmp_result=new Result(stop-start, msgs);
             try {
                 if(result_collector != null)
-                    invokeRpc(result, result_collector, RequestOptions.SYNC().flags(Message.Flag.RSVP),
+                    invokeRpc(result, result_collector, RequestOptions.SYNC().setFlags(Message.Flag.RSVP),
                               local_addr, tmp_result);
             }
             catch(Exception e) {
@@ -345,7 +350,8 @@ public class MPerfRpc extends ReceiverAdapter {
     }
 
     public void clearResults() { // 4
-        received_msgs.values().forEach(Stats::reset);
+        for(Stats result: received_msgs.values())
+            result.reset();
         total_received_msgs.set(0);
         last_interval=0;
     }
@@ -359,9 +365,9 @@ public class MPerfRpc extends ReceiverAdapter {
             System.out.println(config_change.attr_name + "=" + attr_value);
             log_interval=num_msgs / 10;
             receive_log_interval=num_msgs * Math.max(1, members.size()) / 10;
-            send_options.mode(sync? ResponseMode.GET_ALL : ResponseMode.GET_NONE);
+            send_options.setMode(sync? ResponseMode.GET_ALL : ResponseMode.GET_NONE);
             if(oob)
-                send_options.flags(Message.Flag.OOB);
+                send_options.setFlags(Message.Flag.OOB);
         }
         catch(Exception e) {
             System.err.println("failed applying config change for attr " + attr_name + ": " + e);
@@ -380,7 +386,8 @@ public class MPerfRpc extends ReceiverAdapter {
     }
 
     public void configRsp(Configuration cfg) { // 7
-        cfg.changes.forEach(this::configChange);
+        for(ConfigChange change: cfg.changes)
+            configChange(change);
     }
 
     public void exit() { // 8
@@ -441,11 +448,11 @@ public class MPerfRpc extends ReceiverAdapter {
 
         for(int i=0; i < num_threads; i++) {
             senders[i]=new Sender(barrier, num_msgs_sent, seqno, payload);
-            senders[i].setName("invoker-" + i);
+            senders[i].setName("sender-" + i);
             senders[i].start();
         }
         try {
-            System.out.println("-- invoking " + num_msgs + " msgs");
+            System.out.println("-- sending " + num_msgs + " msgs");
             barrier.await();
         }
         catch(Exception e) {
@@ -499,7 +506,7 @@ public class MPerfRpc extends ReceiverAdapter {
                     if(tmp % log_interval == 0)
                         System.out.println("++ sent " + tmp);
                     if(tmp == num_msgs) { // last message, send SENDING_DONE message
-                        RequestOptions opts=RequestOptions.ASYNC().flags(Message.Flag.RSVP);
+                        RequestOptions opts=RequestOptions.ASYNC().setFlags(Message.Flag.RSVP);
                         invokeRpc(sendingDone, opts, local_addr);
                     }
                 }
@@ -645,23 +652,40 @@ public class MPerfRpc extends ReceiverAdapter {
         }
     }
 
-    protected class MperfMarshaller implements Marshaller {
+    protected class MperfMarshaller implements RpcDispatcher.Marshaller {
 
-        public int estimatedSize(Object arg) {
-            if(arg == null) return 10;
-            if(arg instanceof byte[])
-                return MPerfRpc.this.msg_size;
-            return 50;
+        public Buffer objectToBuffer(Object obj) throws Exception {
+            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(msg_size + 100);
+            boolean is_mc=obj instanceof MethodCall;
+            out.writeBoolean(is_mc);
+            if(!is_mc)
+                Util.objectToStream(obj, out);
+            else {
+                MethodCall mc=(MethodCall)obj;
+                out.writeShort(mc.getId());
+                Object[] args=mc.getArgs();
+                int num_args=args == null? 0 : args.length;
+                out.writeShort(num_args);
+                for(int i=0; i < num_args; i++)
+                    Util.objectToStream(args[i], out);
+            }
+            return out.getBuffer();
         }
 
-        public void objectToStream(Object obj, DataOutput out) throws Exception {
-            Util.objectToStream(obj, out);
-        }
+        public Object objectFromBuffer(byte[] buf, int offset, int length) throws Exception {
+            DataInput in=new ByteArrayDataInputStream(buf, offset, length);
+            if(!in.readBoolean())
+                return Util.objectFromStream(in);
 
-        public Object objectFromStream(DataInput in) throws Exception {
-            return Util.objectFromStream(in);
+            short id=in.readShort();
+            short num_args=in.readShort();
+            Object[] args=num_args > 0? new Object[num_args] : null;
+            if(args != null) {
+                for(int i=0; i < args.length; i++)
+                    args[i]=Util.objectFromStream(in);
+            }
+            return new MethodCall(id, args);
         }
-
     }
 
 

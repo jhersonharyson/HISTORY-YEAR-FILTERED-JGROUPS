@@ -1,5 +1,7 @@
 package org.jgroups.protocols;
 
+import org.jgroups.Event;
+import org.jgroups.Global;
 import org.jgroups.Message;
 import org.jgroups.annotations.Property;
 import org.jgroups.util.ByteArrayDataInputStream;
@@ -26,7 +28,7 @@ public class BPING extends PING implements Runnable {
     @Property(description="Target address for broadcasts. This should be restricted to the local subnet, e.g. 192.168.1.255")
     protected String dest="255.255.255.255";
 
-    @Property(description="Port for discovery packets")
+    @Property(description="Port for discovery packets", systemProperty=Global.BPING_BIND_PORT)
     protected int bind_port=8555;
 
     @Property(description="Sends discovery packets to ports 8555 to (8555+port_range)")
@@ -73,9 +75,6 @@ public class BPING extends PING implements Runnable {
             }
         }
 
-        if (null == sock)
-            throw new RuntimeException("failed to open a port in range [" + bind_port + " - " + (bind_port+port_range) + "]");
-
         sock.setBroadcast(true);
         startReceiver();
         super.start();
@@ -104,7 +103,7 @@ public class BPING extends PING implements Runnable {
         try {
             if(msg.getSrc() == null)
                 msg.setSrc(local_addr);
-            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream((int)msg.size());
+            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(128);
             msg.writeTo(out);
             for(int i=bind_port; i <= bind_port+port_range; i++) {
                 DatagramPacket packet=new DatagramPacket(out.buffer(), 0, out.position(), dest_addr, i);
@@ -130,7 +129,7 @@ public class BPING extends PING implements Runnable {
                 inp=new ByteArrayDataInputStream(packet.getData(), packet.getOffset(), packet.getLength());
                 Message msg=new Message();
                 msg.readFrom(inp);
-                up(msg);
+                up(new Event(Event.MSG, msg));
             }
             catch(SocketException socketEx) {
                 break;

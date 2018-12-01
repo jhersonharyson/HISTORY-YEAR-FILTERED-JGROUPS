@@ -2,15 +2,18 @@
 package org.jgroups.tests;
 
 
-import org.jgroups.*;
+import org.jgroups.Global;
+import org.jgroups.JChannel;
+import org.jgroups.Message;
+import org.jgroups.ReceiverAdapter;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.Util;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.DataProvider;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.io.Serializable;
@@ -19,46 +22,47 @@ import java.util.List;
 
 
 /**
- * Class to test fragmentation. It uses ProtocolTester to assemble a minimal stack which only consists of
+ * Class to test FRAG protocol. It uses ProtocolTester to assemble a minimal stack which only consists of
  * FRAG and LOOPBACK (messages are immediately resent up the stack). Sends NUM_MSGS with MSG_SIZE size down
  * the stack, they should be received as well.
  *
  * @author Bela Ban
  */
-@Test(groups=Global.FUNCTIONAL,singleThreaded=true,dataProvider="fragProvider")
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class FragTest {
     public static final long NUM_MSGS  =   1000;
     public static final int  MSG_SIZE  = 100000;
     public static final int  FRAG_SIZE =  24000;
 
-    protected JChannel a, b;
+    protected JChannel ch;
 
-    @DataProvider
-    static Object[][] fragProvider() {
-        return new Object[][] {
-          {FRAG2.class},
-          {FRAG3.class}
-        };
+
+    private static Message createMessage(int size) {
+        byte[] buf=new byte[size];
+        for(int i=0; i < buf.length; i++) buf[i]=(byte)'x';
+        return new Message(null, buf);
     }
 
-    @Test(enabled=false)
-    protected void setup(Class<? extends Protocol> frag_clazz) throws Exception {
-        a=createChannel("A", frag_clazz).connect("FragTest");
-        b=createChannel("B", frag_clazz).connect("FragTest");
-        Util.waitUntilAllChannelsHaveSameView(10000, 1000, a,b);
+
+    @BeforeClass
+    protected void setup() throws Exception {
+        ch=createChannel();
+        ch.connect("FragTestCluster");
     }
 
-    @AfterMethod protected void destroy() {Util.close(b, a);}
+    @AfterClass
+    protected void destroy() {
+        Util.close(ch);
+    }
 
 
 
-    public void testRegularMessages(Class<? extends Protocol> frag_clazz) throws Exception {
-        setup(frag_clazz);
+    public void testRegularMessages() throws Exception {
         FragReceiver frag_receiver=new FragReceiver();
-        b.setReceiver(frag_receiver);
+        ch.setReceiver(frag_receiver);
         for(int i=1; i <= NUM_MSGS; i++) {
-            Message big_msg=createMessage(b.getAddress(), MSG_SIZE);
-            a.send(big_msg);
+            Message big_msg=createMessage(MSG_SIZE);
+            ch.send(big_msg);
         }
         System.out.println("-- done sending");
         for(int i=0; i < 10; i++) {
@@ -71,16 +75,15 @@ public class FragTest {
     }
 
 
-    public void testMessagesWithOffsets(Class<? extends Protocol> frag_clazz) throws Exception {
-        setup(frag_clazz);
+    public void testMessagesWithOffsets() throws Exception {
         FragReceiver frag_receiver=new FragReceiver();
-        b.setReceiver(frag_receiver);
+        ch.setReceiver(frag_receiver);
         byte[] big_buffer=new byte[(int)(MSG_SIZE * NUM_MSGS)];
         int offset=0;
 
         for(int i=1; i <= NUM_MSGS; i++) {
-            Message big_msg=new Message(b.getAddress(), big_buffer, offset, MSG_SIZE);
-            a.send(big_msg);
+            Message big_msg=new Message(null, null, big_buffer, offset, MSG_SIZE);
+            ch.send(big_msg);
             offset+=MSG_SIZE;
         }
 
@@ -99,21 +102,19 @@ public class FragTest {
      * which generates 3 fragments, followed by a final small message. Verifies that the message assembled from the
      * 3 fragments is in the right place and not at the end. JIRA=https://issues.jboss.org/browse/JGRP-1648
      */
-    public void testMessageOrdering(Class<? extends Protocol> frag_clazz) throws Exception {
-        setup(frag_clazz);
+    public void testMessageOrdering() throws Exception {
         OrderingReceiver receiver=new OrderingReceiver();
-        b.setReceiver(receiver);
-        Protocol frag=a.getProtocolStack().findProtocol(FRAG3.class, FRAG2.class, FRAG.class);
+        ch.setReceiver(receiver);
+        Protocol frag=ch.getProtocolStack().findProtocol(FRAG2.class, FRAG.class);
         frag.setValue("frag_size", 5000);
 
-        Address dest=b.getAddress();
-        Message first=new Message(dest, new Payload(1, 10));
-        Message big=new Message(dest, new Payload(2, 12000)); // frag_size is 5000, so FRAG{2} will create 3 fragments
-        Message last=new Message(dest, new Payload(3, 10));
+        Message first=new Message(null, new Payload(1, 10));
+        Message big=new Message(null, new Payload(2, 12000)); // frag_size is 5000, so FRAG{2} will create 3 fragments
+        Message last=new Message(null, new Payload(3, 10));
 
-        a.send(first);
-        a.send(big);
-        a.send(last);
+        ch.send(first);
+        ch.send(big);
+        ch.send(last);
 
         List<Integer> list=receiver.getList();
         for(int i=0; i < 10; i++) {
@@ -130,28 +131,7 @@ public class FragTest {
         }
     }
 
-    /* Tests https://issues.jboss.org/browse/JGRP-1973 */
-    public void testFragCorruption(Class<? extends Protocol> frag_clazz) throws Exception {
-        setup(frag_clazz);
-        final String message="this message is supposed to get fragmented by A and defragmented by B";
-        byte[] buf=message.getBytes();
-        MyReceiver r=new MyReceiver();
-        b.setReceiver(r);
-        a.send(new Message(b.getAddress(), buf).setFlag(Message.Flag.OOB));
-        for(int i=0; i < 10; i++) {
-            String msg=r.msg();
-            if(msg != null) {
-                assert msg.equals(message) : String.format("expected \"%s\" but received \"%s\"\n", message, msg);
-                System.out.printf("received \"%s\"\n", msg);
-                break;
-            }
-            Util.sleep(500);
-        }
-    }
-
-    protected static JChannel createChannel(String name, Class<? extends Protocol> clazz) throws Exception {
-        Protocol frag_prot=clazz.newInstance();
-        frag_prot.setValue("frag_size", FRAG_SIZE);
+    protected static JChannel createChannel() throws Exception {
         return new JChannel(new SHARED_LOOPBACK(),
                             new SHARED_LOOPBACK_PING(),
                             new NAKACK2().setValue("use_mcast_xmit", false),
@@ -160,12 +140,7 @@ public class FragTest {
                             new GMS().setValue("print_local_addr", false),
                             new UFC(),
                             new MFC(),
-                            frag_prot)
-          .name(name);
-    }
-
-    protected static Message createMessage(Address dest, int size) {
-        return new Message(dest, new byte[size]);
+                            new FRAG2().setValue("frag_size", FRAG_SIZE));
     }
 
 
@@ -189,16 +164,8 @@ public class FragTest {
         public List<Integer> getList() {return list;}
 
         public void receive(Message msg) {
-            Payload payload=msg.getObject();
+            Payload payload=(Payload)msg.getObject();
             list.add(payload.seqno);
-        }
-    }
-
-    protected static class MyReceiver extends ReceiverAdapter {
-        protected String msg;
-        public String msg() {return msg;}
-        public void receive(Message msg) {
-            this.msg=new String(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
         }
     }
 

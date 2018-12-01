@@ -15,8 +15,8 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.EOFException;
 import java.util.*;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * STATE_TRANSFER protocol based on byte array transfer. A state request is sent
@@ -31,8 +31,8 @@ import java.util.function.Supplier;
 @MBean(description="State transfer protocol based on byte array transfer")
 public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<Address> {
     protected long                           start, stop; // to measure state transfer time
-    protected final LongAdder                num_state_reqs=new LongAdder();
-    protected final LongAdder                num_bytes_sent=new LongAdder();
+    protected final AtomicInteger            num_state_reqs=new AtomicInteger(0);
+    protected final AtomicLong               num_bytes_sent=new AtomicLong(0);
     protected double                         avg_state_size=0;
     protected Address                        local_addr;
     protected volatile View                  view;
@@ -46,8 +46,8 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
 
     protected boolean                        flushProtocolInStack=false;
 
-    @ManagedAttribute public long   getNumberOfStateRequests()  {return num_state_reqs.sum();}
-    @ManagedAttribute public long   getNumberOfStateBytesSent() {return num_bytes_sent.sum();}
+    @ManagedAttribute public int    getNumberOfStateRequests()  {return num_state_reqs.get();}
+    @ManagedAttribute public long   getNumberOfStateBytesSent() {return num_bytes_sent.get();}
     @ManagedAttribute public double getAverageStateSize()       {return avg_state_size;}
 
     public List<Integer> requiredDownServices() {
@@ -56,8 +56,8 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
 
     public void resetStats() {
         super.resetStats();
-        num_state_reqs.reset();
-        num_bytes_sent.reset();
+        num_state_reqs.set(0);
+        num_bytes_sent.set(0);
         avg_state_size=0;
     }
 
@@ -108,13 +108,37 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
 
     public Object up(Event evt) {
         switch(evt.getType()) {
+
+            case Event.MSG:
+                Message msg=(Message)evt.getArg();
+                StateHeader hdr=(StateHeader)msg.getHeader(this.id);
+                if(hdr == null)
+                    break;
+
+                switch(hdr.type) {
+                    case StateHeader.STATE_REQ:
+                        state_requesters.add(msg.getSrc());
+                        break;
+                    case StateHeader.STATE_RSP:
+                        handleStateRsp(hdr.getDigest(), msg.getSrc(), msg.getBuffer());
+                        break;
+                    case StateHeader.STATE_EX:
+                        closeHoleFor(msg.getSrc());
+                        handleException((Throwable)msg.getObject());
+                        break;
+                    default:
+                        log.error("%s: type %s not known in StateHeader", local_addr, hdr.type);
+                        break;
+                }
+                return null;
+
             case Event.TMP_VIEW:
             case Event.VIEW_CHANGE:
-                handleViewChange(evt.getArg());
+                handleViewChange((View)evt.getArg());
                 break;
 
             case Event.CONFIG:
-                Map<String,Object> config=evt.getArg();
+                Map<String,Object> config=(Map<String,Object>)evt.getArg();
                 if(config != null && config.containsKey("state_transfer"))
                     log.error(Util.getMessage("ProtocolStackCannotContainTwoStateTransferProtocolsRemoveEitherOneOfThem"));
                 break;
@@ -122,45 +146,17 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
         return up_prot.up(evt);
     }
 
-    public Object up(Message msg) {
-        StateHeader hdr=msg.getHeader(this.id);
-        if(hdr == null)
-            return up_prot.up(msg);
-
-        switch(hdr.type) {
-            case StateHeader.STATE_REQ:
-                state_requesters.add(msg.getSrc());
-                break;
-            case StateHeader.STATE_RSP:
-                handleStateRsp(hdr.getDigest(), msg.getSrc(), msg.getBuffer());
-                break;
-            case StateHeader.STATE_EX:
-                closeHoleFor(msg.getSrc());
-                try {
-                    handleException(Util.exceptionFromBuffer(msg.getRawBuffer(), msg.getOffset(), msg.getLength()));
-                }
-                catch(Throwable t) {
-                    log.error("failed deserializaing state exception", t);
-                }
-                break;
-            default:
-                log.error("%s: type %s not known in StateHeader", local_addr, hdr.type);
-                break;
-        }
-        return null;
-    }
-
     public Object down(Event evt) {
         switch(evt.getType()) {
 
             case Event.TMP_VIEW:
             case Event.VIEW_CHANGE:
-                handleViewChange(evt.getArg());
+                handleViewChange((View)evt.getArg());
                 break;
 
             case Event.GET_STATE:
                 Address target;
-                StateTransferInfo info=evt.getArg();
+                StateTransferInfo info=(StateTransferInfo)evt.getArg();
                 if(info.target == null) {
                     target=determineCoordinator();
                 }
@@ -187,19 +183,19 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
                     down_prot.down(new Event(Event.SUSPEND_STABLE, new Long(info.timeout)));*/
                     waiting_for_state_response=true;
                     start=System.currentTimeMillis();
-                    down_prot.down(state_req);
+                    down_prot.down(new Event(Event.MSG, state_req));
                 }
                 return null; // don't pass down any further !         
 
             case Event.CONFIG:
-                Map<String,Object> config=evt.getArg();
+                Map<String,Object> config=(Map<String,Object>)evt.getArg();
                 if(config != null && config.containsKey("flush_supported")) {
                     flushProtocolInStack=true;
                 }
                 break;
 
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=evt.getArg();
+                local_addr=(Address)evt.getArg();
                 break;
         }
 
@@ -329,23 +325,22 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
         byte[] state=rsp.state;
 
         if(stats) {
-            num_state_reqs.increment();
+            num_state_reqs.incrementAndGet();
             if(state != null)
-                num_bytes_sent.add(state.length);
+                num_bytes_sent.addAndGet(state.length);
             avg_state_size=num_bytes_sent.doubleValue() / num_state_reqs.doubleValue();
         }
 
         Message state_rsp=new Message(requester, state).putHeader(this.id, new StateHeader(StateHeader.STATE_RSP, digest));
         log.trace("%s: sending state to %s (size=%s)", local_addr, state_rsp.getDest(), Util.printBytes(state != null? state.length : 0));
-        down_prot.down(state_rsp);
+        down_prot.down(new Event(Event.MSG,state_rsp));
     }
 
 
     protected void sendException(Address requester, Throwable exception) {
         try {
-            Message ex_msg=new Message(requester).setBuffer(Util.exceptionToBuffer(exception))
-              .putHeader(getId(), new StateHeader(StateHeader.STATE_EX));
-            down(ex_msg);
+            Message ex_msg=new Message(requester, exception).putHeader(getId(), new StateHeader(StateHeader.STATE_EX));
+            down(new Event(Event.MSG, ex_msg));
         }
         catch(Throwable t) {
             log.error("%s: failed sending exception %s to %s", local_addr, exception, requester);
@@ -409,12 +404,6 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
             this.my_digest=digest;
         }
 
-        public short getMagicId() {return 57;}
-
-        public Supplier<? extends Header> create() {
-            return StateHeader::new;
-        }
-
         public int getType() {
             return type;
         }
@@ -448,10 +437,10 @@ public class STATE_TRANSFER extends Protocol implements ProcessingQueue.Handler<
 
         public void readFrom(DataInput in) throws Exception {
             type=in.readByte();
-            my_digest=Util.readStreamable(Digest::new, in);
+            my_digest=(Digest)Util.readStreamable(Digest.class, in);
         }
 
-        public int serializedSize() {
+        public int size() {
             int retval=Global.BYTE_SIZE; // type
             retval+=Global.BYTE_SIZE;    // presence byte for my_digest
             if(my_digest != null)

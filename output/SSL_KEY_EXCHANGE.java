@@ -157,7 +157,7 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     public Object up(Event evt) {
         if(evt.getType() == Event.CONFIG) {
             if(bind_addr == null) {
-                Map<String,Object> config=evt.getArg();
+                Map<String,Object> config=(Map<String,Object>)evt.getArg();
                 bind_addr=(InetAddress)config.get("bind_addr");
             }
             return up_prot.up(evt);
@@ -216,7 +216,6 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     }
 
 
-
     protected void accept() {
         try(SSLSocket client_sock=(SSLSocket)srv_sock.accept()) {
             client_sock.setEnabledCipherSuites(client_sock.getSupportedCipherSuites());
@@ -261,7 +260,16 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
             log.debug("%s: becoming keyserver; creating server socket", local_addr);
             srv_sock=createServerSocket();
             srv_sock_handler=new Runner(getThreadFactory(), SSL_KEY_EXCHANGE.class.getSimpleName() + "-runner",
-                                        this::accept, () -> Util.close(srv_sock));
+                                        new Runnable() {
+                                            public void run() {
+                                                accept();
+                                            }
+                                        },
+                                        new Runnable() {
+                                            public void run() {
+                                                Util.close(srv_sock);
+                                            }
+                                        });
             srv_sock_handler.start();
             log.debug("SSL server socket listening on %s", srv_sock.getLocalSocketAddress());
         }
@@ -302,6 +310,8 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
         SSLSocketFactory sslSocketFactory=ctx.getSocketFactory();
 
         IpAddress dest=(IpAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, target));
+
+
         SSLSocket sock=null;
         for(int i=0; i < port_range; i++) {
             try {

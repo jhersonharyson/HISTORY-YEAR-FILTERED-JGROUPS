@@ -42,6 +42,7 @@ public class NioConnection extends Connection {
     protected Buffers             recv_buf=new Buffers(4).add(ByteBuffer.allocate(cookie.length));
     protected Reader              reader=new Reader(); // manages the thread which receives messages
     protected long                reader_idle_time=20000; // number of ms a reader can be idle (no msgs) until it terminates
+    protected boolean             connected;
 
 
 
@@ -63,6 +64,7 @@ public class NioConnection extends Connection {
         this.server=server;
         setSocketParameters(this.channel.socket());
         channel.configureBlocking(false);
+        this.connected=channel.isConnected();
         send_buf=new Buffers(server.maxSendBuffers() *2); // space for actual bufs and length bufs!
         this.peer_addr=server.usePeerConnections()? null /* read by first receive() */
           : new IpAddress((InetSocketAddress)channel.getRemoteAddress());
@@ -79,8 +81,11 @@ public class NioConnection extends Connection {
 
     @Override
     public boolean isConnected() {
-        return channel != null && channel.isConnected();
+        return connected;
     }
+
+    @Override
+    public boolean isConnectionPending() {return channel != null && channel.isConnectionPending();}
 
     @Override
     public boolean isExpired(long now) {
@@ -110,6 +115,7 @@ public class NioConnection extends Connection {
     public long          readerIdleTime()              {return reader_idle_time;}
     public NioConnection readerIdleTime(long t)        {this.reader_idle_time=t; return this;}
     public boolean       readerRunning()               {return this.reader.isRunning();}
+    public NioConnection connected(boolean c)          {connected=c; return this;}
 
     public synchronized void registerSelectionKey(int interest_ops) {
         if(key == null)
@@ -140,6 +146,7 @@ public class NioConnection extends Connection {
             this.key=server.register(channel, SelectionKey.OP_CONNECT | SelectionKey.OP_READ, this);
             if(Util.connect(channel, destAddr) && channel.finishConnect()) {
                 clearSelectionKey(SelectionKey.OP_CONNECT);
+                this.connected=channel.isConnected();
             }
             if(send_local_addr)
                 sendLocalAddress(server.localAddress());
@@ -224,10 +231,12 @@ public class NioConnection extends Connection {
         ByteBuffer msg;
         Receiver   receiver=server.receiver();
 
-        if(peer_addr == null && server.usePeerConnections() && (peer_addr=readPeerAddress()) != null) {
-            recv_buf=new Buffers(2).add(ByteBuffer.allocate(Global.INT_SIZE), null);
-            server.addConnection(peer_addr, this);
-            return true;
+        if(peer_addr == null && server.usePeerConnections()) {
+            if((peer_addr=readPeerAddress()) != null) {
+                recv_buf=new Buffers(2).add(ByteBuffer.allocate(Global.INT_SIZE), null);
+                server.addConnection(peer_addr, this);
+                return true;
+            }
         }
 
         if((msg=recv_buf.readLengthAndData(channel)) == null)
@@ -250,6 +259,7 @@ public class NioConnection extends Connection {
             Util.close(channel, reader);
         }
         finally {
+            connected=false;
             send_lock.unlock();
         }
     }
@@ -266,11 +276,12 @@ public class NioConnection extends Connection {
                              status(), recv_buf.get(1) != null? recv_buf.get(1).capacity() : 0, readerRunning());
     }
 
-    protected String status() {
-        if(channel == null) return "n/a";
-        if(isConnected())   return "connected";
-        if(channel.isConnectionPending()) return "connection pending";
-        if(isOpen())        return "open";
+    @Override
+    public String status() {
+        if(channel == null)       return "n/a";
+        if(isConnected())         return "connected";
+        if(isConnectionPending()) return "connection pending";
+        if(isOpen())              return "open";
         return "closed";
     }
 
@@ -317,12 +328,10 @@ public class NioConnection extends Connection {
 
     protected void sendLocalAddress(Address local_addr) throws Exception {
         try {
-            int addr_size=local_addr.serializedSize();
-            int expected_size=cookie.length + Global.SHORT_SIZE*2 + addr_size;
-            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size +2);
+            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream();
             out.write(cookie, 0, cookie.length);
             out.writeShort(Version.version);
-            out.writeShort(addr_size); // address size
+            out.writeShort(local_addr.size()); // address size
             local_addr.writeTo(out);
             ByteBuffer buf=out.getByteBuffer();
             send(buf, false);
@@ -386,7 +395,7 @@ public class NioConnection extends Connection {
 
     protected enum State {reading, waiting_to_terminate, done}
 
-    protected class Reader implements Runnable, Closeable {
+    protected class Reader implements Runnable, Closeable, Condition {
         protected final Lock       lock=new ReentrantLock(); // to synchronize receive() and state transitions
         protected State            state=State.done;
         protected volatile boolean data_available=true;
@@ -409,6 +418,7 @@ public class NioConnection extends Connection {
         }
 
         public void    close() throws IOException {stop();}
+        public boolean isMet()                    {return data_available;}
         public boolean isRunning()                {Thread tmp=thread; return tmp != null && tmp.isAlive();}
 
         /** Called by the selector when data is ready to be read from the SocketChannel */
@@ -446,7 +456,6 @@ public class NioConnection extends Connection {
         }
 
         protected void _run() {
-            final Condition is_data_available=() -> data_available;
             while(running) {
                 for(;;) { // try to receive as many msgs as possible, until no more msgs are ready or the conn is closed
                     try {
@@ -465,7 +474,7 @@ public class NioConnection extends Connection {
                 state(State.waiting_to_terminate);
                 data_available=false;
                 register(SelectionKey.OP_READ); // now we might get receive() calls again
-                if(data_available_cond.waitFor(is_data_available, server.readerIdleTime(), TimeUnit.MILLISECONDS))
+                if(data_available_cond.waitFor(this, server.readerIdleTime(), TimeUnit.MILLISECONDS))
                     state(State.reading);
                 else {
                     state(State.done);

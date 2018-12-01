@@ -53,7 +53,8 @@ public class FRAG extends Protocol {
     
     /** Contains a frag table per sender, this way it becomes easier to clean up if a sender leaves or crashes */
     private final FragmentationList  fragment_list=new FragmentationList();
-    private final AtomicInteger      curr_id=new AtomicInteger(1);
+
+    private AtomicInteger            curr_id=new AtomicInteger(1);
     private final List<Address>      members=new ArrayList<>(11);
     
     
@@ -96,57 +97,61 @@ public class FRAG extends Protocol {
      */
     public Object down(Event evt) {
         switch(evt.getType()) {
+
+            case Event.MSG:
+                Message msg=(Message)evt.getArg();
+                long size=msg.size();
+                num_sent_msgs++;
+                if(size > frag_size) {
+                    if(log.isTraceEnabled()) {
+                        StringBuilder sb=new StringBuilder("message size is ");
+                        sb.append(size).append(", will fragment (frag_size=").append(frag_size).append(')');
+                        log.trace(sb.toString());
+                    }
+                    fragment(msg, size);  // Fragment and pass down
+                    return null;
+                }
+                break;
+
             case Event.VIEW_CHANGE:
-                handleViewChange(evt.getArg());
+                handleViewChange((View)evt.getArg());
                 break;
         }
+
         return down_prot.down(evt);  // Pass on to the layer below us
     }
 
-    public Object down(Message msg) {
-        long size=msg.size();
-        num_sent_msgs++;
-        if(size > frag_size) {
-            if(log.isTraceEnabled()) {
-                StringBuilder sb=new StringBuilder("message size is ");
-                sb.append(size).append(", will fragment (frag_size=").append(frag_size).append(')');
-                log.trace(sb.toString());
-            }
-            fragment(msg, size);  // Fragment and pass down
-            return null;
-        }
-        return down_prot.down(msg);
-    }
 
     /**
      * If event is a message, if it is fragmented, re-assemble fragments into big message and pass up the stack.
      */
     public Object up(Event evt) {
         switch(evt.getType()) {
-              case Event.VIEW_CHANGE:
-                handleViewChange(evt.getArg());
+            case Event.MSG:
+                Message msg=(Message)evt.getArg();
+                FragHeader hdr=(FragHeader)msg.getHeader(this.id);
+                if(hdr != null) { // needs to be defragmented
+                    Message assembled_msg=unfragment(msg, hdr);
+                    if(assembled_msg != null)
+                        up_prot.up(new Event(Event.MSG, assembled_msg));
+                    return null;
+                }
+                else {
+                    num_received_msgs++;
+                }
+                break;
+
+            case Event.VIEW_CHANGE:
+                handleViewChange((View)evt.getArg());
                 break;
         }
-        return up_prot.up(evt); // Pass up to the layer above us by default
-    }
 
-    public Object up(Message msg) {
-        FragHeader hdr=msg.getHeader(this.id);
-        if(hdr != null) { // needs to be defragmented
-            Message assembled_msg=unfragment(msg, hdr);
-            if(assembled_msg != null)
-                up_prot.up(assembled_msg);
-            return null;
-        }
-        else {
-            num_received_msgs++;
-        }
-        return up_prot.up(msg);
+        return up_prot.up(evt); // Pass up to the layer above us by default
     }
 
     public void up(MessageBatch batch) {
         for(Message msg: batch) {
-            FragHeader hdr=msg.getHeader(this.id);
+            FragHeader hdr=(FragHeader)msg.getHeader(this.id);
             if(hdr != null) { // needs to be defragmented
                 Message assembled_msg=unfragment(msg,hdr);
                 if(assembled_msg != null)
@@ -212,10 +217,11 @@ public class FRAG extends Protocol {
             }
 
             for(int i=0; i < num_frags; i++) {
-                Message frag_msg=new Message(dest, fragments[i]).src(src);
+                Message frag_msg=new Message(dest, src, fragments[i]);
                 FragHeader hdr=new FragHeader(frag_id, i, num_frags);
                 frag_msg.putHeader(this.id, hdr);
-                down_prot.down(frag_msg);
+                Event evt=new Event(Event.MSG, frag_msg);
+                down_prot.down(evt);
             }
         }
         catch(Exception e) {

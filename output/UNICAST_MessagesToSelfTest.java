@@ -35,6 +35,8 @@ public class UNICAST_MessagesToSelfTest {
     @DataProvider
     static Object[][] configProvider() {
         return new Object[][] {
+          {new UNICAST()},
+          {new UNICAST2()},
           {new UNICAST3()}
         };
     }
@@ -69,14 +71,23 @@ public class UNICAST_MessagesToSelfTest {
     }
 
     protected static JChannel createChannel(Protocol unicast, DISCARD discard) throws Exception {
-        JChannel ch=new JChannel(new SHARED_LOOPBACK(),
-                                 new SHARED_LOOPBACK_PING(),
-                                 new NAKACK2().setValue("use_mcast_xmit", false),
-                                 unicast,
-                                 new STABLE().setValue("max_bytes", 50000),
-                                 new GMS().setValue("print_local_addr", false));
+        JChannel ch=new JChannel(false);
+        ProtocolStack stack=new ProtocolStack();
+        ch.setProtocolStack(stack);
+        stack.addProtocol(new SHARED_LOOPBACK());
+
         if(discard != null)
-            ch.getProtocolStack().insertProtocol(discard, ProtocolStack.Position.ABOVE, SHARED_LOOPBACK.class);
+            stack.addProtocol(discard);
+
+        if(unicast instanceof UNICAST2)
+            unicast.setValue("stable_interval", 3000);
+        
+        stack.addProtocol(new SHARED_LOOPBACK_PING())
+          .addProtocol(new NAKACK2().setValue("use_mcast_xmit", false))
+          .addProtocol(unicast)
+          .addProtocol(new STABLE().setValue("max_bytes", 50000))
+          .addProtocol(new GMS().setValue("print_local_addr", false));
+        stack.init();
         return ch;
     }
 
@@ -88,7 +99,7 @@ public class UNICAST_MessagesToSelfTest {
         final Receiver r=new Receiver();
         ch.setReceiver(r);
         for(int i=1; i <= NUM_MSGS; i++) {
-            Message msg=new Message(a1, createPayload(SIZE, i)); // unicast message
+            Message msg=new Message(a1, null, createPayload(SIZE, i)); // unicast message
             ch.send(msg);
             if(i % 1000 == 0)
                 System.out.println("==> " + i);

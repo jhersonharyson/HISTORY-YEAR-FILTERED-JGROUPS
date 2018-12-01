@@ -73,7 +73,12 @@ public class Relayer {
         try {
             for(RelayConfig.BridgeConfig bridge_config: bridge_configs) {
                 Bridge bridge=new Bridge(bridge_config.createChannel(), bridge_config.getClusterName(), bridge_name,
-                                         () -> new SiteUUID(UUID.randomUUID(), null, my_site_id));
+                                         new AddressGenerator() {
+                                             public Address generateAddress() {
+                                                 UUID uuid=UUID.randomUUID();
+                                                 return new SiteUUID(uuid, null, my_site_id);
+                                             }
+                                         });
                 bridges.add(bridge);
             }
             for(Bridge bridge: bridges)
@@ -98,7 +103,8 @@ public class Relayer {
      */
     public void stop() {
         done=true;
-        bridges.forEach(Bridge::stop);
+        for(Bridge bridge: bridges)
+            bridge.stop();
         bridges.clear();
     }
 
@@ -134,9 +140,11 @@ public class Relayer {
         List<Route> retval=new ArrayList<>(routes.size());
         for(List<Route> list: routes.values()) {
             for(Route route: list) {
-                if(route != null && !isExcluded(route, excluded_sites)) {
-                    retval.add(route);
-                    break;
+                if(route != null) {
+                    if(!isExcluded(route, excluded_sites)) {
+                        retval.add(route);
+                        break;
+                    }
                 }
             }
         }
@@ -147,7 +155,7 @@ public class Relayer {
         if(cluster_name == null || bridges == null)
             return null;
         for(Bridge bridge: bridges) {
-            if(Objects.equals(bridge.cluster_name, cluster_name))
+            if(bridge.cluster_name != null && bridge.cluster_name.equals(cluster_name))
                 return bridge.view;
         }
         return null;
@@ -192,7 +200,7 @@ public class Relayer {
         }
 
         public void receive(Message msg) {
-            RELAY2.Relay2Header hdr=msg.getHeader(relay.getId());
+            RELAY2.Relay2Header hdr=(RELAY2.Relay2Header)msg.getHeader(relay.getId());
             if(hdr == null) {
                 log.warn("received a message without a relay header; discarding it");
                 return;
@@ -209,7 +217,7 @@ public class Relayer {
             RouteStatusListener       listener=relay.getRouteStatusListener();
             Map<String,List<Address>> tmp=extract(new_view);
             Set<String>               down=listener != null? new HashSet<>(routes.keySet()) : null;
-            Set<String>               up=listener != null? new HashSet<>() : null;
+            Set<String>               up=listener != null? new HashSet<String>() : null;
 
             if(listener != null)
                 down.removeAll(tmp.keySet());
@@ -220,7 +228,7 @@ public class Relayer {
                 String key=entry.getKey();
                 List<Address> val=entry.getValue();
                 if(!routes.containsKey(key)) {
-                    routes.put(key, new ArrayList<>());
+                    routes.put(key, new ArrayList<Route>());
                     if(up != null)
                         up.add(key);
                 }
@@ -235,8 +243,10 @@ public class Relayer {
                 }
 
                 // Add routes that aren't yet in the routing table:
-                val.stream().filter(addr -> !contains(list, addr))
-                  .forEach(addr -> list.add(new Route(addr, channel, relay, log).stats(stats)));
+                for(Address addr: val) {
+                    if(!contains(list, addr))
+                        list.add(new Route(addr, channel, relay, log).stats(stats));
+                }
 
                 if(list.isEmpty()) {
                     routes.remove(key);
@@ -256,7 +266,11 @@ public class Relayer {
         }
 
         protected boolean contains(List<Route> routes, Address addr) {
-            return routes.stream().anyMatch(route -> route.siteMaster().equals(addr));
+            for(Route route: routes) {
+                if(route.siteMaster().equals(addr))
+                    return true;
+            }
+            return false;
         }
 
         /** Returns a map containing the site keys and addresses as values */

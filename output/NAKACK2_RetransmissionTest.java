@@ -93,10 +93,10 @@ public class NAKACK2_RetransmissionTest {
 
     /** Makes NAKACK2 receive a message with the given seqno */
     protected void injectMessage(long seqno) {
-        Message msg=new Message(null).src(B);
+        Message msg=new Message(null, B, null);
         NakAckHeader2 hdr=NakAckHeader2.createMessageHeader(seqno);
         msg.putHeader(ID, hdr);
-        nak.up(msg);
+        nak.up(new Event(Event.MSG, msg));
     }
 
     /** Asserts that the delivered messages are in the same order than the expected seqnos and then clears the list */
@@ -129,30 +129,36 @@ public class NAKACK2_RetransmissionTest {
         public void               clear() {xmit_requests.clear();}
         public void               init() throws Exception {}
         public boolean            supportsMulticasting() {return true;}
-        public void               sendMulticast(byte[] data, int offset, int length) throws Exception {}
+        public void               sendMulticast(AsciiString cluster_name, byte[] data, int offset, int length) throws Exception {}
         public void               sendUnicast(PhysicalAddress dest, byte[] data, int offset, int length) throws Exception {}
         public String             getInfo() {return null;}
         protected PhysicalAddress getPhysicalAddress() {return null;}
 
-
-        public Object down(Message msg) {
-            NakAckHeader2 hdr=msg.getHeader(ID);
-            if(hdr == null)
-                return null;
-            if(hdr.getType() == NakAckHeader2.XMIT_REQ) {
-                SeqnoList seqnos=null;
-                try {
-                    seqnos=Util.streamableFromBuffer(SeqnoList::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-                    System.out.println("-- XMIT-REQ: request retransmission for " + seqnos);
-                    for(Long seqno: seqnos)
-                        xmit_requests.add(seqno);
-                }
-                catch(Exception e) {
-                    e.printStackTrace();
-                }
+        public Object down(Event evt) {
+            switch(evt.getType()) {
+                case Event.MSG:
+                    Message msg=(Message)evt.getArg();
+                    NakAckHeader2 hdr=(NakAckHeader2)msg.getHeader(ID);
+                    if(hdr == null)
+                        break;
+                    if(hdr.getType() == NakAckHeader2.XMIT_REQ) {
+                        SeqnoList seqnos=null;
+                        try {
+                            seqnos=Util.streamableFromBuffer(SeqnoList.class, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                            System.out.println("-- XMIT-REQ: request retransmission for " + seqnos);
+                            for(Long seqno: seqnos)
+                                xmit_requests.add(seqno);
+                        }
+                        catch(Exception e) {
+                            e.printStackTrace();
+                        }
+                    }
+                    break;
             }
             return null;
         }
+
+
     }
 
     protected static class MockProtocol extends Protocol {
@@ -161,19 +167,24 @@ public class NAKACK2_RetransmissionTest {
         public List<Long> getMsgs() {return msgs;}
         public void       clear()   {msgs.clear();}
 
-        public Object up(Message msg) {
-            NakAckHeader2 hdr=msg.getHeader(ID);
-            if(hdr != null && hdr.getType() == NakAckHeader2.MSG) {
-                long seqno=hdr.getSeqno();
-                msgs.add(seqno);
-                System.out.println("-- received message #" + seqno + " from " + msg.getSrc());
+        public Object up(Event evt) {
+            switch(evt.getType()) {
+                case Event.MSG:
+                    Message msg=(Message)evt.getArg();
+                    NakAckHeader2 hdr=(NakAckHeader2)msg.getHeader(ID);
+                    if(hdr != null && hdr.getType() == NakAckHeader2.MSG) {
+                        long seqno=hdr.getSeqno();
+                        msgs.add(seqno);
+                        System.out.println("-- received message #" + seqno + " from " + msg.getSrc());
+                    }
+                    break;
             }
             return null;
         }
 
         public void up(MessageBatch batch) {
             for(Message msg: batch) {
-                NakAckHeader2 hdr=msg.getHeader(ID);
+                NakAckHeader2 hdr=(NakAckHeader2)msg.getHeader(ID);
                 if(hdr != null && hdr.getType() == NakAckHeader2.MSG) {
                     long seqno=hdr.getSeqno();
                     msgs.add(seqno);

@@ -24,7 +24,6 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.BiPredicate;
 
 /**
  * Encrypts and decrypts communication in JGroups by using a secret key distributed to all cluster members by the
@@ -55,7 +54,7 @@ import java.util.function.BiPredicate;
  */
 @MBean(description="Asymmetric encryption protocol. The secret key for encryption and decryption of messages is fetched " +
   "from a key server (the coordinator) via asymmetric encryption")
-public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
+public class ASYM_ENCRYPT extends EncryptBase {
     protected static final short                   GMS_ID=ClassConfigurator.getProtocolId(GMS.class);
 
     @Property(description="When a member leaves, change the secret key, preventing old members from eavesdropping")
@@ -85,41 +84,18 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
     protected long                                 min_time_between_key_requests=2000;
     protected volatile long                        last_key_request;
 
-    // use registerBypasser to add code that is called to check if a message should bypass ASYM_ENCRYPT
-    protected volatile List<BiPredicate<Message,Boolean>> bypassers;
-
     protected ResponseCollectorTask<Boolean>       key_requesters;
 
 
-    @Override
-    public void setKeyStoreEntry(KeyStore.PrivateKeyEntry entry) {
-        this.key_pair = new KeyPair(entry.getCertificate().getPublicKey(), entry.getPrivateKey());
-    }
-
-    public KeyPair      keyPair()                  {return key_pair;}
-    public Cipher       asymCipher()               {return asym_cipher;}
-    public Address      keyServerAddr()            {return key_server_addr;}
-    public ASYM_ENCRYPT keyServerAddr(Address ks)  {this.key_server_addr=ks; return this;}
+    public KeyPair      keyPair()                         {return key_pair;}
+    public Cipher       asymCipher()                      {return asym_cipher;}
+    public Address      keyServerAddr()                   {return key_server_addr;}
+    public ASYM_ENCRYPT keyServerAddr(Address key_srv)    {this.key_server_addr=key_srv; return this;}
+    public long         minTimeBetweenKeyRequests()       {return min_time_between_key_requests;}
+    public ASYM_ENCRYPT minTimeBetweenKeyRequests(long t) {this.min_time_between_key_requests=t; return this;}
 
     public List<Integer> providedDownServices() {
         return Arrays.asList(Event.GET_SECRET_KEY, Event.SET_SECRET_KEY);
-    }
-
-    public synchronized ASYM_ENCRYPT registerBypasser(BiPredicate<Message,Boolean> bypasser) {
-        if(bypasser != null) {
-            if(bypassers == null)
-                bypassers=new ArrayList<>();
-            bypassers.add(bypasser);
-        }
-        return this;
-    }
-
-    public synchronized ASYM_ENCRYPT unregisterBypasser(BiPredicate<Message,Boolean> bypasser) {
-        if(bypasser != null && bypassers != null) {
-            if(bypassers.remove(bypasser) && bypassers.isEmpty())
-                bypassers=null;
-        }
-        return this;
     }
 
     @ManagedAttribute(description="Number of received messages currently queued")
@@ -159,14 +135,30 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
         super.stop();
     }
 
-    public Object down(Message msg) {
-        if(skip(msg) || bypass(msg, false))
-            return down_prot.down(msg);
-        return super.down(msg);
+    public Object down(Event evt) {
+        if(evt.type() == Event.MSG) {
+            Message msg=evt.arg();
+            if(skip(msg))
+                return down_prot.down(evt);
+        }
+        return super.down(evt);
     }
 
     public Object up(Event evt) {
         switch(evt.type()) {
+            case Event.MSG:
+                Message msg=evt.arg();
+                if(skip(msg)) {
+                    GMS.GmsHeader hdr=(GMS.GmsHeader)msg.getHeader(GMS_ID);
+                    Address key_server=getCoordinator(msg, hdr);
+                    if(key_server != null) {
+                        if(this.key_server_addr == null)
+                            this.key_server_addr=key_server;
+                        sendKeyRequest(key_server);
+                    }
+                    return up_prot.up(evt);
+                }
+                break;
             case Event.GET_SECRET_KEY:
                 return new Tuple<>(secret_key, sym_version);
             case Event.SET_SECRET_KEY:
@@ -179,37 +171,16 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
                 }
                 return null;
         }
-        return up_prot.up(evt);
-    }
-
-    public Object up(Message msg) {
-        if(bypass(msg, true))
-            return up_prot.up(msg);
-        if(skip(msg)) {
-            GMS.GmsHeader hdr=msg.getHeader(GMS_ID);
-            Address key_server=getCoordinator(msg, hdr);
-            if(key_server != null) {
-                if(this.key_server_addr == null)
-                    this.key_server_addr=key_server;
-                sendKeyRequest(key_server);
-            }
-            return up_prot.up(msg);
-        }
-        return super.up(msg);
+        return super.up(evt);
     }
 
     public void up(MessageBatch batch) {
         for(Message msg: batch) {
-            if(bypass(msg, false)) {
-                up_prot.up(msg);
-                batch.remove(msg);
-                continue;
-            }
             if(skip(msg)) {
                 try {
-                    up_prot.up(msg);
+                    up_prot.up(new Event(Event.MSG, msg));
                     batch.remove(msg);
-                    GMS.GmsHeader hdr=msg.getHeader(GMS_ID);
+                    GMS.GmsHeader hdr=(GMS.GmsHeader)msg.getHeader(GMS_ID);
                     Address key_server=getCoordinator(msg, hdr);
                     if(key_server != null)
                         sendKeyRequest(key_server);
@@ -218,7 +189,7 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
                     log.error("failed passing up message from %s: %s, ex=%s", msg.src(), msg.printHeaders(), t);
                 }
             }
-            EncryptHeader hdr=msg.getHeader(this.id);
+            EncryptHeader hdr=(EncryptHeader)msg.getHeader(this.id);
             if(hdr != null && hdr.type != EncryptHeader.ENCRYPT) {
                 handleUpEvent(msg,hdr);
                 batch.remove(msg);
@@ -233,7 +204,7 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
         switch(hdr.getType()) {
             case GMS.GmsHeader.JOIN_RSP:
                 try {
-                    JoinRsp join_rsp=Util.streamableFromBuffer(JoinRsp::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                    JoinRsp join_rsp=Util.streamableFromBuffer(JoinRsp.class, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
                     View new_view=join_rsp != null? join_rsp.getView() : null;
                     return new_view != null? new_view.getCoord() : null;
                 }
@@ -259,7 +230,7 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
     /** Checks if a message needs to be encrypted/decrypted. Join and merge requests/responses don't need to be
      * encrypted as they're authenticated by {@link AUTH} */
     protected static boolean skip(Message msg) {
-        GMS.GmsHeader hdr=msg.getHeader(GMS_ID);
+        GMS.GmsHeader hdr=(GMS.GmsHeader)msg.getHeader(GMS_ID);
         if(hdr == null)
             return false;
         switch(hdr.getType()) {
@@ -272,17 +243,6 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
             case GMS.GmsHeader.INSTALL_MERGE_VIEW:
             case GMS.GmsHeader.GET_DIGEST_REQ:
             case GMS.GmsHeader.GET_DIGEST_RSP:
-                return true;
-        }
-        return false;
-    }
-
-    protected boolean bypass(Message msg, boolean up) {
-        List<BiPredicate<Message,Boolean>> tmp=bypassers;
-        if(tmp == null)
-            return false;
-        for(BiPredicate<Message,Boolean> pred: tmp) {
-            if(pred.test(msg, up))
                 return true;
         }
         return false;
@@ -384,17 +344,15 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
 
     /** Generates the public/private key pair from the init params */
     protected void initKeyPair() throws Exception {
-        if (this.key_pair == null) {
-            // generate keys according to the specified algorithms
-            // generate publicKey and Private Key
-            KeyPairGenerator KpairGen=null;
-            if(provider != null && !provider.trim().isEmpty())
-                KpairGen=KeyPairGenerator.getInstance(getAlgorithm(asym_algorithm), provider);
-            else
-                KpairGen=KeyPairGenerator.getInstance(getAlgorithm(asym_algorithm));
-            KpairGen.initialize(asym_keylength,new SecureRandom());
-            key_pair=KpairGen.generateKeyPair();
-        }
+        // generate keys according to the specified algorithms
+        // generate publicKey and Private Key
+        KeyPairGenerator KpairGen=null;
+        if(provider != null && !provider.trim().isEmpty())
+            KpairGen=KeyPairGenerator.getInstance(getAlgorithm(asym_algorithm), provider);
+        else
+            KpairGen=KeyPairGenerator.getInstance(getAlgorithm(asym_algorithm));
+        KpairGen.initialize(asym_keylength,new SecureRandom());
+        key_pair=KpairGen.generateKeyPair();
 
         // set up the Cipher to decrypt secret key responses encrypted with our key
         if(provider != null && !provider.trim().isEmpty())
@@ -427,10 +385,12 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
 
                 if(!targets.isEmpty()) {  // https://issues.jboss.org/browse/JGRP-2203
                     key_requesters=new ResponseCollectorTask<Boolean>(targets)
-                      .setPeriodicTask(c -> {
-                          Message msg=new Message(null).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK)
-                            .putHeader(id, new EncryptHeader(EncryptHeader.NEW_KEYSERVER, sym_version));
-                          down_prot.down(msg);
+                      .setPeriodicTask(new ResponseCollectorTask.Consumer<ResponseCollectorTask<Boolean>>() {
+                          public void accept(ResponseCollectorTask<Boolean> t) {
+                              Message msg=new Message(null).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK)
+                                .putHeader(id, new EncryptHeader(EncryptHeader.NEW_KEYSERVER, sym_version));
+                              down_prot.down(new Event(Event.MSG, msg));
+                          }
                       })
                       .start(getTransport().getTimer(), 0, key_server_interval);
                 }
@@ -490,7 +450,7 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
         Message newMsg=new Message(source, encryptedKey).src(local_addr)
           .putHeader(this.id, new EncryptHeader(EncryptHeader.SECRET_KEY_RSP, symVersion()));
         log.debug("%s: sending secret key response to %s (version: %s)", local_addr, source, Util.byteArrayToHexString(sym_version));
-        down_prot.down(newMsg);
+        down_prot.down(new Event(Event.MSG, newMsg));
     }
 
     /** Encrypts the current secret key with the requester's public key (the requester will decrypt it with its private key) */
@@ -526,12 +486,12 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
                   local_addr, key_server, Util.byteArrayToHexString(sym_version));
         Message newMsg=new Message(key_server, key_pair.getPublic().getEncoded()).src(local_addr)
           .putHeader(this.id,new EncryptHeader(EncryptHeader.SECRET_KEY_REQ, null));
-        down_prot.down(newMsg);
+        down_prot.down(new Event(Event.MSG,newMsg));
     }
 
     protected void sendNewKeyserverAck(Address dest) {
         Message msg=new Message(dest).putHeader(id, new EncryptHeader(EncryptHeader.NEW_KEYSERVER_ACK, null));
-        down_prot.down(msg);
+        down_prot.down(new Event(Event.MSG, msg));
     }
 
 
@@ -596,7 +556,7 @@ public class ASYM_ENCRYPT extends Encrypt<KeyStore.PrivateKeyEntry> {
             try {
                 Message decrypted_msg=decryptMessage(null, queued_msg.copy());
                 if(decrypted_msg != null)
-                    up_prot.up(decrypted_msg);
+                    up_prot.up(new Event(Event.MSG, decrypted_msg));
             }
             catch(Exception ex) {
                 log.error("failed decrypting message from %s: %s", queued_msg.src(), ex);

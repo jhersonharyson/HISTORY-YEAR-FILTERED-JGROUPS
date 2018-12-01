@@ -9,7 +9,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.util.stream.Stream;
+import java.util.Arrays;
 
 /**
  * Tests use cases for {@link SYM_ENCRYPT} described in https://issues.jboss.org/browse/JGRP-2021.
@@ -41,10 +41,10 @@ public class SYM_ENCRYPT_Test extends EncryptTest {
 
     /** Same as above, but don't encrypt entire message, but just payload */
     public void testRegularMessageReceptionWithNullMessagesEncryptOnlyPayload() throws Exception {
-        Stream.of(a,b,c).forEach(ch -> {
-            Encrypt encr=ch.getProtocolStack().findProtocol(Encrypt.class);
+        for(JChannel ch: Arrays.asList(a,b,c)) {
+            EncryptBase encr=(EncryptBase)ch.getProtocolStack().findProtocol(EncryptBase.class);
             encr.encryptEntireMessage(false);
-        });
+        }
         super.testRegularMessageReceptionWithNullMessages();
     }
 
@@ -53,10 +53,10 @@ public class SYM_ENCRYPT_Test extends EncryptTest {
     }
 
     public void testRegularMessageReceptionWithEmptyMessagesEncryptOnlyPayload() throws Exception {
-        Stream.of(a,b,c).forEach(ch -> {
-            Encrypt encr=ch.getProtocolStack().findProtocol(Encrypt.class);
+        for(JChannel ch: Arrays.asList(a,b,c)) {
+            EncryptBase encr=(EncryptBase)ch.getProtocolStack().findProtocol(EncryptBase.class);
             encr.encryptEntireMessage(false);
-        });
+        };
         super.testRegularMessageReceptionWithEmptyMessages();
     }
 
@@ -90,6 +90,7 @@ public class SYM_ENCRYPT_Test extends EncryptTest {
 
 
 
+
     protected JChannel create(String name) throws Exception {
         JChannel ch=new JChannel(Util.getTestStack()).name(name);
         SYM_ENCRYPT encrypt;
@@ -99,7 +100,7 @@ public class SYM_ENCRYPT_Test extends EncryptTest {
         catch(Throwable t) {
             encrypt=createENCRYPT("defaultStore.keystore", DEF_PWD);
         }
-        ch.getProtocolStack().insertProtocol(encrypt, ProtocolStack.Position.BELOW, NAKACK2.class);
+        ch.getProtocolStack().insertProtocol(encrypt, ProtocolStack.BELOW, NAKACK2.class);
         return ch;
     }
 

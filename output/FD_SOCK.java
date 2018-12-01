@@ -3,6 +3,7 @@ package org.jgroups.protocols;
 import org.jgroups.*;
 import org.jgroups.annotations.*;
 import org.jgroups.blocks.LazyRemovalCache;
+import org.jgroups.conf.PropertyConverters;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
@@ -14,7 +15,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Supplier;
 
 
 /**
@@ -59,6 +59,10 @@ public class FD_SOCK extends Protocol implements Runnable {
     @Property(description="Used to map the internal port (bind_port) to an external port. Only used if > 0",
               systemProperty=Global.EXTERNAL_PORT,writable=false)
     protected int         external_port;
+
+    @Property(name="bind_interface", converter=PropertyConverters.BindInterface.class,
+        description="The interface (NIC) which should be used by this transport", dependsUpon="bind_addr")
+    protected String      bind_interface_str=null;
 
     @Property(description="Timeout for getting socket cache from coordinator")
     protected long        get_cache_timeout=1000;
@@ -229,8 +233,83 @@ public class FD_SOCK extends Protocol implements Runnable {
 
     public Object up(Event evt) {
         switch(evt.getType()) {
+
+            case Event.MSG:
+                Message msg=(Message) evt.getArg();
+                FdHeader hdr=(FdHeader)msg.getHeader(this.id);
+                if(hdr == null)
+                    break;  // message did not originate from FD_SOCK layer, just pass up
+
+                switch(hdr.type) {
+
+                    case FdHeader.SUSPECT:
+                        if(hdr.mbrs != null) {
+                            log.trace("%s: received SUSPECT message from %s: suspects=%s", local_addr, msg.getSrc(), hdr.mbrs);
+                            suspect(hdr.mbrs);
+                        }
+                        break;
+
+                    case FdHeader.UNSUSPECT:
+                        if(hdr.mbrs != null) {
+                            log.trace("%s: received UNSUSPECT message from %s: mbrs=%s", local_addr, msg.getSrc(), hdr.mbrs);
+                            for(Address tmp: hdr.mbrs)
+                                unsuspect(tmp);
+                        }
+                        break;
+
+                    // If I have the sock for 'hdr.mbr', return it. Otherwise look it up in my cache and return it
+                    case FdHeader.WHO_HAS_SOCK:
+                        if(local_addr != null && local_addr.equals(msg.getSrc()))
+                            return null; // don't reply to WHO_HAS bcasts sent by me !
+
+                        if(hdr.mbr == null)
+                            return null;
+
+                        log.trace("%s: who-has-sock %s", local_addr, hdr.mbr);
+
+                        // 1. Try my own address, maybe it's me whose socket is wanted
+                        if(local_addr != null && local_addr.equals(hdr.mbr) && srv_sock_addr != null) {
+                            sendIHaveSockMessage(msg.getSrc(), local_addr, srv_sock_addr);  // unicast message to msg.getSrc()
+                            return null;
+                        }
+
+                        // 2. If I don't have it, maybe it is in the cache
+                        IpAddress addr=cache.get(hdr.mbr);
+                        if(addr != null)
+                            sendIHaveSockMessage(msg.getSrc(), hdr.mbr, addr);  // ucast msg
+                        break;
+
+
+                    // Update the cache with the addr:sock_addr entry (if on the same host)
+                    case FdHeader.I_HAVE_SOCK:
+                        if(hdr.mbr == null || hdr.sock_addr == null)
+                            return null;
+
+                        // if(!cache.containsKey(hdr.mbr))
+                        cache.add(hdr.mbr, hdr.sock_addr); // update the cache
+                        log.trace("%s: i-have-sock: %s --> %s (cache is %s)", local_addr, hdr.mbr, hdr.sock_addr, cache);
+
+                        if(ping_dest != null && hdr.mbr.equals(ping_dest))
+                            ping_addr_promise.setResult(hdr.sock_addr);
+                        break;
+
+                    // Return the cache to the sender of this message
+                    case FdHeader.GET_CACHE:
+                        msg=new Message(msg.getSrc()).setFlag(Message.Flag.INTERNAL)
+                          .putHeader(this.id, new FdHeader(FdHeader.GET_CACHE_RSP)).setBuffer(marshal(cache));
+                        down_prot.down(new Event(Event.MSG, msg));
+                        break;
+
+                    case FdHeader.GET_CACHE_RSP:
+                        Map<Address,IpAddress> cachedAddrs=unmarshal(msg.getRawBuffer(),msg.getOffset(),msg.getLength());
+                        if(cachedAddrs != null)
+                            get_cache_promise.setResult(cachedAddrs);
+                        break;
+                }
+                return null;
+
             case Event.CONFIG:
-                Map<String,Object> config=evt.getArg();
+                Map<String,Object> config=(Map<String,Object>)evt.getArg();
                 if(bind_addr == null)
                     bind_addr=(InetAddress)config.get("bind_addr");
                 if(external_addr == null)
@@ -242,78 +321,8 @@ public class FD_SOCK extends Protocol implements Runnable {
                 }
                 break;
         }
-        return up_prot.up(evt);
-    }
 
-
-    public Object up(Message msg) {
-        FdHeader hdr=msg.getHeader(this.id);
-        if(hdr == null)
-            return up_prot.up(msg);  // message did not originate from FD_SOCK layer, just pass up
-
-        switch(hdr.type) {
-
-            case FdHeader.SUSPECT:
-                if(hdr.mbrs != null) {
-                    log.trace("%s: received SUSPECT message from %s: suspects=%s", local_addr, msg.getSrc(), hdr.mbrs);
-                    suspect(hdr.mbrs);
-                }
-                break;
-
-            case FdHeader.UNSUSPECT:
-                if(hdr.mbrs != null) {
-                    log.trace("%s: received UNSUSPECT message from %s: mbrs=%s", local_addr, msg.getSrc(), hdr.mbrs);
-                    hdr.mbrs.forEach(this::unsuspect);
-                }
-                break;
-
-            // If I have the sock for 'hdr.mbr', return it. Otherwise look it up in my cache and return it
-            case FdHeader.WHO_HAS_SOCK:
-                if(Objects.equals(local_addr, msg.getSrc()))
-                    return null; // don't reply to WHO_HAS bcasts sent by me !
-
-                if(hdr.mbr == null)
-                    return null;
-
-                log.trace("%s: who-has-sock %s", local_addr, hdr.mbr);
-
-                // 1. Try my own address, maybe it's me whose socket is wanted
-                if(local_addr != null && local_addr.equals(hdr.mbr) && srv_sock_addr != null) {
-                    sendIHaveSockMessage(msg.getSrc(), local_addr, srv_sock_addr);  // unicast message to msg.getSrc()
-                    return null;
-                }
-
-                // 2. If I don't have it, maybe it is in the cache
-                IpAddress addr=cache.get(hdr.mbr);
-                if(addr != null)
-                    sendIHaveSockMessage(msg.getSrc(), hdr.mbr, addr);  // ucast msg
-                break;
-
-            // Update the cache with the addr:sock_addr entry (if on the same host)
-            case FdHeader.I_HAVE_SOCK:
-                if(hdr.mbr == null || hdr.sock_addr == null)
-                    return null;
-                cache.add(hdr.mbr, hdr.sock_addr); // update the cache
-                log.trace("%s: i-have-sock: %s --> %s (cache is %s)", local_addr, hdr.mbr, hdr.sock_addr, cache);
-
-                if(ping_dest != null && hdr.mbr.equals(ping_dest))
-                    ping_addr_promise.setResult(hdr.sock_addr);
-                break;
-
-            // Return the cache to the sender of this message
-            case FdHeader.GET_CACHE:
-                msg=new Message(msg.getSrc()).setFlag(Message.Flag.INTERNAL)
-                  .putHeader(this.id, new FdHeader(FdHeader.GET_CACHE_RSP)).setBuffer(marshal(cache));
-                down_prot.down(msg);
-                break;
-
-            case FdHeader.GET_CACHE_RSP:
-                Map<Address,IpAddress> cachedAddrs=unmarshal(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-                if(cachedAddrs != null)
-                    get_cache_promise.setResult(cachedAddrs);
-                break;
-        }
-        return null;
+        return up_prot.up(evt);                                        // pass up to the layer above us
     }
 
 
@@ -321,7 +330,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         switch(evt.getType()) {
 
             case Event.UNSUSPECT:
-                broadcastUnuspectMessage(evt.getArg());
+                broadcastUnuspectMessage((Address)evt.getArg());
                 break;
 
             case Event.CONNECT:
@@ -344,11 +353,11 @@ public class FD_SOCK extends Protocol implements Runnable {
                 break;
 
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=evt.getArg();
+                local_addr=(Address) evt.getArg();
                 break;
 
             case Event.VIEW_CHANGE:
-                View v=evt.getArg();
+                View v=(View) evt.getArg();
                 final List<Address> new_mbrs=v.getMembers();
 
                 members=new_mbrs;  // volatile write will ensure all reads after this see the new membership
@@ -404,9 +413,11 @@ public class FD_SOCK extends Protocol implements Runnable {
         while(pingable_mbrs != null && !pingable_mbrs.isEmpty()) {
             regular_sock_close=false;
             ping_dest=determinePingDest(); // gets the neighbor to our right
+
+            log.debug("%s: ping_dest is %s, pingable_mbrs=%s", local_addr, ping_dest, pingable_mbrs);
+
             if(ping_dest == null || !isPingerThreadRunning())
                 break;
-            log.debug("%s: pingable_mbrs=%s, ping_dest=%s", local_addr, pingable_mbrs, ping_dest);
 
             IpAddress ping_addr=fetchPingAddress(ping_dest);
             if(ping_addr == null) {
@@ -416,7 +427,8 @@ public class FD_SOCK extends Protocol implements Runnable {
             }
 
             if(!setupPingSocket(ping_addr) && isPingerThreadRunning()) {
-                // log.debug("%s: failed connecting to to %s", local_addr, ping_dest);
+                // covers use cases #7 and #8 in ManualTests.txt
+                log.debug("%s: could not create socket to %s (pinger thread is %s)", local_addr, ping_dest, isPingerThreadRunning()? "running" : "not running");
                 broadcastSuspectMessage(ping_dest);
                 pingable_mbrs.remove(ping_dest);
                 continue;
@@ -430,7 +442,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                     int c=ping_input.read();
                     switch(c) {
                         case NORMAL_TERMINATION:
-                            log.debug("%s: %s closed socket gracefully", local_addr, ping_dest);
+                            log.debug("%s: peer %s closed socket gracefully", local_addr, ping_dest);
                             pingable_mbrs.remove(ping_dest);
                             break;
                         case ABNORMAL_TERMINATION: // -1 means EOF
@@ -466,18 +478,23 @@ public class FD_SOCK extends Protocol implements Runnable {
             return;
 
         suspects.remove(local_addr);
-        List<Address> eligible_mbrs=new ArrayList<>();
-        suspects.forEach(suspect -> suspect_history.add(String.format("%s: %s", new Date(), suspect)));
-
+        final List<Address> eligible_mbrs=new ArrayList<>();
+        for(Address suspect: suspects)
+            suspect_history.add(String.format("%s: %s", new Date(), suspect));
         suspected_mbrs.addAll(suspects);
         eligible_mbrs.addAll(this.members);
         eligible_mbrs.removeAll(suspected_mbrs);
 
         // Check if we're coord, then send up the stack
-        if(local_addr != null && !eligible_mbrs.isEmpty() && local_addr.equals(eligible_mbrs.get(0))) {
-            log.debug("%s: suspecting %s", local_addr, suspected_mbrs);
-            up_prot.up(new Event(Event.SUSPECT, suspected_mbrs));
-            down_prot.down(new Event(Event.SUSPECT, suspected_mbrs));
+        if(local_addr != null && !eligible_mbrs.isEmpty()) {
+            Address first=eligible_mbrs.get(0);
+            if(local_addr.equals(first)) {
+                log.debug("%s: suspecting %s", local_addr, suspected_mbrs);
+                for(Address suspect: suspected_mbrs) {
+                    up_prot.up(new Event(Event.SUSPECT, suspect));
+                    down_prot.down(new Event(Event.SUSPECT, suspect));
+                }
+            }
         }
     }
 
@@ -491,7 +508,7 @@ public class FD_SOCK extends Protocol implements Runnable {
     protected void handleSocketClose(Exception ex) {
         teardownPingSocket();     // make sure we have no leftovers
         if(!regular_sock_close) { // only suspect if socket was not closed regularly (by interruptPingerThread())
-            log.debug("%s: %s closed socket (%s)", local_addr, ping_dest, (ex != null ? ex.toString() : "eof"));
+            log.debug("%s: peer %s closed socket (%s)", local_addr, ping_dest, (ex != null ? ex.toString() : "eof"));
             broadcastSuspectMessage(ping_dest);
             pingable_mbrs.remove(ping_dest);
         }
@@ -577,6 +594,8 @@ public class FD_SOCK extends Protocol implements Runnable {
 
 
 
+
+
     protected void startServerSocket() throws Exception {
         srv_sock=Util.createServerSocket(getSocketFactory(),
                                          "jgroups.fd_sock.srv_sock", bind_addr, start_port, start_port+port_range); // grab a random unused port above 10000
@@ -610,8 +629,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         }
         catch(Throwable ex) {
             if(!shuttin_down)
-                log.debug("%s: failed connecting to %s: %s",
-                          local_addr, ping_dest != null? ping_dest : dest, ex.getMessage());
+                log.warn("%s: creating the client socket to %s failed: %s", local_addr, dest, ex.getMessage());
             return false;
         }
         finally {
@@ -657,7 +675,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 }
                 Message msg=new Message(coord).setFlag(Message.Flag.INTERNAL)
                   .putHeader(this.id, new FdHeader(FdHeader.GET_CACHE));
-                down_prot.down(msg);
+                down_prot.down(new Event(Event.MSG, msg));
                 Map<Address,IpAddress> result=get_cache_promise.getResult(get_cache_timeout);
                 if(result != null) {
                     cache.addAll(result);
@@ -682,12 +700,14 @@ public class FD_SOCK extends Protocol implements Runnable {
     protected void broadcastSuspectMessage(Address suspected_mbr) {
         if(suspected_mbr == null) return;
 
-        log.debug("%s: broadcasting suspect(%s)", local_addr, suspected_mbr);
+        log.debug("%s: suspecting %s", local_addr, suspected_mbr);
 
         // 1. Send a SUSPECT message right away; the broadcast task will take some time to send it (sleeps first)
-        FdHeader hdr=new FdHeader(FdHeader.SUSPECT).mbrs(Collections.singleton(suspected_mbr));
+        FdHeader hdr=new FdHeader(FdHeader.SUSPECT);
+        hdr.mbrs=new HashSet<>(1);
+        hdr.mbrs.add(suspected_mbr);
         Message suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(this.id, hdr);
-        down_prot.down(suspect_msg);
+        down_prot.down(new Event(Event.MSG, suspect_msg));
 
         // 2. Add to broadcast task and start latter (if not yet running). The task will end when
         //    suspected members are removed from the membership
@@ -702,12 +722,14 @@ public class FD_SOCK extends Protocol implements Runnable {
     protected void broadcastUnuspectMessage(Address mbr) {
         if(mbr == null) return;
 
-        log.debug("%s: broadcasting unsuspect(%s)", local_addr, mbr);
+        log.debug("%s: unsuspecting %s", local_addr, mbr);
 
         // 1. Send a SUSPECT message right away; the broadcast task will take some time to send it (sleeps first)
-        FdHeader hdr=new FdHeader(FdHeader.UNSUSPECT).mbrs(Collections.singleton(mbr));
+        FdHeader hdr=new FdHeader(FdHeader.UNSUSPECT);
+        hdr.mbrs=new HashSet<>(1);
+        hdr.mbrs.add(mbr);
         Message suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(this.id, hdr);
-        down_prot.down(suspect_msg);
+        down_prot.down(new Event(Event.MSG, suspect_msg));
     }
 
 
@@ -721,7 +743,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         FdHeader hdr=new FdHeader(FdHeader.I_HAVE_SOCK, mbr);
         hdr.sock_addr=addr;
         msg.putHeader(this.id, hdr);
-        down_prot.down(msg);
+        down_prot.down(new Event(Event.MSG, msg));
     }
 
 
@@ -746,7 +768,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         for(Address dest: Arrays.asList(mbr, null)) {
             Message msg=new Message(dest).setFlag(Message.Flag.INTERNAL)
               .putHeader(this.id, new FdHeader(FdHeader.WHO_HAS_SOCK, mbr));
-            down_prot.down(msg);
+            down_prot.down(new Event(Event.MSG, msg));
             if((ret=ping_addr_promise.getResult(500)) != null)
                 return ret;
             if(!isPingerThreadRunning()) return null;
@@ -792,7 +814,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                 addrs=new HashMap<>(size);
                 for(int i=0; i < size; i++) {
                     Address key=Util.readAddress(in);
-                    IpAddress val=Util.readStreamable(IpAddress::new, in);
+                    IpAddress val=(IpAddress)Util.readStreamable(IpAddress.class, in);
                     addrs.put(key, val);
                 }
             }
@@ -859,18 +881,11 @@ public class FD_SOCK extends Protocol implements Runnable {
             this.sock_addr=sock_addr;
         }
 
-
-        public short getMagicId() {
-            return 51;
+        public FdHeader(byte type, Set<Address> mbrs) {
+            this.type=type;
+            this.mbrs=mbrs;
         }
 
-        public Supplier<? extends Header> create() {
-            return FdHeader::new;
-        }
-
-        public FdHeader mbrs(Set<Address> members) {
-            this.mbrs=members; return this;
-        }
 
         public String toString() {
             StringBuilder sb=new StringBuilder();
@@ -898,7 +913,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         }
 
 
-        public int serializedSize() {
+        public int size() {
             int retval=Global.BYTE_SIZE; // type
             retval+=Util.size(mbr);
 
@@ -907,7 +922,7 @@ public class FD_SOCK extends Protocol implements Runnable {
             int ipaddr_size = 0 ;
             ipaddr_size += Global.BYTE_SIZE ;     // presence byte
             if (sock_addr != null)
-              ipaddr_size += sock_addr.serializedSize();  // IpAddress size
+              ipaddr_size += sock_addr.size();  // IpAddress size
             retval += ipaddr_size ;
             retval+=Global.INT_SIZE; // mbrs size
             if(mbrs != null)
@@ -922,18 +937,21 @@ public class FD_SOCK extends Protocol implements Runnable {
             Util.writeStreamable(sock_addr, out);
             int size=mbrs != null? mbrs.size() : 0;
             out.writeInt(size);
-            if(size > 0)
-                for(Address address: mbrs)
+            if(size > 0) {
+                for(Address address: mbrs) {
                     Util.writeAddress(address, out);
+                }
+            }
         }
 
         public void readFrom(DataInput in) throws Exception {
             type=in.readByte();
             mbr=Util.readAddress(in);
-            sock_addr=Util.readStreamable(IpAddress::new, in);
+            sock_addr=(IpAddress)Util.readStreamable(IpAddress.class, in);
             int size=in.readInt();
             if(size > 0) {
-                mbrs=new HashSet<>();
+                if(mbrs == null)
+                    mbrs=new HashSet<>();
                 for(int i=0; i < size; i++)
                     mbrs.add(Util.readAddress(in));
             }
@@ -950,7 +968,8 @@ public class FD_SOCK extends Protocol implements Runnable {
      * as the ring nature of the FD_SOCK protocol always has only 1 client connect to its right-hand-side neighbor.
      */
     protected class ServerSocketHandler implements Runnable {
-        protected Thread                              acceptor;
+        protected Thread acceptor;
+        /** List<ClientConnectionHandler> */
         protected final List<ClientConnectionHandler> clients=new LinkedList<>();
 
 
@@ -976,7 +995,9 @@ public class FD_SOCK extends Protocol implements Runnable {
                 Util.close(srv_sock); // this will terminate thread, peer will receive SocketException (socket close)
 
             synchronized(clients) {
-                clients.forEach(client -> client.stopThread(graceful));
+                for(ClientConnectionHandler handler: clients) {
+                    handler.stopThread(graceful);
+                }
                 clients.clear();
             }
             acceptor=null;
@@ -993,7 +1014,7 @@ public class FD_SOCK extends Protocol implements Runnable {
                               local_addr, client_sock.getInetAddress(), client_sock.getPort());
                     client_sock.setKeepAlive(keep_alive);
                     ClientConnectionHandler client_conn_handler=new ClientConnectionHandler(client_sock, clients);
-                    Thread t = getThreadFactory().newThread(client_conn_handler, "FD_SOCK conn-handler");
+                    Thread t = getThreadFactory().newThread(client_conn_handler, "FD_SOCK client connection handler");
                     t.setDaemon(true);
 
                     synchronized(clients) {
@@ -1013,8 +1034,9 @@ public class FD_SOCK extends Protocol implements Runnable {
 
     /** Handles a client connection; multiple client can connect at the same time */
     protected static class ClientConnectionHandler implements Runnable {
-        Socket                              client_sock;
+        Socket                              client_sock=null;
         InputStream                         in;
+        final Object                        mutex=new Object();
         final List<ClientConnectionHandler> clients;
 
         protected ClientConnectionHandler(Socket client_sock, List<ClientConnectionHandler> clients) {
@@ -1022,26 +1044,33 @@ public class FD_SOCK extends Protocol implements Runnable {
             this.clients=clients;
         }
 
-        protected synchronized void stopThread(boolean graceful) {
-            if(client_sock != null) {
-                try {
-                    if(graceful) {
-                        OutputStream out=client_sock.getOutputStream();
-                        out.write(NORMAL_TERMINATION);
-                        out.flush();
+        protected void stopThread(boolean graceful) {
+            synchronized(mutex) {
+                if(client_sock != null) {
+                    try {
+                        if(graceful) {
+                            OutputStream out=client_sock.getOutputStream();
+                            out.write(NORMAL_TERMINATION);
+                            out.flush();
+                        }
+                        closeClientSocket();
                     }
-                    Util.close(client_sock);
-                    client_sock=null;
-                }
-                catch(Throwable t) {
+                    catch(Throwable t) {
+                    }
                 }
             }
         }
 
+        protected void closeClientSocket() {
+            synchronized(mutex) {
+                Util.close(client_sock);
+                client_sock=null;
+            }
+        }
 
         public void run() {
             try {
-                synchronized(this) {
+                synchronized(mutex) {
                     if(client_sock == null)
                         return;
                     in=client_sock.getInputStream();
@@ -1056,10 +1085,8 @@ public class FD_SOCK extends Protocol implements Runnable {
             }
             finally {
                 Socket sock=client_sock; // PATCH: avoid race condition causing NPE
-                if (sock != null && !sock.isClosed()) {
-                    Util.close(sock);
-                    client_sock=null;
-                }
+                if (sock != null && !sock.isClosed())
+                    closeClientSocket();
                 synchronized(clients) {
                     clients.remove(this);
                 }
@@ -1075,8 +1102,8 @@ public class FD_SOCK extends Protocol implements Runnable {
      * any longer. Then the task terminates.
      */
     protected class BroadcastTask implements Runnable {
-        protected final Set<Address>    suspects=new HashSet<>();
-        protected Future<?>             future;
+        final Set<Address>    suspects=new HashSet<>();
+        Future<?>             future;
 
 
         /** Adds a suspected member. Starts the task if not yet running */
@@ -1110,8 +1137,7 @@ public class FD_SOCK extends Protocol implements Runnable {
         protected void startTask() {
             if(future == null || future.isDone()) {
                 try {
-                    future=timer.scheduleWithFixedDelay(this, suspect_msg_interval, suspect_msg_interval, TimeUnit.MILLISECONDS,
-                                                        getTransport() instanceof TCP);
+                    future=timer.scheduleWithFixedDelay(this, suspect_msg_interval, suspect_msg_interval, TimeUnit.MILLISECONDS);
                 }
                 catch(RejectedExecutionException e) {
                     log.warn("%s: task %s was rejected as timer thread pool is shutting down", local_addr, this);
@@ -1150,10 +1176,12 @@ public class FD_SOCK extends Protocol implements Runnable {
                     stopTask();
                     return;
                 }
-                hdr=new FdHeader(FdHeader.SUSPECT).mbrs(new HashSet<>(suspects));
+
+                hdr=new FdHeader(FdHeader.SUSPECT);
+                hdr.mbrs=new HashSet<>(suspects);
             }
             Message suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(id, hdr); // mcast SUSPECT to all members
-            down_prot.down(suspect_msg);
+            down_prot.down(new Event(Event.MSG, suspect_msg));
         }
 
         public String toString() {

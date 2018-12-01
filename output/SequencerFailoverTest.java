@@ -145,7 +145,7 @@ public class SequencerFailoverTest extends BMNGRunner {
         discard.setDiscardAll(true);
         ProtocolStack stack=a.getProtocolStack();
         TP transport=stack.getTransport();
-        stack.insertProtocol(discard,  ProtocolStack.Position.ABOVE, transport.getClass());
+        stack.insertProtocol(discard,  ProtocolStack.ABOVE, transport.getClass());
         
         MySender[] senders=new MySender[num_senders];
         for(int i=0; i < senders.length; i++) {
@@ -209,24 +209,26 @@ public class SequencerFailoverTest extends BMNGRunner {
         MyReceiver rb=new MyReceiver("B"), rc=new MyReceiver("C");
         b.setReceiver(rb); c.setReceiver(rc);
 
-        new Thread(() -> {
-            Util.sleep(3000);
-            System.out.println("** killing A");
-            try {
-                Util.shutdown(a);
+        new Thread() {
+            public void run() {
+                Util.sleep(3000);
+                System.out.println("** killing A");
+                try {
+                    Util.shutdown(a);
+                }
+                catch(Exception e) {
+                    System.err.println("failed shutting down channel " + a.getAddress() + ", exception=" + e);
+                }
+                System.out.println("** A killed");
+                injectSuspectEvent(a.getAddress(), b, c);
+                a=null;
             }
-            catch(Exception e) {
-                System.err.println("failed shutting down channel " + a.getAddress() + ", exception=" + e);
-            }
-            System.out.println("** A killed");
-            injectSuspectEvent(a.getAddress(), b, c);
-            a=null;
-        }).start();
+        }.start();
 
         final Address sender=channel.getAddress();
         for(int i=1; i <= NUM_MSGS; i++) {
             Util.sleep(300);
-            channel.send(new Message(null, i));
+            channel.send(new Message(null, null,i));
             System.out.print("[" + sender + "] -- messages sent: " + i + "/" + NUM_MSGS + "\r");
         }
         System.out.println("");
@@ -254,9 +256,9 @@ public class SequencerFailoverTest extends BMNGRunner {
 
     /** Injects SUSPECT event(suspected_mbr) into channels */
     protected static void injectSuspectEvent(Address suspected_mbr, JChannel ... channels) {
-        Event evt=new Event(Event.SUSPECT, Collections.singletonList(suspected_mbr));
+        Event evt=new Event(Event.SUSPECT, suspected_mbr);
         for(JChannel ch: channels) {
-            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
             if(gms != null)
                 gms.up(evt);
         }
@@ -266,7 +268,7 @@ public class SequencerFailoverTest extends BMNGRunner {
     protected void adjustConfiguration(JChannel ... channels) {
         for(JChannel ch: channels) {
             ch.getProtocolStack().removeProtocol(FD_ALL.class,FD.class,MERGE3.class, VERIFY_SUSPECT.class);
-            SEQUENCER seq=ch.getProtocolStack().findProtocol(SEQUENCER.class);
+            SEQUENCER seq=(SEQUENCER)ch.getProtocolStack().findProtocol(SEQUENCER.class);
             seq.setThreshold(0); // permanent ack-mode
         }
     }
@@ -286,7 +288,7 @@ public class SequencerFailoverTest extends BMNGRunner {
 
         public void receive(Message msg) {
             synchronized(list) {
-                list.add(msg.getObject());
+                list.add((Integer)msg.getObject());
             }
         }
     }

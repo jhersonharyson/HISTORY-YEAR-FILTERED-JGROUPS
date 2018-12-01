@@ -2,8 +2,6 @@
 package org.jgroups.tests;
 
 import org.jgroups.*;
-import org.jgroups.stack.IpAddress;
-import org.jgroups.stack.IpAddressUUID;
 import org.jgroups.util.Bits;
 import org.jgroups.util.*;
 import org.testng.Assert;
@@ -12,51 +10,11 @@ import org.testng.annotations.Test;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
-import java.util.stream.LongStream;
 
 
 @Test(groups=Global.FUNCTIONAL)
 public class UtilTest {
 
-
-    public void testShuffle() {
-        Integer[] array={1,2,3,4,5};
-        System.out.println("array = " + Arrays.toString(array));
-        Util.shuffle(array, 0, array.length);
-        System.out.println("array = " + Arrays.toString(array));
-
-
-        array=new Integer[]{1,2,3,4,5};
-
-        // only elements at indices 0-2 can be modified
-        for(int i=0; i < 100; i++) {
-            Util.shuffle(array, 0, 3);
-            System.out.println("array = " + Arrays.toString(array));
-            assert array[3] == 4 : String.format("element at index %d was supposed to be %d: %s", 3, 4, Arrays.toString(array));
-            assert array[4] == 5 : String.format("element at index %d was supposed to be %d: %s", 4, 5, Arrays.toString(array));
-        }
-    }
-
-    public void testPermutations() {
-        List<Integer> list=Arrays.asList(1,2,3,4);
-        List<List<Integer>> permutations=new ArrayList<>(Util.factorial(list.size()));
-        Util.permute(list, permutations);
-
-        int expected_permutations=Util.factorial(list.size());
-        int permutation_size=permutations.size();
-        AtomicInteger count=new AtomicInteger(1);
-        permutations.forEach(l -> System.out.printf("%-5d: %s\n", count.getAndIncrement(), l));
-
-        assert expected_permutations == permutation_size:
-          String.format("expected %d combinations, got %d\n", expected_permutations, permutation_size);
-
-        Set<List<Integer>> set=new HashSet<>();
-        set.addAll(permutations);
-        assert set.size() == permutations.size();
-    }
 
 
     public static void testGetProperty() {
@@ -97,41 +55,10 @@ public class UtilTest {
         props.setProperty("name", "Bela"); props.setProperty("key", "val");
     }
 
-    public void testOrderedPermutation() {
-        List<String> a=Arrays.asList("A1", "A2", "A3");
-        List<String> b=Arrays.asList("B1", "B2");
-        Collection<List<String>> perms=Util.orderedPermutation(a, b);
-        int cnt=0;
-        for(List<String> perm: perms) {
-            System.out.printf("%d: %s ", ++cnt, perm);
-            if(Util.checkOrder(perm, a, b))
-                System.out.printf("OK\n");
-            else
-                assert false : String.format("%s is not in correct order (a: %s, b: %s)", perm, a, b);
-        }
-    }
-
-    public void testOrder() {
-        List<Integer> perm=Arrays.asList(1,2,4,3,5);
-        List<Integer> l=Arrays.asList(2,3,6);
-        assert !Util.checkOrder(perm, l);
-
-        l=Arrays.asList(1,2,5);
-        assert Util.checkOrder(perm, l);
-
-        l=Arrays.asList(1,2,3);
-        assert Util.checkOrder(perm, l);
-
-        l=Arrays.asList(1,3,2);
-        assert !Util.checkOrder(perm, l);
-    }
-
-
-
     public static void testGetProperty2() {
         String input="foo, bar,  foobar: 1000";
         String result=Util.getProperty(input);
-        assert Objects.equals(result, "1000");
+        assert result != null && result.equals("1000");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
@@ -141,69 +68,32 @@ public class UtilTest {
 
         input="foo, bar,  foobar: 1000";
         result=Util.getProperty(input);
-        assert Objects.equals(result, "900");
+        assert result != null && result.equals("900");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
-        assert Objects.equals(result, "900");
+        assert result != null && result.equals("900");
 
 
         System.setProperty("bar", "500");
         input="foo, bar,  foobar: 1000";
         result=Util.getProperty(input);
-        assert Objects.equals(result, "500");
+        assert result != null && result.equals("500");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
-        assert Objects.equals(result, "500");
+        assert result != null && result.equals("500");
 
 
         System.setProperty("foo", "200");
         input="foo, bar,  foobar: 1000";
         result=Util.getProperty(input);
-        assert Objects.equals(result, "200");
+        assert result != null && result.equals("200");
 
         input="foo, bar,  foobar";
         result=Util.getProperty(input);
-        assert Objects.equals(result, "200");
+        assert result != null && result.equals("200");
     }
-
-    public void testReplaceProperties() {
-        String input="hello ${my.name:Bela}";
-
-        String out=Util.replaceProperties(input, null);
-        System.out.println("out = " + out);
-
-        assert out.equals("hello Bela");
-        Properties props=new Properties();
-        props.put("my.name", "Michelle");
-        out=Util.replaceProperties(input, props);
-        System.out.println("out = " + out);
-        assert out.equals("hello Michelle");
-
-        input="hello \\${my.name:Bela}"; // no replacement as the trailing slash prevents this
-        out=Util.replaceProperties(input, null);
-        System.out.println("out = " + out);
-
-        input=input.replace("\\${", "${");
-        assert out.equals(input);
-
-        input="\\${escape:bla}";
-        out=Util.replaceProperties(input, null);
-        System.out.println("out = " + out);
-
-        input=input.replace("\\${", "${");
-        assert input.equals(out);
-
-
-        input="<UDP bind_addr=\"\\${my.bind_addr:127.0.0.1}\" ... />";
-        out=Util.replaceProperties(input, null);
-        System.out.println("out = " + out);
-
-        input=input.replace("\\${", "${");
-        assert input.equals(out);
-    }
-
 
     public static void testFlags() {
         final byte ONE   =   1;
@@ -254,7 +144,7 @@ public class UtilTest {
         assert !rc;
     }
 
-    public void testPrintBytes() {
+    public static void testPrintBytes() {
         long num;
         String s;
 
@@ -271,12 +161,12 @@ public class UtilTest {
         num=1000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1.00KB", s);
+        Assert.assertEquals("1KB", s);
 
         num=1001;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1.00KB", s);
+        Assert.assertEquals("1KB", s);
 
         num=1010;
         s=Util.printBytes(num);
@@ -291,12 +181,12 @@ public class UtilTest {
         num=10000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("10.00KB", s);
+        Assert.assertEquals("10KB", s);
 
         num=150000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("150.00KB", s);
+        Assert.assertEquals("150KB", s);
 
         num=150023;
         s=Util.printBytes(num);
@@ -306,12 +196,12 @@ public class UtilTest {
         num=1200000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1.20MB", s);
+        Assert.assertEquals("1.2MB", s);
 
         num=150000000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("150.00MB", s);
+        Assert.assertEquals("150MB", s);
 
         num=150030000;
         s=Util.printBytes(num);
@@ -321,7 +211,7 @@ public class UtilTest {
         num=1200000000;
         s=Util.printBytes(num);
         System.out.println(num + " is " + s);
-        Assert.assertEquals("1.20GB", s);
+        Assert.assertEquals("1.2GB", s);
     }
 
 
@@ -413,19 +303,19 @@ public class UtilTest {
         list.add("Jeannette");
 
         buf=Util.objectToByteBuffer(addr);
-        addr2=Util.objectFromByteBuffer(buf);
+        addr2=(Address)Util.objectFromByteBuffer(buf);
         System.out.println("addr=" + addr + ", addr2=" + addr2);
         Assert.assertEquals(addr, addr2);
 
         buf=Util.objectToByteBuffer(list);
-        list2=Util.objectFromByteBuffer(buf);
+        list2=(List<String>)Util.objectFromByteBuffer(buf);
         System.out.println("list=" + list + ", list2=" + list2);
         Assert.assertEquals(list, list2);
 
         byte[] buffer={'B', 'e', 'l', 'a', ' ', 'B', 'a', 'n'};
         buf=Util.objectToByteBuffer(buffer);
 
-        byte[] buffer2=Util.objectFromByteBuffer(buf);
+        byte[] buffer2=(byte[])Util.objectFromByteBuffer(buf);
         assert buffer2 != null && buffer.length == buffer2.length;
         assert Arrays.equals(buffer, buffer2);
 
@@ -482,13 +372,12 @@ public class UtilTest {
     }
 
 
-
     public static void testMessageToByteBuffer() throws Exception {
         _testMessage(new Message());
-        _testMessage(new Message(null, "hello world"));
-        _testMessage(new Message(null).src(Util.createRandomAddress()));
-        _testMessage(new Message(null).src(Util.createRandomAddress()));
-        _testMessage(new Message(null, "bela").src(Util.createRandomAddress()));
+        _testMessage(new Message(null, null, "hello world"));
+        _testMessage(new Message(null, Util.createRandomAddress(), null));
+        _testMessage(new Message(null, Util.createRandomAddress(), null));
+        _testMessage(new Message(null, Util.createRandomAddress(), "bela"));
     }
 
     private static void _testMessage(Message msg) throws Exception {
@@ -503,10 +392,10 @@ public class UtilTest {
         byte[] tmp={'B', 'e', 'l', 'a'};
         String str=new String(tmp);
         byte[] buf=Util.objectToByteBuffer(str);
-        String str2=Util.objectFromByteBuffer(buf);
+        String str2=(String)Util.objectFromByteBuffer(buf);
         assert str.equals(str2);
         tmp[1]='a';
-        str2=Util.objectFromByteBuffer(buf);
+        str2=(String)Util.objectFromByteBuffer(buf);
         assert str.equals(str2);
     }
 
@@ -520,9 +409,9 @@ public class UtilTest {
         Util.objectToStream(last, out);
 
         ByteArrayDataInputStream in=new ByteArrayDataInputStream(out.buffer(), 0, out.position());
-        String first2=Util.objectFromStream(in);
-        long val2=Util.objectFromStream(in);
-        String last2=Util.objectFromStream(in);
+        String first2=(String)Util.objectFromStream(in);
+        long val2=(long)Util.objectFromStream(in);
+        String last2=(String)Util.objectFromStream(in);
 
         assert first.equals(first2);
         assert val == val2;
@@ -547,31 +436,6 @@ public class UtilTest {
 
      public static void testObjectToByteArrayWithLargeString5() throws Exception {
         marshalString(Short.MAX_VALUE + 100000);
-    }
-
-
-    public void testExceptionToStream() throws Exception {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512, true);
-        Throwable cause=new IllegalArgumentException("this is highly illegal!");
-        NullPointerException ex=new NullPointerException("boom");
-        ex.initCause(cause);
-        int stack_len=ex.getStackTrace().length;
-
-        Util.exceptionToStream(ex, out);
-
-        ByteArrayDataInputStream in=new ByteArrayDataInputStream(out.buffer(), 0, out.position());
-        Throwable new_ex=Util.exceptionFromStream(in);
-        int new_stack_len=new_ex.getStackTrace().length;
-
-
-        assert new_ex instanceof NullPointerException;
-        assert new_ex.getMessage().equals("boom");
-        assert new_ex.getStackTrace().length > 0;
-        assert new_stack_len == stack_len;
-
-        Throwable new_cause=new_ex.getCause();
-        assert new_cause instanceof IllegalArgumentException;
-        assert new_cause.getMessage().startsWith("this is highly");
     }
 
 
@@ -611,7 +475,7 @@ public class UtilTest {
         String str=new String(tmp, 0, tmp.length);
         byte[] retval=Util.objectToByteBuffer(str);
         System.out.println("length=" + retval.length + " bytes");
-        String obj=Util.objectFromByteBuffer(retval);
+        String obj=(String)Util.objectFromByteBuffer(retval);
         System.out.println("read " + obj.length() + " string");
     }
 
@@ -661,7 +525,7 @@ public class UtilTest {
     }
 
     public static void testWriteStreamable() throws Exception {
-        Message m=new Message(null, "Hello");
+        Message m=new Message(null, null, "Hello");
         ViewId vid2=new ViewId(Util.createRandomAddress(), 35623);
         ByteArrayOutputStream outstream=new ByteArrayOutputStream();
         DataOutputStream dos=new DataOutputStream(outstream);
@@ -671,8 +535,8 @@ public class UtilTest {
         byte[] buf=outstream.toByteArray();
         ByteArrayInputStream instream=new ByteArrayInputStream(buf);
         DataInputStream dis=new DataInputStream(instream);
-        Message m2=Util.readGenericStreamable(dis);
-        ViewId v3=Util.readGenericStreamable(dis);
+        Message m2=(Message)Util.readGenericStreamable(dis);
+        ViewId v3=(ViewId)Util.readGenericStreamable(dis);
         assert m2.getBuffer() != null;
         Assert.assertEquals(m.getLength(), m2.getLength());
         assert v3 != null;
@@ -699,9 +563,9 @@ public class UtilTest {
         byte[] buf=outstream.toByteArray();
         ByteArrayInputStream instream=new ByteArrayInputStream(buf);
         DataInputStream dis=new DataInputStream(instream);
-        View v2=Util.readGenericStreamable(dis);
+        View v2=(View)Util.readGenericStreamable(dis);
         Assert.assertEquals(v, v2);
-        v2=Util.readStreamable(View::new, dis);
+        v2=(View)Util.readStreamable(View.class, dis);
         Assert.assertEquals(v, v2);
     }
 
@@ -722,21 +586,16 @@ public class UtilTest {
         Assert.assertEquals(s2, s4);
     }
 
-    public void testWriteAddress() throws Exception {
+    public static void testWriteAddress() throws Exception {
         Address a1=Util.createRandomAddress();
         Address a2=Util.createRandomAddress();
         Address a4=Util.createRandomAddress();
-        Address a5=new IpAddress("127.0.0.1", 5555);
-        Address a6=new IpAddressUUID("127.0.0.1", 5555);
 
         ByteArrayOutputStream outstream=new ByteArrayOutputStream();
         DataOutputStream dos=new DataOutputStream(outstream);
         Util.writeAddress(a1, dos);
         Util.writeAddress(a2, dos);
         Util.writeAddress(a4, dos);
-        Util.writeAddress(a5, dos);
-        Util.writeAddress(a6, dos);
-
         dos.close();
         byte[] buf=outstream.toByteArray();
         ByteArrayInputStream instream=new ByteArrayInputStream(buf);
@@ -745,11 +604,6 @@ public class UtilTest {
         Assert.assertEquals(a1, Util.readAddress(dis));
         Assert.assertEquals(a2, Util.readAddress(dis));
         Assert.assertEquals(a4, Util.readAddress(dis));
-
-        Address tmp=Util.readAddress(dis);
-        assert a5.equals(tmp);
-        tmp=Util.readAddress(dis);
-        assert a6.equals(tmp);
     }
 
     public static void testWriteNullAddress() throws Exception {
@@ -785,8 +639,7 @@ public class UtilTest {
         Message[] msgs={
           new Message(null, "hello world").setFlag(Message.Flag.OOB, Message.Flag.NO_RELIABILITY),
           new Message(Util.createRandomAddress("dest"), "bela ban"),
-          new Message(Util.createRandomAddress("dest"), "hello world again").src(Util.createRandomAddress("src"))
-            .setTransientFlag(Message.TransientFlag.DONT_LOOPBACK)
+          new Message(Util.createRandomAddress("dest"), Util.createRandomAddress("src"), "hello world again").setTransientFlag(Message.TransientFlag.DONT_LOOPBACK)
         };
 
         ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(256);
@@ -802,23 +655,6 @@ public class UtilTest {
             assert msgs[i].getLength() == tmp[i].getLength();
             assert msgs[i].getObject().equals(tmp[i].getObject());
         }
-    }
-
-    public void testRandom() {
-        List<Long> list=LongStream.rangeClosed(1,10).boxed().collect(Collectors.toList());
-        for(int i=0; i < 1_000_000; i++) {
-            long random=Util.random(10);
-            assert random >= 1 && random <= 10: String.format("random is %d", random);
-            if(list.remove(random) && list.isEmpty())
-                break;
-        }
-        assert list.isEmpty();
-
-        long random=Util.random(1);
-        assert random == 1;
-
-        random=Util.random(0);
-        assert random == 1;
     }
 
 
@@ -879,7 +715,51 @@ public class UtilTest {
     }
 
 
+    public static void testLeftMembers() {
+        final Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
 
+        List<Address> v1=new ArrayList<>();
+        v1.add(a);
+        v1.add(b);
+        v1.add(c);
+        v1.add(d);
+
+        List<Address> v2=new ArrayList<>();
+        v2.add(c);
+        v2.add(d);
+
+        View one=new View(new ViewId(a, 1), v1),
+                two=new View(new ViewId(b,2), v2);
+        List<Address> left=View.leftMembers(one, two);
+        System.out.println("left = " + left);
+        assert left != null;
+        assert left.size() == 2;
+        assert left.contains(a);
+        assert left.contains(b);
+    }
+
+    public static void testLeftMembers2() {
+        final Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
+
+        List<Address> v1=new ArrayList<>();
+        v1.add(a);
+        v1.add(b);
+        v1.add(c);
+        v1.add(d);
+
+        List<Address> v2=new ArrayList<>();
+        v2.add(c);
+        v2.add(d);
+        v2.add(a);
+        v2.add(b);
+
+        View one=new View(new ViewId(a, 1), v1),
+                two=new View(new ViewId(b,2), v2);
+        List<Address> left=View.leftMembers(one, two);
+        System.out.println("left = " + left);
+        assert left != null;
+        assert left.isEmpty();
+    }
 
 
     public static void testNewMembers() {
@@ -905,31 +785,21 @@ public class UtilTest {
         assert new_nodes.contains(e);
     }
 
-    public void testPickRandomElement() {
+    public static void testPickRandomElement() {
         List<Integer> v=new ArrayList<>();
         for(int i=0; i < 10; i++) {
             v.add(i);
         }
+
+        Integer el;
         for(int i=0; i < 10000; i++) {
-            Integer el=Util.pickRandomElement(v);
+            el=Util.pickRandomElement(v);
             assert el >= 0 && el < 10;
         }
     }
 
-    public void testPickRandomElement2() {
-        List<Integer> list=IntStream.rangeClosed(0, 9).boxed().collect(Collectors.toList());
-        for(int i=0; i < 1_000_000; i++) {
-            Integer el=Util.pickRandomElement(list);
-            boolean rc=list.remove(el);
-            assert rc;
-            if(list.isEmpty())
-                break;
-        }
-        assert list.isEmpty();
-    }
 
-
-    public void testPickNext() {
+    public static void testPickNext() {
         List<Integer> list=new ArrayList<>(10);
         for(int i=0; i < 10; i++)
             list.add(i);
@@ -1065,9 +935,9 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress();
-        org.jgroups.util.NameCache.add(a, "A");
-        org.jgroups.util.NameCache.add(b, "B");
-        org.jgroups.util.NameCache.add(c, "C");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
 
         View v1=View.create(b, 1, b, a, c);
         View v2=View.create(b, 2, b, c);
@@ -1094,10 +964,10 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords2() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
-        org.jgroups.util.NameCache.add(a, "A");
-        org.jgroups.util.NameCache.add(b, "B");
-        org.jgroups.util.NameCache.add(c, "C");
-        org.jgroups.util.NameCache.add(d, "D");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
+        org.jgroups.util.UUID.add(d, "D");
 
         View v1=View.create(a, 1, a, b);
         View v2=View.create(a, 1, a, b);
@@ -1126,10 +996,10 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords3() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
-        org.jgroups.util.NameCache.add(a, "A");
-        org.jgroups.util.NameCache.add(b, "B");
-        org.jgroups.util.NameCache.add(c, "C");
-        org.jgroups.util.NameCache.add(d, "D");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
+        org.jgroups.util.UUID.add(d, "D");
 
         View v1=View.create(a, 1, a, b, c, d);
         View v2=View.create(a, 1, a, b, c, d);
@@ -1157,10 +1027,10 @@ public class UtilTest {
 
     public static void testDetermineMergeParticipantsAndMergeCoords4() {
         Address a=Util.createRandomAddress(), b=Util.createRandomAddress(), c=Util.createRandomAddress(), d=Util.createRandomAddress();
-        org.jgroups.util.NameCache.add(a, "A");
-        org.jgroups.util.NameCache.add(b, "B");
-        org.jgroups.util.NameCache.add(c, "C");
-        org.jgroups.util.NameCache.add(d, "D");
+        org.jgroups.util.UUID.add(a, "A");
+        org.jgroups.util.UUID.add(b, "B");
+        org.jgroups.util.UUID.add(c, "C");
+        org.jgroups.util.UUID.add(d, "D");
 
         View v1=View.create(a, 1, a, b);
         View v2=View.create(c, 1, c, d);
@@ -1212,27 +1082,6 @@ public class UtilTest {
         _testMethodNameToAttributeName("lastName", "last_name");
     }
 
-    public void testWaitUntilAllChannelsHaveSameView() throws Exception {
-        JChannel a=null, b=null;
-
-        try {
-            a=new JChannel(Util.getTestStack()).name("A").connect("demo");
-            b=new JChannel(Util.getTestStack()).name("B").connect("demo");
-            Util.waitUntilAllChannelsHaveSameView(10000, 1000, a,b);
-
-            try {
-                Util.waitUntilAllChannelsHaveSameView(2000, 500, a);
-                assert false;
-            }
-            catch(Exception ex) {
-                System.out.printf("threw exception as expected: %s\n", ex);
-            }
-        }
-        finally {
-            Util.close(b,a);
-        }
-    }
-
     private static void _testMethodNameToAttributeName(String input, String expected_output) {
         String atttr_name=Util.methodNameToAttributeName(input);
         System.out.println("method name=" + input + ", attrname=" + atttr_name + ", expected output=" + expected_output);
@@ -1246,7 +1095,6 @@ public class UtilTest {
         assert method_name.equals(expected_output) :
                 "attrname=" + input + ", method name=" + method_name + ", expected output=" + expected_output;
     }
-
 
 }
 

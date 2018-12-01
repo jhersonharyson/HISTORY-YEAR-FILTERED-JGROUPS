@@ -9,10 +9,11 @@ import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.stack.IpAddress;
-import org.jgroups.util.*;
+import org.jgroups.util.ThreadFactory;
+import org.jgroups.util.TimeService;
+import org.jgroups.util.Util;
 
 import java.io.Closeable;
-import java.io.DataInput;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
@@ -35,7 +36,6 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
     protected final Map<Address,Connection>   conns=new HashMap<>();
     protected final Lock                      sock_creation_lock=new ReentrantLock(true); // syncs socket establishment
     protected final ThreadFactory             factory;
-    protected SocketFactory                   socket_factory=new DefaultSocketFactory();
     protected long                            reaperInterval;
     protected Reaper                          reaper;
     protected Receiver                        receiver;
@@ -59,10 +59,8 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
     protected TimeService                     time_service;
 
 
-    protected BaseServer(ThreadFactory f, SocketFactory sf) {
+    protected BaseServer(ThreadFactory f) {
         this.factory=f;
-        if(sf != null)
-            this.socket_factory=sf;
     }
 
 
@@ -80,8 +78,6 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
     public BaseServer       clientBindPort(int port)                {this.client_bind_port=port; return this;}
     public boolean          deferClientBinding()                    {return defer_client_binding;}
     public BaseServer       deferClientBinding(boolean defer)       {this.defer_client_binding=defer; return this;}
-    public SocketFactory    socketFactory()                         {return socket_factory;}
-    public BaseServer       socketFactory(SocketFactory factory)    {this.socket_factory=factory; return this;}
     public boolean          usePeerConnections()                    {return use_peer_connections;}
     public BaseServer       usePeerConnections(boolean flag)        {this.use_peer_connections=flag; return this;}
     public int              socketConnectionTimeout()               {return sock_conn_timeout;}
@@ -166,15 +162,6 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
             this.receiver.receive(sender, buf);
     }
 
-    public void receive(Address sender, DataInput in, int len) throws Exception {
-        if(this.receiver != null)
-            this.receiver.receive(sender, in);
-        else {
-            // discard len bytes (in.skip() is not guaranteed to discard *all* len bytes)
-            byte[] buf=new byte[len];
-            in.readFully(buf, 0, len);
-        }
-    }
 
 
     public void send(Address dest, byte[] data, int offset, int length) throws Exception {
@@ -257,7 +244,8 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
     public Connection getConnection(Address dest) throws Exception {
         Connection conn;
         synchronized(this) {
-            if((conn=conns.get(dest)) != null && conn.isOpen()) // keep FAST path on the most common case
+            if((conn=conns.get(dest)) != null
+              && (conn.isConnected() || conn.isConnectionPending())) // keep FAST path on the most common case
                 return conn;
         }
 
@@ -267,10 +255,9 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
             // lock / release, create new conn under sock_creation_lock, it can be skipped but then it takes
             // extra check in conn map and closing the new connection, w/ sock_creation_lock it looks much simpler
             // (slow path, so not important)
-
             synchronized(this) {
                 conn=conns.get(dest); // check again after obtaining sock_creation_lock
-                if(conn != null && conn.isOpen())
+                if(conn != null && (conn.isConnected() || conn.isConnectionPending()))
                     return conn;
 
                 // create conn stub
@@ -291,7 +278,8 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
 
             synchronized(this) {
                 Connection existing_conn=conns.get(dest); // check again after obtaining sock_creation_lock
-                if(existing_conn != null && existing_conn.isOpen() // added by a successful accept()
+                // added by a successful accept()
+                if(existing_conn != null && (existing_conn.isConnected() || existing_conn.isConnectionPending())
                   && existing_conn != conn) {
                     log.trace("%s: found existing connection to %s, using it and deleting own conn-stub", local_addr, dest);
                     Util.close(conn); // close our connection; not really needed as conn was closed by accept()
@@ -315,7 +303,6 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
     public void replaceConnection(Address address, Connection conn) {
         Connection previous=conns.put(address, conn);
         Util.close(previous); // closes previous connection (if present)
-        notifyConnectionEstablished(conn);
     }
 
     public void closeConnection(Connection conn, Throwable ex) {
@@ -381,7 +368,8 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
 
     /** Used only for testing ! */
     public synchronized void clearConnections() {
-        conns.values().forEach(Util::close);
+        for(Connection conn: conns.values())
+            Util.close(conn);
         conns.clear();
     }
 

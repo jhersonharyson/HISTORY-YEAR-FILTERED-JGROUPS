@@ -4,8 +4,8 @@ import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.Message;
 import org.jgroups.PhysicalAddress;
-import org.jgroups.util.NameCache;
 import org.jgroups.util.Responses;
+import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
 
 import java.io.InterruptedIOException;
@@ -29,9 +29,12 @@ public class PING extends Discovery {
 
     public void findMembers(List<Address> members, boolean initial_discovery, Responses responses) {
         try {
-            sendDiscoveryRequest(cluster_name, members, initial_discovery);
+            sendDiscoveryRequest(cluster_name, members);
         }
-        catch(InterruptedIOException | InterruptedException ie) {
+        catch(InterruptedIOException ie) {
+            ;
+        }
+        catch(InterruptedException ex) {
             ;
         }
         catch(Throwable ex) {
@@ -40,31 +43,26 @@ public class PING extends Discovery {
     }
 
 
-    protected void sendDiscoveryRequest(String cluster_name, List<Address> members_to_find, boolean initial_discovery) throws Exception {
-        PingData data=null;
+    protected void sendDiscoveryRequest(String cluster_name, List<Address> members_to_find) throws Exception {
+        PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
 
-        if(!use_ip_addrs || !initial_discovery) {
-            PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
+        // https://issues.jboss.org/browse/JGRP-1670
+        PingData data=new PingData(local_addr, false, UUID.get(local_addr), physical_addr);
+        PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ).clusterName(cluster_name);
 
-            // https://issues.jboss.org/browse/JGRP-1670
-            data=new PingData(local_addr, false, NameCache.get(local_addr), physical_addr);
-            if(members_to_find != null && members_to_find.size() <= max_members_in_discovery_request)
-                data.mbrs(members_to_find);
-        }
+        if(members_to_find != null && members_to_find.size() <= max_members_in_discovery_request)
+            data.mbrs(members_to_find);
 
         // message needs to have DONT_BUNDLE flag: if A sends message M to B, and we need to fetch B's physical
         // address, then the bundler thread blocks until the discovery request has returned. However, we cannot send
         // the discovery *request* until the bundler thread has returned from sending M
-        PingHeader hdr=new PingHeader(PingHeader.GET_MBRS_REQ).clusterName(cluster_name).initialDiscovery(initial_discovery);
-        Message msg=new Message(null).putHeader(getId(),hdr)
+        Message msg=new Message(null).putHeader(getId(),hdr).setBuffer(marshal(data))
           .setFlag(Message.Flag.INTERNAL,Message.Flag.DONT_BUNDLE,Message.Flag.OOB)
           .setTransientFlag(Message.TransientFlag.DONT_LOOPBACK);
-        if(data != null)
-            msg.setBuffer(marshal(data));
         sendMcastDiscoveryRequest(msg);
     }
 
     protected void sendMcastDiscoveryRequest(Message msg) {
-        down_prot.down(msg);
+        down_prot.down(new Event(Event.MSG, msg));
     }
 }

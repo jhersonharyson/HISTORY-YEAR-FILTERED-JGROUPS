@@ -265,13 +265,13 @@ public class SWIFT_PING extends FILE_PING {
         private static Object scriptEngineLock = new Object();
         private static ScriptEngine scriptEngine;
         
-        private final String tenant;
+        private String tenant;
 
-        private final URL authUrl;
+        private URL authUrl;
 
-        private final String username;
+        private String username;
 
-        private final String password;
+        private String password;
 
         public Keystone_V_2_0_Auth(String tenant, URL authUrl, String username,
                                    String password) {
@@ -443,7 +443,7 @@ public class SWIFT_PING extends FILE_PING {
      */
     protected static class SwiftClient {
 
-        private final Authenticator authenticator;
+        private Authenticator authenticator;
 
         private volatile Credentials credentials = null;
 

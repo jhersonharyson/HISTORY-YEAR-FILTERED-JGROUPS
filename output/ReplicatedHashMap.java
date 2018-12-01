@@ -11,7 +11,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.stream.Collectors;
 
 /**
  * Implementation of a {@link java.util.concurrent.ConcurrentMap} with replication of the contents across a cluster.
@@ -20,14 +19,14 @@ import java.util.stream.Collectors;
  * <p>
  * Keys and values added to the hashmap <em>must be serializable</em>, the reason being that they will be sent
  * across the network to all replicas of the group.<p/>
- * A {@code ReplicatedHashMap} allows one to implement a distributed naming service in just a couple of lines.
+ * A <code>ReplicatedHashMap</code> allows one to implement a distributed naming service in just a couple of lines.
  * <p>
  * An instance of this class will contact an existing member of the group to fetch its initial state.
  *
  * @author Bela Ban
  */
 public class ReplicatedHashMap<K, V> extends
-        AbstractMap<K,V> implements ConcurrentMap<K,V>, MembershipListener, StateListener, ReplicatedMap<K,V>, Closeable {
+        AbstractMap<K,V> implements ConcurrentMap<K,V>, Receiver, ReplicatedMap<K,V>, Closeable {
 
     public interface Notification<K, V> {
         void entrySet(K key, V value);
@@ -80,7 +79,7 @@ public class ReplicatedHashMap<K, V> extends
         }
     }
 
-    private final JChannel channel;
+    private Channel channel;
     protected RpcDispatcher disp=null;
     private String cluster_name=null;
     // to be notified when mbrship changes
@@ -100,7 +99,7 @@ public class ReplicatedHashMap<K, V> extends
     /**
      * Constructs a new ReplicatedHashMap with channel. Call {@link #start(long)} to start this map.
      */
-    public ReplicatedHashMap(JChannel channel) {
+    public ReplicatedHashMap(Channel channel) {
         this.channel=channel;
         this.map=new ConcurrentHashMap<>();
         init();
@@ -110,7 +109,7 @@ public class ReplicatedHashMap<K, V> extends
     /**
      * Constructs a new ReplicatedHashMap using provided map instance.
      */
-    public ReplicatedHashMap(ConcurrentMap<K,V> map, JChannel channel) {
+    public ReplicatedHashMap(ConcurrentMap<K,V> map, Channel channel) {
         if(channel == null)
             throw new IllegalArgumentException("Cannot create ReplicatedHashMap with null channel");
         if(map == null)
@@ -123,12 +122,16 @@ public class ReplicatedHashMap<K, V> extends
     }
 
     protected final void init() {
-        disp=new RpcDispatcher(channel, this).setMethodLookup(id -> methods.get(id));
-        disp.setMembershipListener(this).setStateListener(this);
+        disp=new RpcDispatcher(channel, this, this, this);
+        disp.setMethodLookup(new MethodLookup() {
+            public Method findMethod(short id) {
+                return methods.get(id);
+            }
+        });
     }
 
     public boolean isBlockingUpdates() {
-        return call_options.mode() == ResponseMode.GET_ALL;
+        return call_options.getMode() == ResponseMode.GET_ALL;
     }
 
     /**
@@ -137,14 +140,14 @@ public class ReplicatedHashMap<K, V> extends
      * @param blocking_updates
      */
     public void setBlockingUpdates(boolean blocking_updates) {
-        call_options.mode(blocking_updates? ResponseMode.GET_ALL : ResponseMode.GET_NONE);
+        call_options.setMode(blocking_updates? ResponseMode.GET_ALL : ResponseMode.GET_NONE);
     }
 
     /**
      * The timeout (in milliseconds) for blocking updates
      */
     public long getTimeout() {
-        return call_options.timeout();
+        return call_options.getTimeout();
     }
 
     /**
@@ -154,7 +157,7 @@ public class ReplicatedHashMap<K, V> extends
      *                The timeout (in milliseconds) for blocking updates
      */
     public void setTimeout(long timeout) {
-        call_options.timeout(timeout);
+        call_options.setTimeout(timeout);
     }
 
     /**
@@ -173,7 +176,7 @@ public class ReplicatedHashMap<K, V> extends
         return cluster_name;
     }
 
-    public JChannel getChannel() {
+    public Channel getChannel() {
         return channel;
     }
 
@@ -228,8 +231,12 @@ public class ReplicatedHashMap<K, V> extends
     }
 
     /**
-     * @return the previous value associated with the specified key, or <tt>null</tt> if there was no mapping for the key
-     * @throws NullPointerException if the specified key or value is null
+     * {@inheritDoc}
+     * 
+     * @return the previous value associated with the specified key, or
+     *         <tt>null</tt> if there was no mapping for the key
+     * @throws NullPointerException
+     *                 if the specified key or value is null
      */
     public V putIfAbsent(K key, V value) {
         V prev_val=get(key);
@@ -298,7 +305,12 @@ public class ReplicatedHashMap<K, V> extends
         return retval;
     }
 
-    /** @throws NullPointerException if the specified key is null */
+    /**
+     * {@inheritDoc}
+     * 
+     * @throws NullPointerException
+     *                 if the specified key is null
+     */
     public boolean remove(Object key, Object value) {
         Object val=get(key);
         boolean removed=val != null && value != null && val.equals(value);
@@ -313,7 +325,12 @@ public class ReplicatedHashMap<K, V> extends
         return removed;
     }
 
-    /** @throws NullPointerException if any of the arguments are null */
+    /**
+     * {@inheritDoc}
+     * 
+     * @throws NullPointerException
+     *                 if any of the arguments are null
+     */
     public boolean replace(K key, V oldValue, V newValue) {
         Object val=get(key);
         boolean replaced=val != null && oldValue != null && val.equals(oldValue);
@@ -334,7 +351,7 @@ public class ReplicatedHashMap<K, V> extends
     }
 
     /**
-     *
+     * {@inheritDoc}
      * 
      * @return the previous value associated with the specified key, or
      *         <tt>null</tt> if there was no mapping for the key
@@ -396,24 +413,25 @@ public class ReplicatedHashMap<K, V> extends
 
     public void _clear() {
         map.clear();
-        notifs.forEach(Notification::contentsCleared);
+        for(Notification notif:notifs)
+            notif.contentsCleared();
     }
 
-    public V _remove(K key) {
+    public V _remove(Object key) {
         V retval=map.remove(key);
         if(retval != null) {
             for(Notification notif:notifs)
-                notif.entryRemoved(key);
+                notif.entryRemoved((K)key);
         }
 
         return retval;
     }
 
-    public boolean _remove(K key, V value) {
+    public boolean _remove(Object key, Object value) {
         boolean removed=map.remove(key, value);
         if(removed) {
             for(Notification notif:notifs)
-                notif.entryRemoved(key);
+                notif.entryRemoved((K)key);
         }
         return removed;
     }
@@ -437,6 +455,11 @@ public class ReplicatedHashMap<K, V> extends
     /*----------------------------------------------------------*/
 
     /*-------------------- State Exchange ----------------------*/
+
+    public void receive(Message msg) {}
+
+    
+
     public void getState(OutputStream ostream) throws Exception {
         HashMap<K,V> copy=new HashMap<>();
         for(Map.Entry<K,V> entry:entrySet()) {
@@ -484,16 +507,29 @@ public class ReplicatedHashMap<K, V> extends
     public void block() {}
 
     void sendViewChangeNotifications(View view, List<Address> new_mbrs, List<Address> old_mbrs) {
+        List<Address> joined, left;
+
         if((notifs.isEmpty()) || (old_mbrs == null) || (new_mbrs == null))
             return;
 
         // 1. Compute set of members that joined: all that are in new_mbrs, but not in old_mbrs
-        List<Address> joined=new_mbrs.stream().filter(mbr -> !old_mbrs.contains(mbr)).collect(Collectors.toList());
+        joined=new ArrayList<>();
+        for(Address mbr: new_mbrs) {
+            if(!old_mbrs.contains(mbr))
+                joined.add(mbr);
+        }
 
         // 2. Compute set of members that left: all that were in old_mbrs, but not in new_mbrs
-        List<Address> left=old_mbrs.stream().filter(mbr -> !new_mbrs.contains(mbr)).collect(Collectors.toList());
+        left=new ArrayList<>();
+        for(Address mbr: old_mbrs) {
+            if(!new_mbrs.contains(mbr)) {
+                left.add(mbr);
+            }
+        }
 
-        notifs.forEach( notif -> notif.viewChange(view, joined, left));
+        for(Notification notif: notifs) {
+            notif.viewChange(view, joined, left);
+        }
     }
 
 
@@ -512,7 +548,7 @@ public class ReplicatedHashMap<K, V> extends
         return new SynchronizedReplicatedMap<>(map);
     }
 
-    private static final class SynchronizedReplicatedMap<K, V>
+    private static class SynchronizedReplicatedMap<K, V>
             implements ReplicatedMap<K,V> {
         private final ReplicatedMap<K,V> map;
         private final Object mutex;
@@ -646,7 +682,7 @@ public class ReplicatedHashMap<K, V> extends
             }
         }
 
-        public V _remove(K key) {
+        public V _remove(Object key) {
             synchronized(mutex) {
                 return map._remove(key);
             }
@@ -658,7 +694,7 @@ public class ReplicatedHashMap<K, V> extends
             }
         }
 
-        public boolean _remove(K key, V value) {
+        public boolean _remove(Object key, Object value) {
             synchronized(mutex) {
                 return map._remove(key, value);
             }

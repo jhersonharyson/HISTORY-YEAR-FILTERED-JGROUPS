@@ -9,13 +9,11 @@ import org.jgroups.logging.LogFactory;
 import org.jgroups.util.TimeScheduler;
 import org.jgroups.util.Util;
 
-import java.io.Serializable;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 
 /**
  * Manages a list of RouterStubs (e.g. health checking, reconnecting etc.
@@ -42,6 +40,11 @@ public class RouterStubManager implements Runnable, RouterStub.CloseListener {
     protected boolean                                   use_nio=true;  // whether to use RouterStubTcp or RouterStubNio
     protected Future<?>                                 reconnector_task;
     protected final Log                                 log;
+
+    /** Interface to iterate through stubs. Will be replaced by Java 8 Consumer in 4.0 */
+    public interface Consumer {
+        void accept(RouterStub stub);
+    }
 
 
     public RouterStubManager(Protocol owner, String cluster_name, Address local_addr,
@@ -71,19 +74,22 @@ public class RouterStubManager implements Runnable, RouterStub.CloseListener {
      * Applies action to all RouterStubs that are connected
      * @param action
      */
-    public void forEach(Consumer<RouterStub> action) {
-        stubs.stream().filter(RouterStub::isConnected).forEach(action::accept);
+    public void forEach(Consumer action) {
+        for(RouterStub stub: stubs) {
+            if(stub.isConnected())
+                apply(stub, action);
+        }
     }
 
     /**
      * Applies action to a randomly picked RouterStub that's connected
      * @param action
      */
-    public void forAny(Consumer<RouterStub> action) {
+    public void forAny(Consumer action) {
         while(!stubs.isEmpty()) {
             RouterStub stub=Util.pickRandomElement(stubs);
             if(stub != null && stub.isConnected()) {
-                action.accept(stub);
+                apply(stub, action);
                 return;
             }
         }
@@ -134,7 +140,8 @@ public class RouterStubManager implements Runnable, RouterStub.CloseListener {
     
     public void destroyStubs() {
         stopReconnector();
-        stubs.forEach(RouterStub::destroy);
+        for(RouterStub s : stubs)
+            s.destroy();
         stubs.clear();
     }
 
@@ -229,10 +236,20 @@ public class RouterStubManager implements Runnable, RouterStub.CloseListener {
     }
 
 
+    protected void apply(RouterStub stub, Consumer action) {
+        try {
+            action.accept(stub);
+        }
+        catch(Throwable t) {
+            log.warn("failed invoking stub", t);
+        }
+    }
+
+
     protected RouterStub find(IpAddress router_addr) {
         for(RouterStub stub: stubs) {
             IpAddress addr=stub.gossipRouterAddress();
-            if(Objects.equals(addr, router_addr))
+            if(addr != null && addr.equals(router_addr))
                 return stub;
         }
         return null;
@@ -285,9 +302,7 @@ public class RouterStubManager implements Runnable, RouterStub.CloseListener {
 
 
 
-    protected static class Target implements Comparator<Target>, Serializable {
-        private static final long serialVersionUID = 1L;
-
+    protected static class Target implements Comparator<Target> {
         protected final IpAddress               bind_addr, router_addr;
         protected final RouterStub.StubReceiver receiver;
 

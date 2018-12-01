@@ -44,6 +44,8 @@ public class ASYM_ENCRYPT_BlockTest extends BMNGRunner {
     public void testASYM_ENCRYPT_NotBlockingJoin() throws Exception {
         a.send(b.getAddress(), "one");
         b.send(a.getAddress(), "two");
+
+
         for(int i=0; i < 10; i++) {
             if(ra.size() >= 1 && rb.size() >= 1) // fail fast if size > 1
                 break;
@@ -53,7 +55,14 @@ public class ASYM_ENCRYPT_BlockTest extends BMNGRunner {
         System.out.printf("A's messages:\n%s\nB's messages:\n%s\n", print(ra), print(rb));
         assert ra.size() == 1 : String.format("A has %d messages", ra.size());
         assert rb.size() >= 1 : String.format("B has %d messages", rb.size());
-        rb.list().stream().anyMatch(obj -> obj.equals("one"));
+        boolean match=false;
+        for(Object obj: rb.list()) {
+            if(obj.equals("one")) {
+                match=true;
+                break;
+            }
+        }
+        assert match;
         assert "two".equals(ra.list().get(0));
     }
 

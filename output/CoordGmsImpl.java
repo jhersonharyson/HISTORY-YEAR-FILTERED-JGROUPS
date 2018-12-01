@@ -50,11 +50,12 @@ public class CoordGmsImpl extends ServerGmsImpl {
         }
         if(mbr.equals(gms.local_addr))
             leaving=true;
-        gms.getViewHandler().add(new Request(Request.LEAVE, mbr));
+        gms.getViewHandler().add(new Request(Request.LEAVE, mbr, false));
+        gms.getViewHandler().stop(true); // wait until all requests have been processed, then close the queue and leave
 
         // If we're the coord leaving, ignore gms.leave_timeout: https://issues.jboss.org/browse/JGRP-1509
         long timeout=(long)(Math.max(gms.leave_timeout, gms.view_ack_collection_timeout) * 1.10);
-        gms.getViewHandler().waitUntilComplete(timeout);
+        gms.getViewHandler().waitUntilCompleted(timeout);
     }
 
 
@@ -64,7 +65,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
             return;
         }        
         Collection<Request> suspected=new LinkedHashSet<>(1);
-        suspected.add(new Request(Request.SUSPECT,mbr));
+        suspected.add(new Request(Request.SUSPECT,mbr,true));
         handleMembershipChange(suspected);
     }
 
@@ -102,9 +103,13 @@ public class CoordGmsImpl extends ServerGmsImpl {
                         useFlushIfPresent=true;
                     break;
                 case Request.LEAVE:
-                    leaving_mbrs.add(req.mbr);
-                    if(Objects.equals(gms.local_addr, req.mbr))
-                        self_leaving=true;
+                    if(req.suspected)
+                        suspected_mbrs.add(req.mbr);
+                    else {
+                        leaving_mbrs.add(req.mbr);
+                        if(gms.local_addr != null && gms.local_addr.equals(req.mbr))
+                            self_leaving=true;
+                    }
                     break;
                 case Request.SUSPECT:
                     suspected_mbrs.add(req.mbr);
@@ -194,7 +199,8 @@ public class CoordGmsImpl extends ServerGmsImpl {
             sendLeaveResponses(leaving_mbrs); // no-op if no leaving members
 
             // we don't need to send the digest to existing members: https://issues.jboss.org/browse/JGRP-1317
-            gms.castViewChangeAndSendJoinRsps(new_view, null, new_view.getMembers(), new_mbrs, join_rsp);
+            gms.castViewChange(new_view, null, new_mbrs);
+            gms.sendJoinResponses(join_rsp, new_mbrs);
         }
         finally {
             if(hasJoiningMembers)
@@ -232,7 +238,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
             Message msg=new Message(address).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.NO_RELIABILITY)
               .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.LEAVE_RSP));
             log.trace("%s: sending LEAVE response to %s", gms.local_addr, address);
-            gms.getDownProtocol().down(msg);
+            gms.getDownProtocol().down(new Event(Event.MSG, msg));
         }
     }
 

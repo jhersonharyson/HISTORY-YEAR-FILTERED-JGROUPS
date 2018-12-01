@@ -4,9 +4,7 @@ import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.Message;
 import org.jgroups.ReceiverAdapter;
-import org.jgroups.protocols.PING;
-import org.jgroups.protocols.TUNNEL;
-import org.jgroups.protocols.UNICAST3;
+import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
@@ -22,23 +20,25 @@ import org.testng.annotations.Test;
 import java.net.InetAddress;
 
 /**
- * Test designed to make sure the TUNNEL doesn't lock the client and the GossipRouter under load.
+ * Test designed to make sure the TUNNEL doesn't lock the client and the GossipRouter
+ * under heavy load.
  *
  * @author Ovidiu Feodorov <ovidiu@feodorov.com>
  * @see TUNNELDeadLockTest#testStress
  */
 @Test(groups={Global.STACK_INDEPENDENT, Global.GOSSIP_ROUTER, Global.EAP_EXCLUDED},singleThreaded=true)
-public class TUNNELDeadLockTest {
+public class TUNNELDeadLockTest extends ChannelTestBase {
     private JChannel         channel;
     private Promise<Boolean> promise;
     private int              receivedCnt;
 
     // the total number of the messages pumped down the channel
-    private static final int msgCount=20_000;
+    private static final int msgCount=20000;
+    // the message payload size (in bytes);
+    private static final int payloadSize=32;
     // the time (in ms) the main thread waits for all the messages to arrive,
     // before declaring the test failed.
-    private static final int mainTimeout=10000;
-    private String           bind_addr="loopback";
+    private static final int mainTimeout=60000;
     GossipRouter             gossipRouter;
     private int              gossip_router_port;
     private String           gossip_router_hosts;
@@ -54,13 +54,19 @@ public class TUNNELDeadLockTest {
         promise=new Promise<>();
         gossip_router_port=ResourceManager.getNextTcpPort(InetAddress.getByName(bind_addr));
         gossip_router_hosts=bind_addr + "[" + gossip_router_port + "]";
-        gossipRouter=new GossipRouter(bind_addr, gossip_router_port).useNio(false);
+        gossipRouter=new GossipRouter(bind_addr, gossip_router_port);
         gossipRouter.start();
     }
 
-    @AfterMethod void tearDown() throws Exception {
-        //TUNNEL tunnel=channel.getProtocolStack().findProtocol(TUNNEL.class);
-        //System.out.printf("TUNNEL stats:\n%s\n", tunnel.getMessageStats());
+    @AfterMethod(alwaysRun=true)
+    void tearDown() throws Exception {
+        // I prefer to close down the channel inside the test itself, for the
+        // reason that the channel might be brought in an uncloseable state by
+        // the test.
+
+        // TO_DO: no elegant way to stop the Router threads and clean-up
+        //        resources. Use the Router administrative interface, when available.
+        
         Util.close(channel);
         promise.reset();
         promise=null;
@@ -83,10 +89,10 @@ public class TUNNELDeadLockTest {
      * be controlled with mainTimeout. If this time passes and the test
      * doesn't see all the messages, it declares itself failed.
      */
+    @Test
     public void testStress() throws Exception {
-        receivedCnt=0;
         channel=createTunnelChannel("A");
-        channel.connect(TUNNELDeadLockTest.class.getSimpleName());
+        channel.connect("agroup");
         channel.setReceiver(new ReceiverAdapter() {
 
             @Override
@@ -94,7 +100,7 @@ public class TUNNELDeadLockTest {
                 receivedCnt++;
                 if(receivedCnt % 2000 == 0)
                     System.out.println("-- received " + receivedCnt);
-                if(receivedCnt >= msgCount) {
+                if(receivedCnt == msgCount) {
                     // let the main thread know I got all msgs
                     promise.setResult(Boolean.TRUE);
                 }
@@ -102,36 +108,46 @@ public class TUNNELDeadLockTest {
         });
       
         // stress send messages - the sender thread
-        new Thread(() -> {
-            try {
-                for(int i=1; i <= msgCount; i++) {
-                    channel.send(null, i);
-                    if(i % 2000 == 0)
-                        System.out.println("-- sent " + i);
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    for(int i=0; i < msgCount; i++) {
+                        channel.send(null, new byte[payloadSize]);
+                        if(i % 2000 == 0)
+                            System.out.println("-- sent " + i);
+                    }
                 }
-            }
-            catch(Exception e) {
-                System.err.println("Error sending data over ...");
-                e.printStackTrace();
+                catch(Exception e) {
+                    System.err.println("Error sending data over ...");
+                    e.printStackTrace();
+                }
             }
         }).start();
 
+
+        // wait for all the messages to come; if I don't see all of them in
+        // mainTimeout ms, I fail the test
+
         Boolean result=promise.getResult(mainTimeout);
-        if(result == null)
-            assert false: String.format("failed to receive %d messages in %d ms (%d messages received so far)",
-                                        msgCount, mainTimeout, receivedCnt);
+        if(result == null) {
+            String msg="The channel has failed to send/receive " + msgCount + " messages " +
+                    "possibly because of the channel deadlock or too short " +
+                    "timeout (currently " + mainTimeout + " ms). " + receivedCnt +
+                    " messages received so far.";
+            assert false : msg;
+        }       
     }
 
     protected JChannel createTunnelChannel(String name) throws Exception {
         TUNNEL tunnel=(TUNNEL)new TUNNEL().setValue("bind_addr", InetAddress.getByName(bind_addr));
         tunnel.setGossipRouterHosts(gossip_router_hosts);
-
-        JChannel ch=new JChannel(tunnel,
-                                 new PING(),
-                                 new NAKACK2(),
-                                 new UNICAST3(),
-                                 new STABLE(),
-                                 new GMS().joinTimeout(1000)).name(name);
+        JChannel ch=Util.createChannel(tunnel,
+                                       new PING(),
+                                       new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000),
+                                       new FD().setValue("timeout", 2000).setValue("max_tries", 2),
+                                       new VERIFY_SUSPECT(),
+                                       new NAKACK2().setValue("use_mcast_xmit", false),
+                                       new UNICAST3(), new STABLE(), new GMS().joinTimeout(1000));
         if(name != null)
             ch.setName(name);
         return ch;

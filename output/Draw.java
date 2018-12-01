@@ -54,8 +54,13 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
         if(no_channel)
             return;
 
-        channel=new JChannel(props).addAddressGenerator(gen).setName(name);
-        channel.setReceiver(this).addChannelListener(this);
+        channel=new JChannel(props);
+        if(gen != null)
+            channel.addAddressGenerator(gen);
+        if(name != null)
+            channel.setName(name);
+        channel.setReceiver(this);
+        channel.addChannelListener(this);
         this.send_own_state_on_merge=send_own_state_on_merge;
     }
 
@@ -179,9 +184,9 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
 
 
     private Color selectColor() {
-        int red=Math.abs(random.nextInt() % 255);
-        int green=Math.abs(random.nextInt() % 255);
-        int blue=Math.abs(random.nextInt() % 255);
+        int red=Math.abs(random.nextInt()) % 255;
+        int green=Math.abs(random.nextInt()) % 255;
+        int blue=Math.abs(random.nextInt()) % 255;
         return new Color(red, green, blue);
     }
 
@@ -248,15 +253,18 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
         setTitle(null);
     }
 
+
+
     public void receive(Message msg) {
         byte[] buf=msg.getRawBuffer();
         if(buf == null) {
-            System.err.printf("%s: received null buffer from %s, headers: %s\n", channel.getAddress(), msg.src(), msg.printHeaders());
+            System.err.println("[" + channel.getAddress() + "] received null buffer from " + msg.getSrc() +
+                    ", headers: " + msg.printHeaders());
             return;
         }
 
         try {
-            DrawCommand comm=Util.streamableFromByteBuffer(DrawCommand::new, buf, msg.getOffset(), msg.getLength());
+            DrawCommand comm=(DrawCommand)Util.streamableFromByteBuffer(DrawCommand.class, buf, msg.getOffset(), msg.getLength());
             switch(comm.mode) {
                 case DrawCommand.DRAW:
                     if(panel != null)
@@ -340,7 +348,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
             if(use_unicasts)
                 sendToAll(buf);
             else
-                channel.send(new Message(null, buf));
+                channel.send(new Message(null, null, buf));
         }
         catch(Exception ex) {
             System.err.println(ex);
@@ -403,18 +411,18 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
 
     /* ------------------------------ ChannelListener interface -------------------------- */
 
-    public void channelConnected(JChannel channel) {
+    public void channelConnected(Channel channel) {
         if(jmx) {
-            Util.registerChannel(channel, "jgroups");
+            Util.registerChannel((JChannel)channel, "jgroups");
         }
     }
 
-    public void channelDisconnected(JChannel channel) {
+    public void channelDisconnected(Channel channel) {
         if(jmx) {
             MBeanServer server=Util.getMBeanServer();
             if(server != null) {
                 try {
-                    JmxConfigurator.unregisterChannel(channel, server, cluster_name);
+                    JmxConfigurator.unregisterChannel((JChannel)channel,server,cluster_name);
                 }
                 catch(Exception e) {
                     e.printStackTrace();
@@ -423,7 +431,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
         }
     }
 
-    public void channelClosed(JChannel channel) {
+    public void channelClosed(Channel channel) {
 
     }
 
@@ -533,7 +541,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
                 if(use_unicasts)
                     sendToAll(buf);
                 else
-                    channel.send(new Message(null, buf));
+                    channel.send(new Message(null, null, buf));
             }
             catch(Exception ex) {
                 System.err.println(ex);

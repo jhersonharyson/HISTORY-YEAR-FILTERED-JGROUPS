@@ -1,6 +1,8 @@
 package org.jgroups.tests;
 
-import org.jgroups.*;
+import org.jgroups.Global;
+import org.jgroups.JChannel;
+import org.jgroups.Message;
 import org.jgroups.blocks.MessageDispatcher;
 import org.jgroups.blocks.RequestHandler;
 import org.jgroups.blocks.RequestOptions;
@@ -9,7 +11,6 @@ import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.ProtocolStack;
-import org.jgroups.util.Buffer;
 import org.jgroups.util.Rsp;
 import org.jgroups.util.RspList;
 import org.jgroups.util.Util;
@@ -45,23 +46,23 @@ public class DynamicDiscardTest {
                                         .setValue("throw_exception_on_timeout", false));
             channels[i].setName(Character.toString((char) ('A' + i)));
             channels[i].setDiscardOwnMessages(true);
-            dispatchers[i]=new MessageDispatcher(channels[i], new MyRequestHandler());
-            dispatchers[i].setMembershipListener(new MyMembershipListener(channels[i]));
+            dispatchers[i]=new MessageDispatcher(channels[i], null, null, new MyRequestHandler());
             channels[i].connect("DynamicDiscardTest");
             System.out.print(i + 1 + " ");
         }
         Util.waitUntilAllChannelsHaveSameView(10000, 1000, channels);
 
         // discard all messages (except those to self)
-        DISCARD discard = new DISCARD().setDiscardAll(true);
-        channels[0].getProtocolStack().insertProtocol(discard, ProtocolStack.Position.ABOVE, TP.class);
+        DISCARD discard = new DISCARD();
+        channels[0].getProtocolStack().insertProtocol(discard, ProtocolStack.ABOVE, TP.class);
+        discard.setDiscardAll(true);
 
         // send a RSVP message
-        byte[] data="message2".getBytes();
-        Buffer buf=new Buffer(data, 0, data.length);
-        RspList<Object> rsps=dispatchers[0].castMessage(null, buf, RequestOptions.SYNC().timeout(5000)
-          .flags(Message.Flag.RSVP, Message.Flag.OOB));
-        Rsp<Object> objectRsp=rsps.get(channels[1].getAddress());
+        Message msg = new Message(null, "message2");
+        msg.setFlag(Message.Flag.RSVP, Message.Flag.OOB);
+        RspList<Object> rsps = dispatchers[0].castMessage(null, msg, RequestOptions.SYNC().setTimeout(5000));
+
+        Rsp<Object> objectRsp = rsps.get(channels[1].getAddress());
         assertFalse(objectRsp.wasReceived());
         assertTrue(objectRsp.wasSuspected());
     }
@@ -71,18 +72,6 @@ public class DynamicDiscardTest {
         public Object handle(Message msg) throws Exception {
             System.out.println(String.format("Received message %s", msg));
             return "bla";
-        }
-    }
-
-    protected static class MyMembershipListener extends ReceiverAdapter {
-        protected final JChannel ch;
-
-        public MyMembershipListener(JChannel ch) {
-            this.ch=ch;
-        }
-
-        public void viewAccepted(View view) {
-            System.out.printf("[%s] view: %s\n", ch.getAddress(), view);
         }
     }
 }

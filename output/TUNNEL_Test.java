@@ -37,15 +37,15 @@ public class TUNNEL_Test extends ChannelTestBase {
     protected GossipRouter        gossipRouter;
     protected int                 gossip_router_port;
     protected String              gossip_router_hosts;
-    protected InetAddress         gossip_router_bind_addr;
+    protected InetAddress         bind_addr;
 
     @BeforeClass
     void startRouter() throws Exception {
         StackType type=Util.getIpStackType();
         String bind_addr_str=type == StackType.IPv6? "::1" : "127.0.0.1";
-        gossip_router_bind_addr=InetAddress.getByName(bind_addr_str);
-        gossip_router_port=ResourceManager.getNextTcpPort(gossip_router_bind_addr);
-        gossip_router_hosts=gossip_router_bind_addr.getHostAddress() + "[" + gossip_router_port + "]";
+        bind_addr=InetAddress.getByName(bind_addr_str);
+        gossip_router_port=ResourceManager.getNextTcpPort(bind_addr);
+        gossip_router_hosts=bind_addr.getHostAddress() + "[" + gossip_router_port + "]";
         gossipRouter=new GossipRouter(bind_addr_str, gossip_router_port);
         gossipRouter.start();
     }
@@ -127,7 +127,7 @@ public class TUNNEL_Test extends ChannelTestBase {
         channel.disconnect();
         channel.connect(GROUP);
 
-        channel.send(new Message(null, "payload"));
+        channel.send(new Message(null, null, "payload"));
 
         Message msg=msgPromise.getResult(20000);
         assert msg != null;
@@ -161,7 +161,7 @@ public class TUNNEL_Test extends ChannelTestBase {
          System.out.println("shutting down the participant channel");
          Util.shutdown(channel);
 
-         GMS coord_gms=coordinator.getProtocolStack().findProtocol(GMS.class);
+         GMS coord_gms=(GMS)coordinator.getProtocolStack().findProtocol(GMS.class);
          if(coord_gms != null)
              coord_gms.setLevel("trace");
 
@@ -239,7 +239,7 @@ public class TUNNEL_Test extends ChannelTestBase {
         channel.disconnect();
         channel.connect(GROUP);
 
-        channel.send(new Message(null, "payload"));
+        channel.send(new Message(null, null, "payload"));
 
         Message msg=msgPromise.getResult(20000);
         assert msg != null;
@@ -252,7 +252,7 @@ public class TUNNEL_Test extends ChannelTestBase {
     }
 
     protected JChannel createTunnelChannel(String name, boolean include_failure_detection) throws Exception {
-        TUNNEL tunnel=(TUNNEL)new TUNNEL().setValue("bind_addr", gossip_router_bind_addr);
+        TUNNEL tunnel=(TUNNEL)new TUNNEL().setValue("bind_addr", bind_addr);
         tunnel.setGossipRouterHosts(gossip_router_hosts);
         List<Protocol> protocols=new ArrayList<>();
         protocols.addAll(Arrays.asList(tunnel, new PING(), new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000)));

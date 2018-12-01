@@ -13,8 +13,10 @@ import org.jgroups.util.Util;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.function.Supplier;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Protocol which implements synchronous messages (https://issues.jboss.org/browse/JGRP-1389). A send of a message M
@@ -57,7 +59,7 @@ public class RSVP extends Protocol {
     protected Future<?>                        resend_task;
 
     @ManagedAttribute(description="If we have UNICAST or UNICAST3 in the stack, we don't need to handle unicast messages " +
-      "as they're retransmitted anyway")
+      "as they're retransmitted anyway",writable=false)
     protected boolean                          handle_unicasts=true;
 
 
@@ -72,7 +74,7 @@ public class RSVP extends Protocol {
             log.warn(Util.getMessage("RSVP_Misconfig"), resend_interval, timeout);
             resend_interval=timeout / 3;
         }
-        handle_unicasts=stack.findProtocol(UNICAST3.class) == null;
+        handle_unicasts=stack.findProtocol(UNICAST.class, UNICAST3.class) == null;
     }
 
 
@@ -83,7 +85,8 @@ public class RSVP extends Protocol {
 
     public void stop() {
         stopResendTask();
-        ids.values().forEach(Entry::destroy);
+        for(Entry entry: ids.values())
+            entry.destroy();
         ids.clear();
         super.stop();
     }
@@ -91,110 +94,111 @@ public class RSVP extends Protocol {
 
     public Object down(Event evt) {
         switch(evt.getType()) {
+            case Event.MSG:
+                Message msg=(Message)evt.getArg();
+                Address target=msg.getDest();
+                if((target != null && !handle_unicasts) || !(msg.isFlagSet(Message.Flag.RSVP) || msg.isFlagSet(Message.Flag.RSVP_NB)))
+                    break;
+
+                short next_id=getNextId();
+                RsvpHeader hdr=new RsvpHeader(RsvpHeader.REQ, next_id);
+                msg.putHeader(id, hdr);
+                boolean block=msg.isFlagSet(Message.Flag.RSVP);
+
+
+                Entry entry=target != null? new Entry(target) : new Entry(members); // volatile read of members
+                Object retval=null;
+                try {
+                    ids.put(next_id, entry);
+
+                    // sync members again - if a view was received after reading members intro Entry, but
+                    // before adding Entry to ids (https://issues.jboss.org/browse/JGRP-1503)
+                    entry.retainAll(members);
+
+                    // Send the message
+                    if(log.isTraceEnabled())
+                        log.trace(local_addr + ": " + hdr.typeToString() + " --> " + (target == null? "cluster" : target));
+                    retval=down_prot.down(evt);
+
+                    if(msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK))
+                        entry.ack(local_addr);
+
+                    // Block on AckCollector (if we need to block)
+                    if(block)
+                        entry.block(timeout);
+                }
+                catch(TimeoutException e) {
+                    if(throw_exception_on_timeout)
+                        throw e;
+                    else if(log.isWarnEnabled())
+                        log.warn(Util.getMessage("RSVP_Timeout"), entry);
+                }
+                finally {
+                    if(block) {
+                        Entry tmp=ids.remove(next_id);
+                        if(tmp != null)
+                            tmp.destroy();
+                    }
+                }
+                return retval;
+
             case Event.VIEW_CHANGE:
-                handleView(evt.getArg());
+                handleView((View)evt.getArg());
                 break;
 
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=evt.getArg();
+                local_addr=(Address)evt.getArg();
                 break;
         }
         return down_prot.down(evt);
     }
 
-    public Object down(Message msg) {
-        Address target=msg.getDest();
-        if((target != null && !handle_unicasts) || !(msg.isFlagSet(Message.Flag.RSVP) || msg.isFlagSet(Message.Flag.RSVP_NB)))
-            return down_prot.down(msg);
-
-        short next_id=getNextId();
-        RsvpHeader hdr=new RsvpHeader(RsvpHeader.REQ, next_id);
-        msg.putHeader(id, hdr);
-        boolean block=msg.isFlagSet(Message.Flag.RSVP);
-
-        Entry entry=target != null? new Entry(target) : new Entry(members); // volatile read of members
-        Object retval=null;
-        try {
-            ids.put(next_id, entry);
-
-            // sync members again - if a view was received after reading members intro Entry, but
-            // before adding Entry to ids (https://issues.jboss.org/browse/JGRP-1503)
-            entry.retainAll(members);
-
-            // Send the message
-            if(log.isTraceEnabled())
-                log.trace(local_addr + ": " + hdr.typeToString() + " --> " + (target == null? "cluster" : target));
-            retval=down_prot.down(msg);
-
-            if(msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK))
-                entry.ack(local_addr);
-
-            // Block on AckCollector (if we need to block)
-            if(block)
-                entry.block(timeout);
-        }
-        catch(TimeoutException e) {
-            if(throw_exception_on_timeout)
-                throw new RuntimeException(e);
-            else if(log.isWarnEnabled())
-                log.warn(Util.getMessage("RSVP_Timeout"), entry);
-        }
-        finally {
-            if(block) {
-                Entry tmp=ids.remove(next_id);
-                if(tmp != null)
-                    tmp.destroy();
-            }
-        }
-        return retval;
-    }
 
     public Object up(Event evt) {
         switch(evt.getType()) {
+            case Event.MSG:
+                Message msg=(Message)evt.getArg();
+                if(!(msg.isFlagSet(Message.Flag.RSVP) || msg.isFlagSet(Message.Flag.RSVP_NB)))
+                    break;
+
+                Address dest=msg.getDest();
+                RsvpHeader hdr=(RsvpHeader)msg.getHeader(id);
+                if(hdr == null) {
+                    if(dest == null || handle_unicasts)
+                        log.error(Util.getMessage("MessageWithRSVPFlagNeedsToHaveAnRsvpHeader"));
+                    break;
+                }
+                Address sender=msg.getSrc();
+                if(log.isTraceEnabled())
+                    log.trace(local_addr + ": " + hdr.typeToString() + " <-- " + sender);
+                switch(hdr.type) {
+                    case RsvpHeader.REQ:
+                        if(this.ack_on_delivery) {
+                            try {
+                                return up_prot.up(evt);
+                            }
+                            finally {
+                                sendResponse(sender, hdr.id);
+                            }
+                        }
+                        else {
+                            sendResponse(sender, hdr.id);
+                            return up_prot.up(evt);
+                        }
+
+                    case RsvpHeader.REQ_ONLY:
+                        return null;
+
+                    case RsvpHeader.RSP:
+                        handleResponse(msg.getSrc(), hdr.id);
+                        return null;
+                }
+                break;
             case Event.VIEW_CHANGE:
-                handleView(evt.getArg());
+                handleView((View)evt.getArg());
                 break;
         }
         return up_prot.up(evt);
-    }
-
-    public Object up(Message msg) {
-        if(!(msg.isFlagSet(Message.Flag.RSVP) || msg.isFlagSet(Message.Flag.RSVP_NB)))
-            return up_prot.up(msg);
-
-        Address dest=msg.getDest();
-        RsvpHeader hdr=msg.getHeader(id);
-        if(hdr == null) {
-            if(dest == null || handle_unicasts)
-                log.error(Util.getMessage("MessageWithRSVPFlagNeedsToHaveAnRsvpHeader"));
-            return up_prot.up(msg);
-        }
-        Address sender=msg.getSrc();
-        if(log.isTraceEnabled())
-            log.trace(local_addr + ": " + hdr.typeToString() + " <-- " + sender);
-        switch(hdr.type) {
-            case RsvpHeader.REQ:
-                if(this.ack_on_delivery) {
-                    try {
-                        return up_prot.up(msg);
-                    }
-                    finally {
-                        sendResponse(sender, hdr.id);
-                    }
-                }
-                else {
-                    sendResponse(sender, hdr.id);
-                    return up_prot.up(msg);
-                }
-
-            case RsvpHeader.REQ_ONLY:
-                return null;
-
-            case RsvpHeader.RSP:
-                handleResponse(msg.getSrc(), hdr.id);
-                return null;
-        }
-        return up_prot.up(msg);
     }
 
     public void up(MessageBatch batch) {
@@ -203,7 +207,7 @@ public class RSVP extends Protocol {
         for(Message msg: batch) {
             if(!(msg.isFlagSet(Message.Flag.RSVP) || msg.isFlagSet(Message.Flag.RSVP_NB)))
                 continue;
-            RsvpHeader hdr=msg.getHeader(id);
+            RsvpHeader hdr=(RsvpHeader)msg.getHeader(id);
             if(hdr == null) {
                 if(dest == null || handle_unicasts)
                     log.error(Util.getMessage("MessageWithRSVPFlagNeedsToHaveAnRsvpHeader"));
@@ -270,7 +274,7 @@ public class RSVP extends Protocol {
 
             if(log.isTraceEnabled())
                 log.trace(local_addr + ": " + hdr.typeToString() + " --> " + dest);
-            down_prot.down(msg);
+            down_prot.down(new Event(Event.MSG, msg));
         }
         catch(Throwable t) {
             log.error(Util.getMessage("FailedSendingResponse"), t);
@@ -283,8 +287,7 @@ public class RSVP extends Protocol {
 
     protected synchronized void startResendTask() {
         if(resend_task == null || resend_task.isDone())
-            resend_task=timer.scheduleWithFixedDelay(new ResendTask(), resend_interval, resend_interval, TimeUnit.MILLISECONDS,
-                                                     getTransport() instanceof TCP);
+            resend_task=timer.scheduleWithFixedDelay(new ResendTask(), resend_interval, resend_interval, TimeUnit.MILLISECONDS);
     }
 
     protected synchronized void stopResendTask() {
@@ -359,7 +362,7 @@ public class RSVP extends Protocol {
                 Message msg=new Message(dest).setFlag(Message.Flag.RSVP).putHeader(id,hdr);
                 if(log.isTraceEnabled())
                     log.trace(local_addr + ": " + hdr.typeToString() + " --> " + (val.target == null? "cluster" : val.target));
-                down_prot.down(msg);
+                down_prot.down(new Event(Event.MSG, msg));
             }
         }
     }
@@ -381,10 +384,8 @@ public class RSVP extends Protocol {
             this.type=type;
             this.id=id;
         }
-        public short getMagicId() {return 76;}
-        public Supplier<? extends Header> create() {return RsvpHeader::new;}
 
-        public int serializedSize() {
+        public int size() {
             return Global.BYTE_SIZE + Global.SHORT_SIZE;
         }
 

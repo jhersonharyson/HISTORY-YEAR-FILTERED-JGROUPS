@@ -1,16 +1,21 @@
 package org.jgroups.protocols;
 
+/**
+ * A bundler based on {@link org.jgroups.util.RingBuffer}
+ * @author Bela Ban
+ * @since  4.0
+ */
 
 import org.jgroups.Address;
 import org.jgroups.Global;
 import org.jgroups.Message;
+import org.jgroups.util.BiConsumer;
 import org.jgroups.util.RingBuffer;
 import org.jgroups.util.Runner;
 import org.jgroups.util.Util;
 
 import java.util.Objects;
 import java.util.concurrent.locks.LockSupport;
-import java.util.function.BiConsumer;
 
 /**
  * Bundler which uses {@link RingBuffer} to store messages. The difference to {@link TransferQueueBundler} is that
@@ -24,20 +29,46 @@ public class RingBufferBundler extends BaseBundler {
     protected static final String         THREAD_NAME="RingBufferBundler";
     protected BiConsumer<Integer,Integer> wait_strategy=SPIN_PARK;
     protected int                         capacity;
-    protected final Runnable              run_function=this::readMessages;
-
-    protected static final BiConsumer<Integer,Integer> SPIN=(it,spins) -> {;};
-    protected static final BiConsumer<Integer,Integer> YIELD=(it,spins) -> Thread.yield();
-    protected static final BiConsumer<Integer,Integer> PARK=(it,spins) -> LockSupport.parkNanos(1);
-    protected static final BiConsumer<Integer,Integer> SPIN_PARK=(it, spins) -> {
-        if(it < spins/10)
-            return; // spin for the first 10% of all iterations, then switch to park()
-        LockSupport.parkNanos(1);
+    protected final Runnable              run_function=new Runnable() {
+        public void run() {
+            readMessages();}
     };
-    protected static final BiConsumer<Integer,Integer> SPIN_YIELD=(it, spins) -> {
-        if(it < spins/10)
-            return;           // spin for the first 10% of the total number of iterations
-        Thread.yield(); //, then switch to yield()
+    protected final Runnable              stop_function=new Runnable() {
+        public void run() {
+            rb.clear();
+        }
+    };
+
+    protected static final BiConsumer<Integer,Integer> SPIN=new BiConsumer<Integer,Integer>() {
+        public void accept(Integer ignore1, Integer ignore2) {;}
+    };
+
+    protected static final BiConsumer<Integer,Integer> YIELD=new BiConsumer<Integer,Integer>() {
+        public void accept(Integer it, Integer spins) {
+            Thread.yield();
+        }
+    };
+
+    protected static final BiConsumer<Integer,Integer> PARK=new BiConsumer<Integer,Integer>() {
+        public void accept(Integer it, Integer spins) {
+            LockSupport.parkNanos(1);
+        }
+    };
+
+    protected static final BiConsumer<Integer,Integer> SPIN_PARK=new BiConsumer<Integer,Integer>() {
+        public void accept(Integer it, Integer spins) {
+            if(it < spins/10)
+                ; // spin for the first 10% of all iterations, then switch to park()
+            LockSupport.parkNanos(1);
+        }
+    };
+
+    protected static final BiConsumer<Integer,Integer> SPIN_YIELD=new BiConsumer<Integer,Integer>() {
+        public void accept(Integer it, Integer spins) {
+            if(it < spins/10)
+                ;           // spin for the first 10% of the total number of iterations
+            Thread.yield(); //, then switch to yield()
+        }
     };
 
 
@@ -64,12 +95,14 @@ public class RingBufferBundler extends BaseBundler {
 
     public void init(TP transport) {
         super.init(transport);
+        checkForSharedTransport(transport);
         if(rb == null) {
             rb=new RingBuffer<>(Message.class, assertPositive(transport.getBundlerCapacity(), "bundler capacity cannot be " + transport.getBundlerCapacity()));
             this.capacity=rb.capacity();
         }
-        bundler_thread=new Runner(transport.getThreadFactory(), THREAD_NAME, run_function, () -> rb.clear());
+        bundler_thread=new Runner(transport.getThreadFactory(), THREAD_NAME, run_function, stop_function);
     }
+
 
     public void start() {
         bundler_thread.start();
@@ -115,12 +148,12 @@ public class RingBufferBundler extends BaseBundler {
                     output.writeInt(num_msgs);
                     output.position(current_pos);
                 }
-                transport.doSend(output.buffer(), 0, output.position(), dest);
+                transport.doSend(null, output.buffer(), 0, output.position(), dest);
                 if(transport.statsEnabled())
                     transport.incrBatchesSent(num_msgs);
             }
             catch(Exception ex) {
-                log.error("failed to send message(s) to %s: %s", dest == null? "group" : dest, ex.getMessage());
+                log.error("failed to send message(s)", ex);
             }
 
             if(start == end)
@@ -180,7 +213,7 @@ public class RingBufferBundler extends BaseBundler {
     }
 
     protected BiConsumer<Integer,Integer> createWaitStrategy(String st, BiConsumer<Integer,Integer> default_wait_strategy) {
-        if(st == null) return default_wait_strategy;
+        if(st == null) return default_wait_strategy != null? default_wait_strategy : null;
         switch(st) {
             case "spin":            return wait_strategy=SPIN;
             case "yield":           return wait_strategy=YIELD;
@@ -196,10 +229,11 @@ public class RingBufferBundler extends BaseBundler {
                 }
                 catch(Throwable t) {
                     log.error("failed creating wait_strategy " + st, t);
-                    return default_wait_strategy;
+                    return default_wait_strategy != null? default_wait_strategy : null;
                 }
         }
     }
+
 
     protected static int assertPositive(int value, String message) {
         if(value <= 0) throw new IllegalArgumentException(message);

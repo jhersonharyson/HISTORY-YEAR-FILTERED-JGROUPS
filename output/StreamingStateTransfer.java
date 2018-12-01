@@ -11,14 +11,16 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Base class for state transfer protocols which use streaming (or chunking) to transfer state between two members.
@@ -27,7 +29,7 @@ import java.util.function.Supplier;
  * The major advantage of this approach is that transferring application state to a
  * joining member of a group does not entail loading of the complete application
  * state into memory. The application state, for example, might be located entirely
- * on some form of disk based storage. The default {@code STATE_TRANSFER} protocol
+ * on some form of disk based storage. The default <code>STATE_TRANSFER</code> protocol
  * requires this state to be loaded entirely into memory before being
  * transferred to a group member while the streaming state transfer protocols do not.
  * Thus the streaming state transfer protocols are able to
@@ -57,16 +59,16 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
     protected int                 max_pool=5;
 
     @Property(description="Keep alive for pool threads serving state requests")
-    protected long                pool_thread_keep_alive=(long) 20 * 1000;
+    protected long                pool_thread_keep_alive=20 * 1000;
 
 
 
     /*
      * --------------------------------------------- JMX statistics -------------------------------
      */
-    protected final LongAdder     num_state_reqs=new LongAdder();
+    protected final AtomicInteger num_state_reqs=new AtomicInteger(0);
 
-    protected final LongAdder     num_bytes_sent=new LongAdder();
+    protected final AtomicLong    num_bytes_sent=new AtomicLong(0);
 
     protected double              avg_state_size;
 
@@ -94,8 +96,8 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
     protected final ProcessingQueue<Address> state_requesters=new ProcessingQueue<Address>().setHandler(this);
 
 
-    @ManagedAttribute public long   getNumberOfStateRequests()    {return num_state_reqs.sum();}
-    @ManagedAttribute public long   getNumberOfStateBytesSent()   {return num_bytes_sent.sum();}
+    @ManagedAttribute public int    getNumberOfStateRequests()    {return num_state_reqs.get();}
+    @ManagedAttribute public long   getNumberOfStateBytesSent()   {return num_bytes_sent.get();}
     @ManagedAttribute public double getAverageStateSize()         {return avg_state_size;}
     @ManagedAttribute public int    getThreadPoolSize()           {return thread_pool.getPoolSize();}
     @ManagedAttribute public long   getThreadPoolCompletedTasks() {return thread_pool.getCompletedTaskCount();}
@@ -109,8 +111,8 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
 
     public void resetStats() {
         super.resetStats();
-        num_state_reqs.reset();
-        num_bytes_sent.reset();
+        num_state_reqs.set(0);
+        num_bytes_sent.set(0);
         avg_state_size=0;
     }
 
@@ -143,14 +145,14 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
         switch(evt.getType()) {
 
             case Event.VIEW_CHANGE:
-                handleViewChange(evt.getArg());
+                handleViewChange((View)evt.getArg());
                 break;
 
             case Event.GET_STATE:
-                StateTransferInfo info=evt.getArg();
+                StateTransferInfo info=(StateTransferInfo)evt.getArg();
                 Address target=info.target;
 
-                if(Objects.equals(target, local_addr)) {
+                if(target != null && target.equals(local_addr)) {
                     log.error("%s: cannot fetch state from myself", local_addr);
                     target=null;
                 }
@@ -166,69 +168,67 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
                     Message state_req=new Message(target).putHeader(this.id, new StateHeader(StateHeader.STATE_REQ))
                       .setFlag(Message.Flag.SKIP_BARRIER, Message.Flag.DONT_BUNDLE, Message.Flag.OOB);
                     log.debug("%s: asking %s for state", local_addr, target);
-                    down_prot.down(state_req);
+                    down_prot.down(new Event(Event.MSG, state_req));
                 }
                 return null; // don't pass down any further !
 
             case Event.CONFIG:
-                handleConfig(evt.getArg());
+                handleConfig((Map<String, Object>)evt.getArg());
                 break;
 
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=evt.getArg();
+                local_addr=(Address)evt.getArg();
                 break;
         }
 
         return down_prot.down(evt); // pass on to the layer below us
     }
 
+   
+
     public Object up(Event evt) {
         switch(evt.getType()) {
+
+            case Event.MSG:
+                Message msg=(Message)evt.getArg();
+                StateHeader hdr=(StateHeader)msg.getHeader(this.id);
+                if(hdr != null) {
+                    Address sender=msg.getSrc();
+                    switch(hdr.type) {
+                        case StateHeader.STATE_REQ:
+                            state_requesters.add(msg.getSrc());
+                            break;
+                        case StateHeader.STATE_RSP:
+                            handleStateRsp(sender, hdr);
+                            break;
+                        case StateHeader.STATE_PART:
+                            handleStateChunk(sender, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                            break;
+                        case StateHeader.STATE_EOF:
+                            log.trace("%s <-- EOF <-- %s", local_addr, sender);
+                            handleEOF(sender);
+                            break;
+                        case StateHeader.STATE_EX:
+                            handleException((Throwable)msg.getObject());
+                            break;
+                        default:
+                            log.error("%s: type %d not known in StateHeader", local_addr, hdr.type);
+                            break;
+                    }
+                    return null;
+                }
+                break;
+
             case Event.TMP_VIEW:
             case Event.VIEW_CHANGE:
-                handleViewChange(evt.getArg());
+                handleViewChange((View)evt.getArg());
                 break;
 
             case Event.CONFIG:
-                handleConfig(evt.getArg());
+                handleConfig((Map<String,Object>)evt.getArg());
                 break;
         }
         return up_prot.up(evt);
-    }
-
-    public Object up(Message msg) {
-        StateHeader hdr=msg.getHeader(this.id);
-        if(hdr != null) {
-            Address sender=msg.getSrc();
-            switch(hdr.type) {
-                case StateHeader.STATE_REQ:
-                    state_requesters.add(msg.getSrc());
-                    break;
-                case StateHeader.STATE_RSP:
-                    handleStateRsp(sender, hdr);
-                    break;
-                case StateHeader.STATE_PART:
-                    handleStateChunk(sender, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-                    break;
-                case StateHeader.STATE_EOF:
-                    log.trace("%s <-- EOF <-- %s", local_addr, sender);
-                    handleEOF(sender);
-                    break;
-                case StateHeader.STATE_EX:
-                    try {
-                        handleException(Util.exceptionFromBuffer(msg.getRawBuffer(), msg.getOffset(), msg.getLength()));
-                    }
-                    catch(Throwable t) {
-                        log.error("failed deserializaing state exception", t);
-                    }
-                    break;
-                default:
-                    log.error("%s: type %d not known in StateHeader", local_addr, hdr.type);
-                    break;
-            }
-            return null;
-        }
-        return up_prot.up(msg);
     }
 
 
@@ -329,7 +329,7 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
         try {
             Message eof_msg=new Message(requester).putHeader(getId(), new StateHeader(StateHeader.STATE_EOF));
             log.trace("%s --> EOF --> %s", local_addr, requester);
-            down(eof_msg);
+            down(new Event(Event.MSG, eof_msg));
         }
         catch(Throwable t) {
             log.error("%s: failed sending EOF to %s", local_addr, requester);
@@ -338,9 +338,8 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
 
     protected void sendException(Address requester, Throwable exception) {
         try {
-            Message ex_msg=new Message(requester).setBuffer(Util.exceptionToBuffer(exception))
-              .putHeader(getId(), new StateHeader(StateHeader.STATE_EX));
-            down(ex_msg);
+            Message ex_msg=new Message(requester, null, exception).putHeader(getId(), new StateHeader(StateHeader.STATE_EX));
+            down(new Event(Event.MSG, ex_msg));
         }
         catch(Throwable t) {
             log.error("%s: failed sending exception %s to %s", local_addr, exception.toString(), requester);
@@ -351,7 +350,7 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
 
     protected ThreadPoolExecutor createThreadPool() {
         ThreadPoolExecutor threadPool=new ThreadPoolExecutor(0, max_pool, pool_thread_keep_alive,
-                                                             TimeUnit.MILLISECONDS, new SynchronousQueue<>());
+                                                             TimeUnit.MILLISECONDS, new SynchronousQueue<Runnable>());
 
         ThreadFactory factory=new ThreadFactory() {
             private final AtomicInteger thread_id=new AtomicInteger(1);
@@ -418,9 +417,9 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
         modifyStateResponseHeader(hdr);
         Message state_rsp=new Message(requester).putHeader(this.id, hdr);
         log.debug("%s: responding to state requester %s", local_addr, requester);
-        down_prot.down(state_rsp);
+        down_prot.down(new Event(Event.MSG, state_rsp));
         if(stats)
-            num_state_reqs.increment();
+            num_state_reqs.incrementAndGet();
 
         try {
             createStreamToRequester(requester);
@@ -485,7 +484,11 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
             final InputStream input=in;
             final Object res=resource;
             // use another thread to read state because the state requester has to receive state chunks from the state provider
-            Thread t=getThreadFactory().newThread(() -> setStateInApplication(input, res, provider), "STATE state reader");
+            Thread t=getThreadFactory().newThread(new Runnable() {
+                public void run() {
+                    setStateInApplication(input, res, provider);
+                }
+            }, "STATE state reader");
             t.start();
         }
         else
@@ -534,10 +537,6 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
             this.digest=digest;
             this.bind_addr=bind_addr;
         }
-        public short getMagicId() {return 65;}
-        public Supplier<? extends Header> create() {
-            return StateHeader::new;
-        }
 
         public int getType() {
             return type;
@@ -578,11 +577,11 @@ public abstract class StreamingStateTransfer extends Protocol implements Process
 
         public void readFrom(DataInput in) throws Exception {
             type=in.readByte();
-            digest=Util.readStreamable(Digest::new, in);
-            bind_addr=Util.readStreamable(IpAddress::new, in);
+            digest=(Digest)Util.readStreamable(Digest.class, in);
+            bind_addr=(IpAddress)Util.readStreamable(IpAddress.class, in);
         }
 
-        public int serializedSize() {
+        public int size() {
             int retval=Global.BYTE_SIZE; // type
             retval+=Global.BYTE_SIZE;    // presence byte for my_digest
             if(digest != null)
