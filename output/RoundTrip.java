@@ -4,7 +4,10 @@ import org.jgroups.Global;
 import org.jgroups.tests.rt.RtReceiver;
 import org.jgroups.tests.rt.RtTransport;
 import org.jgroups.tests.rt.transports.*;
-import org.jgroups.util.*;
+import org.jgroups.util.AverageMinMax;
+import org.jgroups.util.Bits;
+import org.jgroups.util.Promise;
+import org.jgroups.util.Util;
 
 import java.util.HashMap;
 import java.util.List;
@@ -62,10 +65,10 @@ public class RoundTrip implements RtReceiver {
 
     /** On the server: receive a request, send a response. On the client: send a request, wait for the response */
     public void receive(Object sender, byte[] req_buf, int offset, int length) {
-        switch(req_buf[0]) {
+        switch(req_buf[offset]) {
             case REQ:
-                short id=Bits.readShort(req_buf, 1);
-                long time=time(use_ms) - Bits.readLong(req_buf, 3);
+                short id=Bits.readShort(req_buf, 1+offset);
+                long time=time(use_ms) - Bits.readLong(req_buf, 3+offset);
                 byte[] rsp_buf=new byte[PAYLOAD];
                 rsp_buf[0]=RSP;
                 Bits.writeShort(id, rsp_buf, 1);
@@ -120,6 +123,7 @@ public class RoundTrip implements RtReceiver {
                         details=!details;
                         break;
                     case 'x':
+                    case -1:
                         looping=false;
                         break;
                 }
@@ -294,7 +298,7 @@ public class RoundTrip implements RtReceiver {
     protected static RtTransport create(String transport) throws Exception {
         String clazzname=TRANSPORTS.get(transport);
         Class<?> clazz=Util.loadClass(clazzname != null? clazzname : transport, RoundTrip.class);
-        return (RtTransport)clazz.newInstance();
+        return (RtTransport)clazz.getDeclaredConstructor().newInstance();
     }
 
     protected static String availableTransports() {

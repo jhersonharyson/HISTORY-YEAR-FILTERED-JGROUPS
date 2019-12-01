@@ -18,9 +18,6 @@ import javax.net.ssl.*;
 import java.io.*;
 import java.net.InetAddress;
 import java.security.KeyStore;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.security.PublicKey;
 import java.util.Map;
 import java.util.Objects;
 
@@ -35,7 +32,6 @@ import java.util.Objects;
  * @author Bela Ban
  * @since  4.0.5
  */
-@SuppressWarnings("unused")
 @MBean(description="Key exchange protocol based on an SSL connection between secret key requester and provider " +
   "(key server) to fetch a shared secret group key from the key server. That shared (symmetric) key is subsequently " +
   "used to encrypt communication between cluster members")
@@ -58,16 +54,18 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
         void verify(SSLSession session) throws SecurityException;
     }
 
-    @Property(description="The port at which the key server is listening. If the port is not available, the next port " +
-      "will be probed, up to port+port_range. Used by the key server (server) to create an SSLServerSocket and " +
-      "by clients to connect to the key server.")
-    protected int             port=2157;
 
     @LocalAddress
     @Property(description="Bind address for the server or client socket. " +
       "The following special values are also recognized: GLOBAL, SITE_LOCAL, LINK_LOCAL and NON_LOOPBACK",
       systemProperty={Global.BIND_ADDR})
     protected InetAddress     bind_addr;
+
+    @Property(description="The port at which the key server is listening. If the port is not available, the next port " +
+      "will be probed, up to port+port_range. Used by the key server (server) to create an SSLServerSocket and " +
+      "by clients to connect to the key server.")
+    protected int             port=2157;
+
 
     @Property(description="The port range to probe")
     protected int             port_range=5;
@@ -83,7 +81,7 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     protected String          keystore_password="changeit";
 
     @Property(description="The type of secret key to be sent up the stack (converted from DH). " +
-      "Should be the same as ASYM_ENCRYPT.sym_algorithm if ASYM_ENCRYPT is used")
+      "Should be the same as the algorithm part of ASYM_ENCRYPT.sym_algorithm if ASYM_ENCRYPT is used")
     protected String          secret_key_algorithm="AES";
 
     @Property(description="If enabled, clients are authenticated as well (not just the server). Set to true to prevent " +
@@ -101,16 +99,52 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     protected String          session_verifier_arg;
 
 
-    protected SSLServerSocket srv_sock;
+    protected SSLContext                   client_ssl_ctx;
+    protected SSLContext                   server_ssl_ctx;
+    protected SSLServerSocket              srv_sock;
+    protected Runner                       srv_sock_handler;
+    protected KeyStore                     key_store;
+    protected View                         view;
+    protected SessionVerifier              session_verifier;
 
-    protected Runner          srv_sock_handler;
 
-    protected KeyStore        key_store;
+    public InetAddress      getBindAddress()                               {return bind_addr;}
+    public SSL_KEY_EXCHANGE setBindAddress(InetAddress a)                  {this.bind_addr=a; return this;}
+    public int              getPort()                                      {return port;}
+    public SSL_KEY_EXCHANGE setPort(int p)                                 {this.port=p; return this;}
+    public int              getPortRange()                                 {return port_range;}
+    public SSL_KEY_EXCHANGE setPortRange(int r)                            {this.port_range=r; return this;}
+    public String           getKeystoreName()                              {return keystore_name;}
+    public SSL_KEY_EXCHANGE setKeystoreName(String name)                   {this.keystore_name=name; return this;}
+    public String           getKeystoreType()                              {return keystore_type;}
+    public SSL_KEY_EXCHANGE setKeystoreType(String type)                   {this.keystore_type=type; return this;}
+    public String           getKeystorePassword()                          {return keystore_password;}
+    public SSL_KEY_EXCHANGE setKeystorePassword(String pwd)                {this.keystore_password=pwd; return this;}
+    public String           getSecretKeyAlgorithm()                        {return secret_key_algorithm;}
+    public SSL_KEY_EXCHANGE setSecretKeyAlgorithm(String a)                {this.secret_key_algorithm=a; return this;}
+    public boolean          getRequireClientAuthentication()               {return require_client_authentication;}
+    public SSL_KEY_EXCHANGE setRequireClientAuthentication(boolean b)      {this.require_client_authentication=b; return this;}
+    public int              getSocketTimeout()                             {return socket_timeout;}
+    public SSL_KEY_EXCHANGE setSocketTimeout(int timeout)                  {this.socket_timeout=timeout; return this;}
+    public String           getSessionVerifierClass()                      {return session_verifier_class;}
+    public SSL_KEY_EXCHANGE setSessionVerifierClass(String cl)             {this.session_verifier_class=cl; return this;}
+    public String           getSessionVerifierArg()                        {return session_verifier_arg;}
+    public SSL_KEY_EXCHANGE setSessionVerifierArg(String arg)              {this.session_verifier_arg=arg; return this;}
+    public KeyStore         getKeystore()                                  {return key_store;}
+    public SSL_KEY_EXCHANGE setKeystore(KeyStore ks)                       {this.key_store=ks; return this;}
+    public SessionVerifier  getSessionVerifier()                           {return session_verifier;}
+    public SSL_KEY_EXCHANGE setSessionVerifier(SessionVerifier s)          {this.session_verifier=s; return this;}
+    @Deprecated public SSLContext getSSLContext()                          {return client_ssl_ctx;}
+    @Deprecated public SSL_KEY_EXCHANGE setSSLContext(SSLContext ssl_ctx)  {this.client_ssl_ctx=ssl_ctx; return this;}
+    public SSLContext getClientSSLContext()                                {return client_ssl_ctx;}
+    public SSL_KEY_EXCHANGE setClientSSLContext(SSLContext client_ssl_ctx) {this.client_ssl_ctx = client_ssl_ctx; return this;}
+    public SSLContext getServerSSLContext()                                {return server_ssl_ctx;}
+    public SSL_KEY_EXCHANGE setServerSSLContext(SSLContext server_ssl_ctx) {this.server_ssl_ctx = server_ssl_ctx; return this;}
 
-    protected View            view;
 
-    protected SessionVerifier session_verifier;
-
+    public Address getServerLocation() {
+        return srv_sock == null? null : new IpAddress(getTransport().getBindAddress(), srv_sock.getLocalPort());
+    }
 
     public void init() throws Exception {
         super.init();
@@ -118,18 +152,32 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
             throw new IllegalStateException("port must not be 0 or else clients will not be able to connect");
         ASYM_ENCRYPT asym_encrypt=findProtocolAbove(ASYM_ENCRYPT.class);
         if(asym_encrypt != null) {
-            String sym_alg=asym_encrypt.symAlgorithm();
+            String sym_alg=asym_encrypt.symKeyAlgorithm();
             if(!Util.match(sym_alg, secret_key_algorithm)) {
-                log.warn("overriding %s=%s to %s from %s", "secret_key_algorithm", secret_key_algorithm,
+                log.warn("%s: overriding %s=%s to %s from %s", "secret_key_algorithm", local_addr, secret_key_algorithm,
                          sym_alg, ASYM_ENCRYPT.class.getSimpleName());
                 secret_key_algorithm=sym_alg;
             }
         }
-        key_store=KeyStore.getInstance(keystore_type != null? keystore_type : KeyStore.getDefaultType());
-        key_store.load(new FileInputStream(keystore_name), keystore_password.toCharArray());
-        if(session_verifier_class != null) {
+
+        // Skip key store initialization if it was already provided or a ready-made SSLContext was already provided
+        if (key_store == null && (client_ssl_ctx == null || server_ssl_ctx == null)) {
+            key_store = KeyStore.getInstance(keystore_type != null ? keystore_type : KeyStore.getDefaultType());
+
+            InputStream input;
+            try {
+                input = new FileInputStream(keystore_name);
+            } catch (FileNotFoundException not_found) {
+                input = Util.getResourceAsStream(keystore_name, getClass());
+            }
+            if (input == null)
+                throw new FileNotFoundException(keystore_name);
+            key_store.load(input, keystore_password.toCharArray());
+        }
+
+        if(session_verifier == null && session_verifier_class != null) {
             Class<? extends SessionVerifier> verifier_class=Util.loadClass(session_verifier_class, getClass());
-            session_verifier=verifier_class.newInstance();
+            session_verifier=verifier_class.getDeclaredConstructor().newInstance();
             if(session_verifier_arg != null)
                 session_verifier.init(session_verifier_arg);
         }
@@ -141,23 +189,17 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
 
     public void stop() {
         super.stop();
-        if(srv_sock_handler != null) {
-            srv_sock_handler.stop(); // should also close srv_sock
-            srv_sock_handler=null;
-            Util.close(srv_sock);  // not needed, but second line of defense
-            srv_sock=null;
-        }
+        stopKeyserver();
     }
 
     public void destroy() {
         super.destroy();
     }
 
-    @SuppressWarnings("unchecked")
     public Object up(Event evt) {
         if(evt.getType() == Event.CONFIG) {
             if(bind_addr == null) {
-                Map<String,Object> config=(Map<String,Object>)evt.getArg();
+                Map<String,Object> config=evt.getArg();
                 bind_addr=(InetAddress)config.get("bind_addr");
             }
             return up_prot.up(evt);
@@ -166,7 +208,7 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     }
 
 
-    public synchronized void fetchSecretKeyFrom(Address target) throws Exception {
+    public void fetchSecretKeyFrom(Address target) throws Exception {
         try(SSLSocket sock=createSocketTo(target)) {
             DataInput in=new DataInputStream(sock.getInputStream());
             OutputStream out=sock.getOutputStream();
@@ -192,26 +234,6 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
             Tuple<SecretKey,byte[]> tuple=new Tuple<>(sk, version);
             log.debug("%s: sending up secret key (version: %s)", local_addr, Util.byteArrayToHexString(version));
             up_prot.up(new Event(Event.SET_SECRET_KEY, tuple));
-        }
-    }
-
-    protected void handleView(View view) {
-        Address old_coord=this.view != null? this.view.getCoord() : null;
-        this.view=view;
-
-        if(Objects.equals(view.getCoord(), local_addr)) {
-            if(!Objects.equals(old_coord, local_addr)) {
-                try {
-                    becomeKeyserver();
-                }
-                catch(Exception e) {
-                    log.error("failed becoming key server", e);
-                }
-            }
-        }
-        else { // stop being keyserver, close the server socket and handler
-            if(Objects.equals(old_coord, local_addr))
-                stopKeyserver();
         }
     }
 
@@ -250,7 +272,28 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
             out.write(secret_key);
         }
         catch(Throwable t) {
-            log.warn("failure handling client socket", t);
+            log.trace("%s: failure handling client socket: %s", local_addr, t.getMessage());
+        }
+    }
+
+
+    protected void handleView(View view) {
+        Address old_coord=this.view != null? this.view.getCoord() : null;
+        this.view=view;
+
+        if(Objects.equals(view.getCoord(), local_addr)) {
+            if(!Objects.equals(old_coord, local_addr)) {
+                try {
+                    becomeKeyserver();
+                }
+                catch(Throwable e) {
+                    log.error("failed becoming key server", e);
+                }
+            }
+        }
+        else { // stop being keyserver, close the server socket and handler
+            if(Objects.equals(old_coord, local_addr))
+                stopKeyserver();
         }
     }
 
@@ -260,40 +303,31 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
             log.debug("%s: becoming keyserver; creating server socket", local_addr);
             srv_sock=createServerSocket();
             srv_sock_handler=new Runner(getThreadFactory(), SSL_KEY_EXCHANGE.class.getSimpleName() + "-runner",
-                                        new Runnable() {
-                                            public void run() {
-                                                accept();
-                                            }
-                                        },
-                                        new Runnable() {
-                                            public void run() {
-                                                Util.close(srv_sock);
-                                            }
-                                        });
+                                        this::accept, () -> Util.close(srv_sock));
             srv_sock_handler.start();
-            log.debug("SSL server socket listening on %s", srv_sock.getLocalSocketAddress());
+            log.debug("%s: SSL server socket listening on %s", local_addr, srv_sock.getLocalSocketAddress());
         }
     }
 
     protected synchronized void stopKeyserver() {
+        if(srv_sock != null) {
+            Util.close(srv_sock); // should not be necessary (check)
+            srv_sock=null;
+        }
         if(srv_sock_handler != null) {
             log.debug("%s: ceasing to be the keyserver; closing the server socket", local_addr);
             srv_sock_handler.stop();
             srv_sock_handler=null;
         }
-        if(srv_sock != null) {
-            Util.close(srv_sock); // should not be necessary (check)
-            srv_sock=null;
-        }
     }
 
 
     protected SSLServerSocket createServerSocket() throws Exception {
-        SSLContext ctx=getContext();
+        SSLContext ctx= this.server_ssl_ctx != null ? this.server_ssl_ctx : getContext();
         SSLServerSocketFactory sslServerSocketFactory=ctx.getServerSocketFactory();
 
-        SSLServerSocket sslServerSocket=null;
-        for(int i=0; i < port_range; i++) {
+        SSLServerSocket sslServerSocket;
+        for(int i=0; i <= port_range; i++) {
             try {
                 sslServerSocket=(SSLServerSocket)sslServerSocketFactory.createServerSocket(port + i, 50, bind_addr);
                 sslServerSocket.setNeedClientAuth(require_client_authentication);
@@ -306,14 +340,15 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     }
 
     protected SSLSocket createSocketTo(Address target) throws Exception {
-        SSLContext ctx=getContext();
+        SSLContext ctx= this.client_ssl_ctx != null ? this.client_ssl_ctx : getContext();
         SSLSocketFactory sslSocketFactory=ctx.getSocketFactory();
 
+        if(target instanceof IpAddress)
+            return createSocketTo((IpAddress)target, sslSocketFactory);
+
         IpAddress dest=(IpAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, target));
-
-
-        SSLSocket sock=null;
-        for(int i=0; i < port_range; i++) {
+        SSLSocket sock;
+        for(int i=0; i <= port_range; i++) {
             try {
                 sock=(SSLSocket)sslSocketFactory.createSocket(dest.getIpAddress(), port+i);
                 sock.setSoTimeout(socket_timeout);
@@ -334,21 +369,43 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
             catch(Throwable t) {
             }
         }
-        throw new IllegalStateException(String.format("failed connecting to any targets in range %s[%d - %d]",
+        throw new IllegalStateException(String.format("failed connecting to %s (port range [%d - %d])",
                                                       dest.getIpAddress(), port, port+port_range));
     }
 
+    protected SSLSocket createSocketTo(IpAddress dest, SSLSocketFactory sslSocketFactory) {
+        try {
+            SSLSocket sock=(SSLSocket)sslSocketFactory.createSocket(dest.getIpAddress(), dest.getPort());
+            sock.setSoTimeout(socket_timeout);
+            sock.setEnabledCipherSuites(sock.getSupportedCipherSuites());
+            sock.startHandshake();
+            SSLSession sslSession=sock.getSession();
 
+            log.debug("%s: created SSL connection to %s (%s); protocol: %s, cipher suite: %s",
+                      local_addr, dest, sock.getRemoteSocketAddress(), sslSession.getProtocol(), sslSession.getCipherSuite());
+
+            if(session_verifier != null)
+                session_verifier.verify(sslSession);
+            return sock;
+        }
+        catch(SecurityException sec_ex) {
+            throw sec_ex;
+        }
+        catch(Throwable t) {
+            throw new IllegalStateException(String.format("failed connecting to %s: %s", dest, t.getMessage()));
+        }
+    }
 
 
     protected SSLContext getContext() throws Exception {
+        if(this.client_ssl_ctx != null)
+            return this.client_ssl_ctx;
         // Create key manager
         KeyManagerFactory keyManagerFactory=KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         keyManagerFactory.init(key_store, keystore_password.toCharArray());
         KeyManager[] km=keyManagerFactory.getKeyManagers();
 
         // Create trust manager
-        // TrustManagerFactory trustManagerFactory=TrustManagerFactory.getInstance("SunX509");
         TrustManagerFactory trustManagerFactory=TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         trustManagerFactory.init(key_store);
         TrustManager[] tm=trustManagerFactory.getTrustManagers();
@@ -356,24 +413,7 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
         // Initialize SSLContext
         SSLContext sslContext=SSLContext.getInstance("TLSv1");
         sslContext.init(km, tm, null);
-        return sslContext;
+        return this.client_ssl_ctx=sslContext;
     }
-
-
-    protected static String print16(PublicKey pub_key) {
-        // use SHA256 to create a hash of secret_key and only then truncate it to secret_key_length
-        MessageDigest digest=null;
-        try {
-            digest=MessageDigest.getInstance("SHA-256");
-            digest.update(pub_key.getEncoded());
-            return Util.byteArrayToHexString(digest.digest(), 0, 16);
-        }
-        catch(NoSuchAlgorithmException e) {
-            return e.toString();
-        }
-    }
-
-
-
 }
 

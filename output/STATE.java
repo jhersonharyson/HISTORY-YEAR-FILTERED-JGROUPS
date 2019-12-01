@@ -93,7 +93,7 @@ public class STATE extends StreamingStateTransfer {
     protected Tuple<InputStream,Object> createStreamToProvider(final Address provider, final StateHeader hdr) {
         Util.close(input_stream);
         input_stream=new BlockingInputStream(buffer_size);
-        return new Tuple<InputStream,Object>(input_stream, null);
+        return new Tuple<>(input_stream, null);
     }
 
     @Override
@@ -102,7 +102,7 @@ public class STATE extends StreamingStateTransfer {
     protected class StateOutputStream extends OutputStream {
         protected final Address        stateRequester;
         protected final AtomicBoolean  closed;
-        protected long                 bytesWrittenCounter=0;
+        protected long                 bytesWrittenCounter;
 
         public StateOutputStream(Address stateRequester) {
             this.stateRequester=stateRequester;
@@ -110,9 +110,9 @@ public class STATE extends StreamingStateTransfer {
         }
 
         public void close() throws IOException {
-            if(closed.compareAndSet(false, true)) {
-                if(stats)
-                    avg_state_size=num_bytes_sent.addAndGet(bytesWrittenCounter) / num_state_reqs.doubleValue();
+            if(closed.compareAndSet(false, true) && stats) {
+                num_bytes_sent.add(bytesWrittenCounter);
+                avg_state_size=num_bytes_sent.sum() / num_state_reqs.doubleValue();
             }
         }
 
@@ -151,7 +151,7 @@ public class STATE extends StreamingStateTransfer {
             bytesWrittenCounter+=len;
             if(Thread.interrupted())
                 throw interrupted((int)bytesWrittenCounter);
-            down_prot.down(new Event(Event.MSG, m));
+            down_prot.down(m);
             if(log.isTraceEnabled())
                 log.trace("%s: sent chunk of %s to %s",local_addr,Util.printBytes(len),stateRequester);
         }

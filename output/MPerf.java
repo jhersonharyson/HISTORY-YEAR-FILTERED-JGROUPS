@@ -18,6 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * Dynamic tool to measure multicast performance of JGroups; every member sends N messages and we measure how long it
@@ -60,7 +61,7 @@ public class MPerf extends ReceiverAdapter {
     protected volatile Address                    result_collector=null;
     protected volatile boolean                    initiator=false;
 
-    protected static  final NumberFormat          format=NumberFormat.getNumberInstance();
+    protected static  final NumberFormat          format=NumberFormat.getInstance();
     protected static final short                  ID=ClassConfigurator.getProtocolId(MPerf.class);
 
 
@@ -91,7 +92,7 @@ public class MPerf extends ReceiverAdapter {
         JmxConfigurator.registerChannel(channel, Util.getMBeanServer(), "jgroups", "mperf", true);
 
         // send a CONFIG_REQ to the current coordinator, so we can get the current config
-        Address coord=channel.getView().getMembers().get(0);
+        Address coord=channel.getView().getCoord();
         if(coord != null && !local_addr.equals(coord))
             send(coord,null,MPerfHeader.CONFIG_REQ, Message.Flag.RSVP);
     }
@@ -101,7 +102,7 @@ public class MPerf extends ReceiverAdapter {
         int c;
 
         final String INPUT="[1] Send [2] View\n" +
-          "[3] Set num msgs (%d) [4] Set msg size (%s) [5] Set threads (%d) [6] New config (%s)\n" +
+          "[3] Set num msgs (%,d) [4] Set msg size (%s) [5] Set threads (%d) [6] New config (%s)\n" +
           "[7] Number of senders (%s) [o] Toggle OOB (%s)\n" +
           "[x] Exit this [X] Exit all [c] Cancel sending";
 
@@ -145,6 +146,7 @@ public class MPerf extends ReceiverAdapter {
                         send(null,change,MPerfHeader.CONFIG_CHANGE,Message.Flag.RSVP);
                         break;
                     case 'x':
+                    case -1:
                         looping=false;
                         break;
                     case 'X':
@@ -212,7 +214,7 @@ public class MPerf extends ReceiverAdapter {
 
 
     protected void send(Address target, Object payload, byte header, Message.Flag ... flags) throws Exception {
-        Message msg=new Message(target, null, payload);
+        Message msg=new Message(target, payload);
         if(flags != null)
             for(Message.Flag flag: flags)
                 msg.setFlag(flag);
@@ -263,7 +265,7 @@ public class MPerf extends ReceiverAdapter {
 
 
     public void receive(Message msg) {
-        MPerfHeader hdr=(MPerfHeader)msg.getHeader(ID);
+        MPerfHeader hdr=msg.getHeader(ID);
         switch(hdr.type) {
             case MPerfHeader.DATA:
                 // we're checking the *application's* seqno, and multiple sender threads
@@ -326,7 +328,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.RESULT:
-                Result res=(Result)msg.getObject();
+                Result res=msg.getObject();
                 results.add(msg.getSrc(), res);
                 if(initiator && results.hasAllResponses()) {
                     initiator=false;
@@ -335,8 +337,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.CLEAR_RESULTS:
-                for(Stats result: received_msgs.values())
-                    result.reset();
+                received_msgs.values().forEach(Stats::reset);
                 total_received_msgs.set(0);
                 last_interval=0;
 
@@ -350,7 +351,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.CONFIG_CHANGE:
-                ConfigChange config_change=(ConfigChange)msg.getObject();
+                ConfigChange config_change=msg.getObject();
                 handleConfigChange(config_change);
                 break;
 
@@ -364,7 +365,7 @@ public class MPerf extends ReceiverAdapter {
                 break;
 
             case MPerfHeader.CONFIG_RSP:
-                handleConfigResponse((Configuration)msg.getObject());
+                handleConfigResponse(msg.getObject());
                 break;
 
             case MPerfHeader.EXIT:
@@ -412,8 +413,8 @@ public class MPerf extends ReceiverAdapter {
             double msgs_sec=receive_log_interval / (diff / 1000.0);
             double throughput=msgs_sec * msg_size;
             last_interval=curr_time;
-            System.out.println("-- received " + received_so_far + " msgs " + "(" + diff + " ms, " +
-                                 format.format(msgs_sec) + " msgs/sec, " + Util.printBytes(throughput) + "/sec)");
+            System.out.printf("-- received %,d msgs (%,d ms, %,.2f msgs/sec, %s /sec)\n",
+                              received_so_far, diff, msgs_sec, Util.printBytes(throughput));
         }
     }
 
@@ -429,27 +430,25 @@ public class MPerf extends ReceiverAdapter {
 
     protected void applyNewConfig(byte[] buffer) {
         final InputStream in=new ByteArrayInputStream(buffer);
-        Thread thread=new Thread() {
-            public void run() {
-                try {
-                    JChannel ch=new JChannel(in);
-                    Util.sleepRandom(1000, 5000);
-                    channel.disconnect();
-                    JChannel tmp=channel;
-                    channel=ch;
-                    channel.setName(name);
-                    channel.setReceiver(MPerf.this);
-                    channel.connect("mperf");
-                    local_addr=channel.getAddress();
-                    JmxConfigurator.unregisterChannel(tmp, Util.getMBeanServer(), "jgroups", "mperf");
-                    Util.close(tmp);
-                    JmxConfigurator.registerChannel(channel, Util.getMBeanServer(), "jgroups", "mperf", true);
-                }
-                catch(Exception e) {
-                    System.err.println("failed creating new channel");
-                }
+        Thread thread=new Thread(() -> {
+            try {
+                JChannel ch=new JChannel(in);
+                Util.sleepRandom(1000, 5000);
+                channel.disconnect();
+                JChannel tmp=channel;
+                channel=ch;
+                channel.setName(name);
+                channel.setReceiver(MPerf.this);
+                channel.connect("mperf");
+                local_addr=channel.getAddress();
+                JmxConfigurator.unregisterChannel(tmp, Util.getMBeanServer(), "jgroups", "mperf");
+                Util.close(tmp);
+                JmxConfigurator.registerChannel(channel, Util.getMBeanServer(), "jgroups", "mperf", true);
             }
-        };
+            catch(Exception e) {
+                System.err.println("failed creating new channel");
+            }
+        });
 
         System.out.println("<< restarting channel");
         thread.start();
@@ -481,8 +480,7 @@ public class MPerf extends ReceiverAdapter {
     }
 
     protected void handleConfigResponse(Configuration cfg) {
-        for(ConfigChange change: cfg.changes)
-            handleConfigChange(change);
+        cfg.changes.forEach(this::handleConfigChange);
     }
 
 
@@ -521,7 +519,7 @@ public class MPerf extends ReceiverAdapter {
             senders[i].start();
         }
         try {
-            System.out.println("-- sending " + num_msgs + (oob? " OOB msgs" : " msgs"));
+            System.out.printf("-- sending %,d %s\n", num_msgs, (oob? " OOB msgs" : " msgs"));
             barrier.await();
         }
         catch(Exception e) {
@@ -531,16 +529,11 @@ public class MPerf extends ReceiverAdapter {
 
 
     protected static String computeStats(long time, long msgs, int size) {
-        StringBuilder sb=new StringBuilder();
         double msgs_sec, throughput=0;
         msgs_sec=msgs / (time/1000.0);
         throughput=(msgs * size) / (time / 1000.0);
-        sb.append(msgs).append(" msgs, ");
-        sb.append(Util.printBytes(msgs * size)).append(" received");
-        sb.append(", time=").append(format.format(time)).append("ms");
-        sb.append(", msgs/sec=").append(format.format(msgs_sec));
-        sb.append(", throughput=").append(Util.printBytes(throughput));
-        return sb.toString();
+        return String.format("%,d msgs, %s received, time=%,d ms, msgs/sec=%,.2f, throughput=%s",
+                             msgs, Util.printBytes(msgs * size), time, msgs_sec, Util.printBytes(throughput));
     }
     
     protected class Sender extends Thread {
@@ -578,7 +571,7 @@ public class MPerf extends ReceiverAdapter {
                         msg.setFlag(Message.Flag.OOB);
                     channel.send(msg);
                     if(tmp % log_interval == 0)
-                        System.out.println("++ sent " + tmp);
+                        System.out.printf("++ sent %,d\n", tmp);
 
                     // if we used num_msgs_sent, we might have thread T3 which reaches the condition below, but
                     // actually didn't send the *last* message !
@@ -615,12 +608,14 @@ public class MPerf extends ReceiverAdapter {
             return Util.size(attr_name) + Util.size(attr_value);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             Bits.writeString(attr_name,out);
             Util.writeByteBuffer(attr_value, out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException {
             attr_name=Bits.readString(in);
             attr_value=Util.readByteBuffer(in);
         }
@@ -647,13 +642,13 @@ public class MPerf extends ReceiverAdapter {
             return retval;
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        public void writeTo(DataOutput out) throws IOException {
             out.writeInt(changes.size());
             for(ConfigChange change: changes)
                 change.writeTo(out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        public void readFrom(DataInput in) throws IOException {
             int len=in.readInt();
             for(int i=0; i < len; i++) {
                 ConfigChange change=new ConfigChange();
@@ -713,12 +708,12 @@ public class MPerf extends ReceiverAdapter {
             return Bits.size(time) + Bits.size(msgs);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        public void writeTo(DataOutput out) throws IOException {
             Bits.writeLong(time,out);
             Bits.writeLong(msgs,out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        public void readFrom(DataInput in) throws IOException {
             time=Bits.readLong(in);
             msgs=Bits.readLong(in);
         }
@@ -748,20 +743,26 @@ public class MPerf extends ReceiverAdapter {
         public MPerfHeader() {}
         public MPerfHeader(byte type) {this.type=type;}
         public MPerfHeader(byte type, long seqno) {this(type); this.seqno=seqno;}
-        public int size() {
+        public short getMagicId() {return 77;}
+        public Supplier<? extends Header> create() {
+            return MPerfHeader::new;
+        }
+
+        @Override
+        public int serializedSize() {
             int retval=Global.BYTE_SIZE;
             if(type == DATA)
                 retval+=Bits.size(seqno);
             return retval;
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        public void writeTo(DataOutput out) throws IOException {
             out.writeByte(type);
             if(type == DATA)
                 Bits.writeLong(seqno, out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        public void readFrom(DataInput in) throws IOException {
             type=in.readByte();
             if(type == DATA)
                 seqno=Bits.readLong(in);

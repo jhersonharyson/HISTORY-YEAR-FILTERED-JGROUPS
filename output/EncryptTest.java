@@ -6,6 +6,7 @@ import org.jgroups.demos.KeyStoreGenerator;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.NakAckHeader2;
+import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Buffer;
 import org.jgroups.util.ByteArrayDataOutputStream;
 import org.jgroups.util.MyReceiver;
@@ -14,61 +15,51 @@ import org.testng.annotations.Test;
 
 import javax.crypto.SecretKey;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
-
-import static java.util.Arrays.asList;
-
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Base class for tests {@link SYM_ENCRYPT_Test} and {@link ASYM_ENCRYPT_Test}
  * @author Bela Ban
  * @since  4.0
  */
-@Test(enabled=false)
+@Test(groups={Global.FUNCTIONAL,Global.ENCRYPT},singleThreaded=true)
 public abstract class EncryptTest {
-    protected JChannel            a,b,c,rogue;
-    protected MyReceiver<Message> ra, rb, rc, r_rogue;
-    protected String              cluster_name;
-    protected static final short  GMS_ID;
+    protected JChannel                 a,b,c,d,rogue;
+    protected MyReceiver<Message>      ra, rb, rc, r_rogue;
+    protected final String             cluster_name=getClass().getSimpleName();
+    protected static final short       GMS_ID;
 
     static {
         GMS_ID=ClassConfigurator.getProtocolId(GMS.class);
     }
 
-    protected void init(String cluster_name) throws Exception {
-        this.cluster_name=cluster_name;
-        a=create("A");
-        a.connect(cluster_name);
-        a.setReceiver(ra=new MyReceiver<>().rawMsgs(true));
+    protected String symAlgorithm() { return "AES"; }
+    protected int symIvLength() { return 0; }
 
-        b=create("B");
-        b.connect(cluster_name);
-        b.setReceiver(rb=new MyReceiver<>().rawMsgs(true));
-
-        c=create("C");
-        c.connect(cluster_name);
-        c.setReceiver(rc=new MyReceiver<>().rawMsgs(true));
-
-        Util.waitUntilAllChannelsHaveSameView(10000, 500, a,b,c);
-        rogue=createRogue("rogue");
-        rogue.connect(cluster_name);
-        for(JChannel ch: asList(a,b,c))
-            System.out.printf("%s: %s\n", ch.getAddress(), ch.getView());
-        System.out.println("");
+    protected void init() throws Exception {
+        a=create("A").connect(cluster_name).setReceiver(ra=new MyReceiver<>().rawMsgs(true));
+        b=create("B").connect(cluster_name).setReceiver(rb=new MyReceiver<>().rawMsgs(true));
+        c=create("C").connect(cluster_name).setReceiver(rc=new MyReceiver<>().rawMsgs(true));
+        Util.waitUntilAllChannelsHaveSameView(10000, 500, a, b, c);
+        rogue=createRogue("rogue").connect(cluster_name);
+        Stream.of(a,b,c,rogue).forEach(ch -> System.out.printf("%s: %s\n", ch.getAddress(), ch.getView()));
+        System.out.println();
     }
 
-    @Test(enabled=false) protected void destroy() {
-        Util.close(c, b, a, rogue);
-    }
+    protected void destroy() {Util.close(rogue,d,c,b,a);}
 
     protected abstract JChannel create(String name) throws Exception;
 
 
-
     /** Tests A,B or C sending messages and their reception by everyone in cluster {A,B,C} */
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
-    protected void testRegularMessageReception() throws Exception {
+    //@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
+    public void testRegularMessageReception() throws Exception {
         a.send(null, "Hello from A");
         b.send(null, "Hello from B");
         c.send(null, "Hello from C");
@@ -77,9 +68,9 @@ public abstract class EncryptTest {
                 break;
             Util.sleep(500);
         }
-        for(MyReceiver r: asList(ra,rb,rc))
-            System.out.printf("%s: %s\n", r.name(), print(r.list()));
-        assertSize(3);
+        Stream.of(ra, rb, rc).map(MyReceiver::list).map(l -> l.stream().map(msg -> (String)msg.getObject())
+          .collect(ArrayList::new, ArrayList::add, (x, y) -> {})).forEach(System.out::println);
+        assertForEachReceiver(r -> r.size() == 3);
     }
 
     /** Same as above, but all message payloads are null */
@@ -92,14 +83,10 @@ public abstract class EncryptTest {
                 break;
             Util.sleep(500);
         }
-        for(MyReceiver r: asList(ra,rb,rc))
-            System.out.printf("%s: %s\n", r.name(), print(r.list()));
-        assertSize(3);
-        assertForEachMessage(new Pred<Message>() {
-            public boolean test(Message msg) {
-                return msg.getRawBuffer() == null;
-            }
-        });
+        Stream.of(ra, rb, rc).map(MyReceiver::list).map(l -> l.stream().map(msg -> (String)msg.getObject())
+          .collect(ArrayList::new, ArrayList::add, (x, y) -> {})).forEach(System.out::println);
+        assertForEachReceiver(r -> r.size() == 3);
+        assertForEachMessage(msg -> msg.getRawBuffer() == null);
     }
 
     /** Same as above, but all message payloads are empty (0-length String) */
@@ -112,57 +99,39 @@ public abstract class EncryptTest {
                 break;
             Util.sleep(500);
         }
-        assertSize(3);
-        assertForEachMessage(new Pred<Message>() {
-            public boolean test(Message msg) {
-                return msg.getLength() == 0;
-            }
-        });
-        assertForEachMessage(new Pred<Message>() {
-            public boolean test(Message msg) {
-                return Arrays.equals(msg.getRawBuffer(), new byte[0]);
-            }
-        });
-    }
-
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
-    public void testChecksum() throws Exception {
-        EncryptBase encrypt=(EncryptBase)a.getProtocolStack().findProtocol(EncryptBase.class);
-
-        byte[] buffer="Hello world".getBytes();
-        long checksum=encrypt.computeChecksum(buffer, 0, buffer.length);
-        byte[] checksum_array=encrypt.encryptChecksum(checksum);
-
-        long actual_checksum=encrypt.decryptChecksum(null, checksum_array, 0, checksum_array.length);
-        assert checksum == actual_checksum : String.format("checksum: %d, actual: %d", checksum, actual_checksum);
+        assertForEachReceiver(r -> r.size() == 3);
+        assertForEachMessage(msg -> msg.getLength() == 0);
+        assertForEachMessage(msg -> Arrays.equals(msg.getRawBuffer(), new byte[0]));
     }
 
 
     /** A rogue member should not be able to join a cluster */
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
+    //@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
     public void testRogueMemberJoin() throws Exception {
         Util.close(rogue);
         rogue=new JChannel(Util.getTestStack()).name("rogue");
-        rogue.getProtocolStack().removeProtocol(EncryptBase.class);
-        GMS gms=(GMS)rogue.getProtocolStack().findProtocol(GMS.class);
+        rogue.getProtocolStack().removeProtocol(Encrypt.class);
+        GMS gms=rogue.getProtocolStack().findProtocol(GMS.class);
         gms.setMaxJoinAttempts(1);
-        rogue.connect(cluster_name);
+        try {
+            rogue.connect(cluster_name);
+        }
+        catch(Exception ex) {}
         for(int i=0; i < 10; i++) {
             if(a.getView().size() > 3)
                 break;
             Util.sleep(500);
         }
-        for(JChannel ch: asList(a,b,c))
-            System.out.printf("%s: view is %s\n", ch.getAddress(), ch.getView());
-        for(JChannel ch: asList(a,b,c)) {
+        Arrays.asList(a,b,c).forEach(ch -> System.out.printf("%s: view is %s\n", ch.getAddress(), ch.getView()));
+        Arrays.asList(a,b,c).forEach(ch -> {
             View view=ch.getView();
             assert view.size() == 3 : "view should be {A,B,C}: " + view;
-        }
+        });
     }
 
 
     /** Test that A,B,C do NOT receive any message sent by a rogue node which is not member of {A,B,C} */
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
+    //@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
     public void testMessageSendingByRogue() throws Exception {
         rogue.send(null, "message from rogue");  // tests single messages
         Util.sleep(500);
@@ -185,10 +154,9 @@ public abstract class EncryptTest {
      * from the cluster members' shared key as R doesn't know it). The cluster members should drop R's message as they
      * shouldn't be able to decrypt it.
      */
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
+    //@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
     public void testMessageSendingByRogueUsingEncryption() throws Exception {
         SYM_ENCRYPT encrypt=new SYM_ENCRYPT().keystoreName("/tmp/ignored.keystore");
-        encrypt.encryptEntireMessage(true).signMessages(true);
 
         SecretKey secret_key=KeyStoreGenerator.createSecretKey();
         Field secretKey=Util.getField(SYM_ENCRYPT.class, "secret_key");
@@ -197,15 +165,13 @@ public abstract class EncryptTest {
         encrypt.init();
 
         short encrypt_id=ClassConfigurator.getProtocolId(SYM_ENCRYPT.class);
-        EncryptHeader hdr=new EncryptHeader(EncryptHeader.ENCRYPT, encrypt.symVersion());
+        byte[] iv = encrypt.makeIv();
+        EncryptHeader hdr=new EncryptHeader((byte)0, encrypt.symVersion(), iv);
         Message msg=new Message(null).putHeader(encrypt_id, hdr);
 
         byte[] buf="hello from rogue".getBytes();
-        byte[] encrypted_buf=encrypt.code(buf, 0, buf.length, false);
+        byte[] encrypted_buf=encrypt.code(buf, 0, buf.length, iv, false);
         msg.setBuffer(encrypted_buf);
-        long checksum=encrypt.computeChecksum(encrypted_buf, 0, encrypted_buf.length);
-        byte[] tmp=encrypt.encryptChecksum(checksum);
-        hdr.signature(tmp);
 
         rogue.send(msg);
 
@@ -225,7 +191,7 @@ public abstract class EncryptTest {
      * payload (encrypted with the secret key of the rogue non-member) will fail, so the message is never passed up
      * to the application.
      */
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
+    //@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
     public void testMessageReceptionByRogue() throws Exception {
         rogue.setReceiver(r_rogue=new MyReceiver().rawMsgs(true));
         a.setReceiver(null); b.setReceiver(null); c.setReceiver(null);
@@ -245,15 +211,15 @@ public abstract class EncryptTest {
         if(r_rogue.size() > 0) {
             System.out.printf("Rogue non-member received %d message(s), but it should not be able to read deserialize " +
                                 "the contents (this should throw exceptions below):\n", r_rogue.size());
-            for(Message msg: r_rogue.list()) {
+            r_rogue.list().forEach(msg -> {
                 try {
-                    String payload=(String)msg.getObject();
+                    String payload=msg.getObject();
                     assert !payload.startsWith("Hello from");
                 }
                 catch(Exception t) {
                     System.out.printf("caught exception trying to de-serialize garbage payload into a string: %s\n", t);
                 }
-            };
+            });
         }
     }
 
@@ -261,32 +227,37 @@ public abstract class EncryptTest {
     /**
      * Tests the scenario where the non-member R captures a message from some cluster member in {A,B,C}, then
      * increments the NAKACK2 seqno and resends that message. The message must not be received by {A,B,C};
-     * it should be discarded.
+     * it should be discarded. see https://issues.jboss.org/browse/JGRP-2273
      */
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
     public void testCapturingOfMessageByNonMemberAndResending() throws Exception {
-        rogue.setReceiver(new ReceiverAdapter() {
-            public void receive(Message msg) {
-                System.out.printf("rogue: modifying and resending msg %s, hdrs: %s\n", msg, msg.printHeaders());
-                rogue.setReceiver(null); // to prevent recursive cycle
-                try {
-                    short prot_id=ClassConfigurator.getProtocolId(NAKACK2.class);
-                    NakAckHeader2 hdr=(NakAckHeader2)msg.getHeader(prot_id);
-                    if(hdr != null) {
-                        long seqno=hdr.getSeqno();
-                        Util.setField(Util.getField(NakAckHeader2.class, "seqno"), hdr, seqno+1);
-                    }
-                    else {
-                        System.out.printf("Rogue was not able to get the %s header, fabricating one with seqno=50\n", NAKACK2.class.getSimpleName());
-                        NakAckHeader2 hdr2=NakAckHeader2.createMessageHeader(50);
-                        msg.putHeader(prot_id, hdr2);
-                    }
 
-                    rogue.send(msg);
+        // add SERIALIZE over the encryption protocol, so headers are encrypted, too, and therefore a replay attack as
+        // this one won't succeed
+        for(JChannel ch: Arrays.asList(a,b,c)) {
+            ch.getProtocolStack().insertProtocol(new SERIALIZE(), ProtocolStack.Position.ABOVE, Encrypt.class);
+        }
+
+
+        rogue.setReceiver(msg -> {
+            System.out.printf("rogue: modifying and resending msg %s, hdrs: %s\n", msg, msg.printHeaders());
+            rogue.setReceiver(null); // to prevent recursive cycle
+            try {
+                short prot_id=ClassConfigurator.getProtocolId(NAKACK2.class);
+                NakAckHeader2 hdr=msg.getHeader(prot_id);
+                if(hdr != null) {
+                    long seqno=hdr.getSeqno();
+                    Util.setField(Util.getField(NakAckHeader2.class, "seqno"), hdr, seqno+1);
                 }
-                catch(Exception e) {
-                    e.printStackTrace();
+                else {
+                    System.out.printf("Rogue was not able to get the %s header, fabricating one with seqno=50\n", NAKACK2.class.getSimpleName());
+                    NakAckHeader2 hdr2=NakAckHeader2.createMessageHeader(50);
+                    msg.putHeader(prot_id, hdr2);
                 }
+
+                rogue.send(msg);
+            }
+            catch(Exception e) {
+                e.printStackTrace();
             }
         });
 
@@ -299,8 +270,8 @@ public abstract class EncryptTest {
             Util.sleep(500);
         }
 
-        for(MyReceiver r: asList(ra,rb,rc))
-            System.out.printf("%s: %s\n", r.name(), print(r.list()));
+        Stream.of(ra, rb, rc).map(MyReceiver::list).map(l -> l.stream().map(msg -> (String)msg.getObject())
+          .collect(Collectors.toList())).forEach(System.out::println);
         assert ra.size() == 1 : String.format("received msgs from non-member: '%s'; this should not be the case", print(ra.list()));
         assert rb.size() == 1 : String.format("received msgs from non-member: '%s'; this should not be the case", print(rb.list()));
         assert rc.size() == 1 : String.format("received msgs from non-member: '%s'; this should not be the case", print(rc.list()));
@@ -312,9 +283,9 @@ public abstract class EncryptTest {
      * Tests the case where a non-member installs a new view {rogue,A,B,C}, making itself the coordinator and therefore
      * controlling admission of new members to the cluster etc...
      */
-    // @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
+    //@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
     public void testRogueViewInstallation() throws Exception {
-        final Address rogue_addr=rogue.getAddress();
+        Address rogue_addr=rogue.getAddress();
         View rogue_view=View.create(rogue_addr, a.getView().getViewId().getId()+1,
                                     rogue_addr, a.getAddress(), b.getAddress(), c.getAddress());
 
@@ -327,11 +298,11 @@ public abstract class EncryptTest {
                 break;
             Util.sleep(500);
         }
-        for(JChannel ch: asList(a,b,c)) {
+        Arrays.asList(a,b,c).forEach(ch -> {
             View view=ch.getView();
             System.out.printf("%s: view is %s\n", ch.getAddress(), view);
             assert !view.containsMember(rogue_addr) : "view contains rogue member: " + view;
-        };
+        });
     }
 
 
@@ -341,31 +312,27 @@ public abstract class EncryptTest {
 
 
     protected static Buffer marshal(final View view) throws Exception {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512);
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(Util.size(view));
         out.writeShort(1);
         if(view != null)
             view.writeTo(out);
         return out.getBuffer();
     }
 
-    protected void assertSize(int expected_size) {
-        for(MyReceiver r: asList(ra,rb,rc))
-        assert r.size() == expected_size : String.format("expected size: %d, actual size of %s: %d", expected_size, r.name(), r.size());
+    protected void assertForEachReceiver(Predicate<MyReceiver<Message>> predicate) {
+        Stream.of(ra, rb, rc).forEach(receiver -> {assert predicate.test(receiver);});
     }
 
-    protected void assertForEachMessage(Pred<Message> pred) {
-        for(MyReceiver<Message> r: Arrays.asList(ra,rb,rc)) {
-            List<Message> list=r.list();
-            for(Message msg: list)
-                assert pred.test(msg);
-        }
+    protected void assertForEachMessage(Predicate<Message> predicate) {
+        Stream.of(ra, rb, rc)
+          .map(MyReceiver::list)
+          .flatMap(Collection::stream)
+          .forEach(msg -> {assert predicate.test(msg);});
     }
 
     protected static String print(List<Message> msgs) {
-        StringBuilder sb=new StringBuilder();
-        for(Message msg: msgs)
-            sb.append(msg.getObject()).append(" ");
-        return sb.toString();
+        return msgs.stream().map(Message::getObject).map(obj -> obj== null? "null" : obj.toString())
+          .collect(Collectors.joining(", ", "[", "]"));
     }
 
     protected static String print(byte[] buf, int offset, int length) {
@@ -377,8 +344,5 @@ public abstract class EncryptTest {
         return sb.toString();
     }
 
-    protected interface Pred<T> {
-        boolean test(T el);
-    }
 
 }

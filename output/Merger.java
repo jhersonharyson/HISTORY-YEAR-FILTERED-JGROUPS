@@ -8,6 +8,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Handles merging. Called by CoordGmsImpl and ParticipantGmsImpl
@@ -72,6 +73,16 @@ public class Merger {
      * @param views A List of <em>different</em> views detected by the merge protocol, keyed by sender
      */
     public void merge(Map<Address, View> views) {
+        if(views == null || views.isEmpty()) {
+            log.warn("the views passed with the MERGE event were empty (or null); ignoring MERGE event");
+            return;
+        }
+
+        if(View.sameViews(views.values())) {
+            log.debug("MERGE event is ignored because of identical views: %s", Util.printListWithDelimiter(views.values(), ", "));
+            return;
+        }
+
         if(isMergeInProgress()) {
             log.trace("%s: merge is already running (merge_id=%s)", gms.local_addr, merge_id);
             return;
@@ -130,16 +141,14 @@ public class Merger {
 
         // only send to our *current* members, if we have A and B being merged (we are B), then we would *not*
         // want to block on a VIEW_ACK from A because A doesn't see us in the pre-merge view yet and discards the view
-        List<Address> newViewMembers=new ArrayList<>(data.view.getMembers());
-        newViewMembers.removeAll(gms.members.getMembers());
-
+        List<Address> expected_acks=gms.members.getMembers();
         try {
-            gms.castViewChange(data.view, data.digest, newViewMembers);
+            gms.castViewChangeAndSendJoinRsps(data.view, data.digest, expected_acks, null, null);
             // if we have flush in stack send ack back to merge coordinator
             if(gms.flushProtocolInStack) { //[JGRP-700] - FLUSH: flushing should span merge
                 Message ack=new Message(data.getSender()).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
                   .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.INSTALL_MERGE_VIEW_OK));
-                gms.getDownProtocol().down(new Event(Event.MSG, ack));
+                gms.getDownProtocol().down(ack);
             }
         }
         finally {
@@ -227,27 +236,23 @@ public class Merger {
      * is defined in https://issues.jboss.org/browse/JGRP-1910
      */
     protected static Map<Address,Collection<Address>> determineMergeCoords(Map<Address,View> views) {
-        Map<Address,Collection<Address>> retval=new HashMap<>();
-        for(View view: views.values()) {
-            Address coord=view.getCreator();
-            Collection<Address> members=retval.get(coord);
-            if(members == null)
-                retval.put(coord, members=new ArrayList<>());
-            for(Address mbr: view.getMembersRaw())
-                if(!members.contains(mbr))
-                    members.add(mbr);
-        }
+           Map<Address,Collection<Address>> retval=new HashMap<>();
+           for(View view: views.values()) {
+               Address coord=view.getCreator();
+               Collection<Address> members=retval.computeIfAbsent(coord, k -> new ArrayList<>());
+               for(Address mbr: view.getMembersRaw())
+                   if(!members.contains(mbr))
+                       members.add(mbr);
+           }
 
-        // For the merge participants which are not coordinator, we simply add them, and the associated
-        // membership list consists only of themselves
-        Collection<Address> merge_participants=Util.determineMergeParticipants(views);
-        merge_participants.removeAll(retval.keySet());
-        for(Address merge_participant: merge_participants) {
-            if(!retval.containsKey(merge_participant))
-                retval.put(merge_participant, Collections.singletonList(merge_participant));
-        }
-        return retval;
-    }
+           // For the merge participants which are not coordinator, we simply add them, and the associated
+           // membership list consists only of themselves
+           Collection<Address> merge_participants=Util.determineMergeParticipants(views);
+           merge_participants.removeAll(retval.keySet());
+           merge_participants.stream().filter(merge_participant -> !retval.containsKey(merge_participant))
+             .forEach(merge_participant -> retval.put(merge_participant, Collections.singletonList(merge_participant)));
+           return retval;
+       }
 
 
     protected void _handleMergeRequest(Address sender, MergeId merge_id, Collection<? extends Address> mbrs) throws Exception {
@@ -265,9 +270,7 @@ public class Merger {
         // merge the membership of the current view with mbrs
         List<Address> members=new ArrayList<>(mbrs != null? mbrs.size() : 32);
         if(mbrs != null) // didn't use a set because we didn't want to change the membership order at this time (although not incorrect)
-            for(Address mbr: mbrs)
-                if(!members.contains(mbr))
-                    members.add(mbr);
+            mbrs.stream().filter(mbr -> !members.contains(mbr)).forEach(members::add);
 
         // Now remove members that are not in our current view:
         members.retainAll(gms.view().getMembers());
@@ -297,18 +300,15 @@ public class Merger {
     protected void sendMergeResponse(Address sender, View view, Digest digest, MergeId merge_id) {
         Message msg=new Message(sender).setBuffer(GMS.marshal(view, digest)).setFlag(Message.Flag.OOB,Message.Flag.INTERNAL)
           .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP).mergeId(merge_id));
-        gms.getDownProtocol().down(new Event(Event.MSG, msg));
+        gms.getDownProtocol().down(msg);
     }
 
     /**
-     * Sends the new view and digest to all subgroup coordinors in coords. Each coord will in turn
-     * <ol>
-     * <li>broadcast the new view and digest to all the members of its subgroup (MergeView)
-     * <li>on reception of the view, if it is a MergeView, each member will set the digest and install the new view
-     * </ol>
+     * Sends the new view and digest to all subgroup coordinators. Each coord will in turn broadcast the new view and
+     * digest to all the members of its subgroup
      */
     protected void sendMergeView(Collection<Address> coords, MergeData combined_merge_data, MergeId merge_id) {
-        if(coords == null || combined_merge_data == null)
+        if(coords == null || coords.isEmpty() || combined_merge_data == null)
             return;
 
         View view=combined_merge_data.view;
@@ -324,14 +324,18 @@ public class Merger {
             size=gms.merge_ack_collector.size();
         }
 
+        Event install_merge_view_evt=new Event(Event.INSTALL_MERGE_VIEW, view);
+        gms.getUpProtocol().up(install_merge_view_evt);
+        gms.getDownProtocol().down(install_merge_view_evt);
+
         long start=System.currentTimeMillis();
         for(Address coord: coords) {
             Message msg=new Message(coord).setBuffer(GMS.marshal(view, digest))
               .putHeader(gms.getId(),new GMS.GmsHeader(GMS.GmsHeader.INSTALL_MERGE_VIEW).mergeId(merge_id));
-            gms.getDownProtocol().down(new Event(Event.MSG, msg));
+            gms.getDownProtocol().down(msg);
         }
 
-        //[JGRP-700] - FLUSH: flushing should span merge; if flush is in stack wait for acks from subview coordinators
+        //[JGRP-700] - FLUSH: flushing should span merge; if flush is in stack, wait for acks from subview coordinators
         if(gms.flushProtocolInStack) {
             try {
                 gms.merge_ack_collector.waitForAllAcks(gms.view_ack_collection_timeout);
@@ -348,7 +352,7 @@ public class Merger {
     protected void sendMergeRejectedResponse(Address sender, MergeId merge_id) {
         Message msg=new Message(sender).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
           .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP).mergeId(merge_id).mergeRejected(true));
-        gms.getDownProtocol().down(new Event(Event.MSG, msg));
+        gms.getDownProtocol().down(msg);
     }
 
     protected void sendMergeCancelledMessage(Collection<Address> coords, MergeId merge_id) {
@@ -356,7 +360,7 @@ public class Merger {
             return;
         for(Address coord: coords) {
             Message msg=new Message(coord).putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.CANCEL_MERGE).mergeId(merge_id));
-            gms.getDownProtocol().down(new Event(Event.MSG, msg));
+            gms.getDownProtocol().down(msg);
         }
     }
 
@@ -379,7 +383,7 @@ public class Merger {
         long max_wait_time=gms.merge_timeout / 2; // gms.merge_timeout is guaranteed to be > 0, verified in init()
         digest_collector.reset(current_mbrs);
 
-        gms.getDownProtocol().down(new Event(Event.MSG, get_digest_req));
+        gms.getDownProtocol().down(get_digest_req);
 
         // add my own digest first - the get_digest_req needs to be sent first *before* getting our own digest, so
         // we have that message in our digest !
@@ -401,8 +405,7 @@ public class Merger {
         valid_rsps.toArray(tmp);
         MutableDigest retval=new MutableDigest(tmp);
         Map<Address,Digest> responses=new HashMap<>(digest_collector.getResults());
-        for(Digest dig: responses.values())
-            retval.set(dig);
+        responses.values().forEach(retval::set);
         return retval;
     }
 
@@ -414,7 +417,7 @@ public class Merger {
         Digest digest=fetchDigestsFromAllMembersInSubPartition(gms.view, null);
         Message msg=new Message().putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.INSTALL_DIGEST))
           .setBuffer(GMS.marshal(null, digest));
-        gms.getDownProtocol().down(new Event(Event.MSG, msg));
+        gms.getDownProtocol().down(msg);
     }
 
 
@@ -444,7 +447,7 @@ public class Merger {
     protected synchronized void startMergeKiller() {
         if(merge_killer == null || merge_killer.isDone()) {
             MergeKiller task=new MergeKiller(this.merge_id);
-            merge_killer=gms.timer.schedule(task, (long)(gms.merge_timeout * 2), TimeUnit.MILLISECONDS);
+            merge_killer=gms.timer.schedule(task, gms.merge_timeout * 2, TimeUnit.MILLISECONDS, false);
         }
     }
 
@@ -550,7 +553,7 @@ public class Merger {
 
             log.debug("%s: merge task %s started with %d participants", gms.local_addr, merge_id, coords.keySet().size());
 
-            /* 2. Fetch the current views and digests from all subgroup coordinators into merge_rsps */
+            // Fetch the current views and digests from all subgroup coordinators into merge_rsps
             success=getMergeDataFromSubgroupCoordinators(coords, new_merge_id, gms.merge_timeout);
             List<Address> missing=null;
             if(!success) {
@@ -561,8 +564,8 @@ public class Merger {
                 merge_rsps.remove(missing);
             }
 
-            /* 3. Remove null or rejected merge responses from merge_rsp and coords (so we'll send the new view
-                 * only to members who accepted the merge request) */
+            // Remove null or rejected merge responses from merge_rsp and coords (so we'll send the new view
+            // only to members who accepted the merge request)
             if(missing != null && !missing.isEmpty()) {
                 coords.keySet().removeAll(missing);
                 coordsCopy.removeAll(missing);
@@ -575,14 +578,14 @@ public class Merger {
             if(!coords.keySet().contains(gms.local_addr)) // another member might have invoked a merge req on us before we got there...
                 throw new Exception("merge leader rejected merge request");
 
-            /* 4. Combine all views and digests into 1 View/1 Digest */
+            // Combine all views and digests into 1 View/1 Digest
             List<MergeData> merge_data=new ArrayList<>(merge_rsps.getResults().values());
             MergeData combined_merge_data=consolidateMergeData(merge_data, new ArrayList<>(subviews));
             if(combined_merge_data == null)
                 throw new Exception("could not consolidate merge");
 
-            /* 4. Send the new View/Digest to all coordinators (including myself). On reception, they will
-                   install the digest and view in all of their subgroup members */
+            // send the new view/digest to all coords (including myself). On reception, they will
+            // install the digest and view in all of their subgroup members
             log.debug("%s: installing merge view %s (%d members) in %d coords",
                       gms.local_addr, combined_merge_data.view.getViewId(), combined_merge_data.view.size(), coords.keySet().size());
             sendMergeView(coords.keySet(), combined_merge_data, new_merge_id);
@@ -611,14 +614,14 @@ public class Merger {
                 Message msg=new Message(coord).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
                   .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.MERGE_REQ).mbr(gms.local_addr).mergeId(new_merge_id))
                   .setBuffer(GMS.marshal(mbrs));
-                gms.getDownProtocol().down(new Event(Event.MSG, msg));
+                gms.getDownProtocol().down(msg);
             }
 
             // wait until num_rsps_expected >= num_rsps or timeout elapsed
             merge_rsps.waitForAllResponses(timeout);
             gotAllResponses=merge_rsps.hasAllResponses();
-            long stop=System.currentTimeMillis();
-            log.trace("%s: collected %d merge response(s) in %d ms", gms.local_addr, merge_rsps.numberOfValidResponses(), stop - start);
+            long time=System.currentTimeMillis() - start;
+            log.trace("%s: collected %d merge response(s) in %d ms", gms.local_addr, merge_rsps.numberOfValidResponses(), time);
             return gotAllResponses;
         }
 
@@ -684,8 +687,7 @@ public class Merger {
             // Usually not needed, but a second line of defense in case the membership change policy above
             // computed the new view incorrectly, e.g. not removing dupes
             Set<Address> all_members=new HashSet<>();
-            for(Collection<Address> coll: sub_mbrships)
-                all_members.addAll(coll);
+            sub_mbrships.forEach(all_members::addAll);
             merged_mbrs.retainAll(all_members);
 
             // the new coordinator is the first member of the consolidated & sorted membership list

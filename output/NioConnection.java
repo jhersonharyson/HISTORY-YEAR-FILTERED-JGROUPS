@@ -53,7 +53,7 @@ public class NioConnection extends Connection {
             throw new IllegalArgumentException("Invalid parameter peer_addr="+ peer_addr);
         this.peer_addr=peer_addr;
         send_buf=new Buffers(server.maxSendBuffers() *2); // space for actual bufs and length bufs!
-        channel=SocketChannel.open();
+        channel=server.socketFactory().createSocketChannel("jgroups.nio.client");
         channel.configureBlocking(false);
         setSocketParameters(channel.socket());
         last_access=getTimestamp(); // last time a message was sent or received (ns)
@@ -140,14 +140,13 @@ public class NioConnection extends Connection {
         try {
             if(!server.deferClientBinding())
                 this.channel.bind(new InetSocketAddress(server.clientBindAddress(), server.clientBindPort()));
-            if(this.channel.getLocalAddress() != null && this.channel.getLocalAddress().equals(destAddr))
-                throw new IllegalStateException("socket's bind and connect address are the same: " + destAddr);
-
             this.key=server.register(channel, SelectionKey.OP_CONNECT | SelectionKey.OP_READ, this);
             if(Util.connect(channel, destAddr) && channel.finishConnect()) {
                 clearSelectionKey(SelectionKey.OP_CONNECT);
                 this.connected=channel.isConnected();
             }
+            if(this.channel.getLocalAddress() != null && this.channel.getLocalAddress().equals(destAddr))
+                throw new IllegalStateException("socket's bind and connect address are the same: " + destAddr);
             if(send_local_addr)
                 sendLocalAddress(server.localAddress());
         }
@@ -231,12 +230,10 @@ public class NioConnection extends Connection {
         ByteBuffer msg;
         Receiver   receiver=server.receiver();
 
-        if(peer_addr == null && server.usePeerConnections()) {
-            if((peer_addr=readPeerAddress()) != null) {
-                recv_buf=new Buffers(2).add(ByteBuffer.allocate(Global.INT_SIZE), null);
-                server.addConnection(peer_addr, this);
-                return true;
-            }
+        if(peer_addr == null && server.usePeerConnections() && (peer_addr=readPeerAddress()) != null) {
+            recv_buf=new Buffers(2).add(ByteBuffer.allocate(Global.INT_SIZE), null);
+            server.addConnection(peer_addr, this);
+            return true;
         }
 
         if((msg=recv_buf.readLengthAndData(channel)) == null)
@@ -256,7 +253,8 @@ public class NioConnection extends Connection {
             if(send_buf.remaining() > 0) { // try to flush send buffer if it still has pending data to send
                 try {send();} catch(Throwable e) {}
             }
-            Util.close(channel, reader);
+            Util.close(reader);
+            server.socketFactory().close(channel);
         }
         finally {
             connected=false;
@@ -320,18 +318,25 @@ public class NioConnection extends Connection {
 
         client_sock.setKeepAlive(true);
         client_sock.setTcpNoDelay(server.tcpNodelay());
-        if(server.linger() > 0)
-            client_sock.setSoLinger(true, server.linger());
-        else
-            client_sock.setSoLinger(false, -1);
+        try { // todo: remove try-catch clause one https://github.com/oracle/graal/issues/1087 has been fixed
+            if(server.linger() > 0)
+                client_sock.setSoLinger(true, server.linger());
+            else
+                client_sock.setSoLinger(false, -1);
+        }
+        catch(Throwable t) {
+            server.log().warn("%s: failed setting SO_LINGER option: %s", server.localAddress(), t);
+        }
     }
 
     protected void sendLocalAddress(Address local_addr) throws Exception {
         try {
-            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream();
+            int addr_size=local_addr.serializedSize();
+            int expected_size=cookie.length + Global.SHORT_SIZE*2 + addr_size;
+            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size +2);
             out.write(cookie, 0, cookie.length);
             out.writeShort(Version.version);
-            out.writeShort(local_addr.size()); // address size
+            out.writeShort(addr_size); // address size
             local_addr.writeTo(out);
             ByteBuffer buf=out.getByteBuffer();
             send(buf, false);
@@ -349,7 +354,9 @@ public class NioConnection extends Connection {
             ByteBuffer buf=recv_buf.get(current_position);
             if(buf == null)
                 return null;
-            buf.flip();
+            // Workaround for JDK8 compatibility
+            // flip() returns java.nio.Buffer in JDK8, but java.nio.ByteBuffer since JDK9.
+            ((java.nio.Buffer) buf).flip();
             switch(current_position) {
                 case 0:      // cookie
                     byte[] cookie_buf=getBuffer(buf);
@@ -390,12 +397,16 @@ public class NioConnection extends Connection {
 
 
     protected static ByteBuffer makeLengthBuffer(ByteBuffer buf) {
-        return (ByteBuffer)ByteBuffer.allocate(Global.INT_SIZE).putInt(buf.remaining()).clear();
+        ByteBuffer buffer = ByteBuffer.allocate(Global.INT_SIZE).putInt(buf.remaining());
+        // Workaround for JDK8 compatibility
+        // clear() returns java.nio.Buffer in JDK8, but java.nio.ByteBuffer since JDK9.
+        ((java.nio.Buffer) buffer).clear();
+        return buffer;
     }
 
     protected enum State {reading, waiting_to_terminate, done}
 
-    protected class Reader implements Runnable, Closeable, Condition {
+    protected class Reader implements Runnable, Closeable {
         protected final Lock       lock=new ReentrantLock(); // to synchronize receive() and state transitions
         protected State            state=State.done;
         protected volatile boolean data_available=true;
@@ -418,7 +429,6 @@ public class NioConnection extends Connection {
         }
 
         public void    close() throws IOException {stop();}
-        public boolean isMet()                    {return data_available;}
         public boolean isRunning()                {Thread tmp=thread; return tmp != null && tmp.isAlive();}
 
         /** Called by the selector when data is ready to be read from the SocketChannel */
@@ -456,13 +466,14 @@ public class NioConnection extends Connection {
         }
 
         protected void _run() {
+            final Condition is_data_available=() -> data_available || !running;
             while(running) {
                 for(;;) { // try to receive as many msgs as possible, until no more msgs are ready or the conn is closed
                     try {
                         if(!_receive(false))
                             break;
                     }
-                    catch(Throwable ex) {
+                    catch(Exception ex) {
                         server.closeConnection(NioConnection.this, ex);
                         state(State.done);
                         return;
@@ -474,7 +485,7 @@ public class NioConnection extends Connection {
                 state(State.waiting_to_terminate);
                 data_available=false;
                 register(SelectionKey.OP_READ); // now we might get receive() calls again
-                if(data_available_cond.waitFor(this, server.readerIdleTime(), TimeUnit.MILLISECONDS))
+                if(data_available_cond.waitFor(is_data_available, server.readerIdleTime(), TimeUnit.MILLISECONDS))
                     state(State.reading);
                 else {
                     state(State.done);
@@ -488,7 +499,7 @@ public class NioConnection extends Connection {
                 registerSelectionKey(op);
                 key.selector().wakeup(); // no-op if the selector is not blocked in select()
             }
-            catch(Throwable t) {
+            catch(Exception t) {
             }
         }
 
@@ -496,7 +507,7 @@ public class NioConnection extends Connection {
             try {
                 clearSelectionKey(op);
             }
-            catch(Throwable t) {
+            catch(Exception t) {
             }
         }
 

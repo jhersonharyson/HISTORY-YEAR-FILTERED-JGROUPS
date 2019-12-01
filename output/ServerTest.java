@@ -5,9 +5,9 @@ import org.jboss.byteman.contrib.bmunit.BMScript;
 import org.jgroups.Address;
 import org.jgroups.Global;
 import org.jgroups.blocks.cs.BaseServer;
+import org.jgroups.blocks.cs.TcpServer;
 import org.jgroups.blocks.cs.NioServer;
 import org.jgroups.blocks.cs.ReceiverAdapter;
-import org.jgroups.blocks.cs.TcpServer;
 import org.jgroups.util.Bits;
 import org.jgroups.util.ResourceManager;
 import org.jgroups.util.Util;
@@ -39,7 +39,7 @@ public class ServerTest extends BMNGRunner {
 
     static {
         try {
-            loopback=Util.getLocalhost();
+            loopback=Util.getLoopback();
             PORT_A=ResourceManager.getNextTcpPort(loopback);
             PORT_B=ResourceManager.getNextTcpPort(loopback);
         }
@@ -97,7 +97,6 @@ public class ServerTest extends BMNGRunner {
     /**
      * Tests A connecting to B, and then B connecting to A; no concurrent connections
      */
-    // @Test(dataProvider="configProvider",invocationCount=5)
     public void testSimpleConnection(BaseServer first, BaseServer second) throws Exception {
         setup(first,second);
         send("hello", a, B);
@@ -217,7 +216,7 @@ public class ServerTest extends BMNGRunner {
 
     protected static BaseServer create(boolean nio, int port) {
         try {
-            return nio? new NioServer(loopback, port) : new TcpServer(loopback, port).useSendQueues(false);
+            return nio? new NioServer(loopback, port) : new TcpServer(loopback, port);
         }
         catch(Exception ex) {
             return null;

@@ -24,23 +24,22 @@ import org.testng.annotations.Test;
 public class FCTest {
     JChannel         ch;
     static final int SIZE=1000; // bytes
-    static final int NUM_MSGS=100000;
+    static final int NUM_MSGS=100_000;
     static final int PRINT=NUM_MSGS / 10;
 
 
     @DataProvider
     static Object[][] configProvider() {
-        return new Object[][]{
-          {FC.class},
+        return new Object[][] {
           {MFC.class}
         };
     }
 
     protected void setUp(Class<? extends Protocol> flow_control_class) throws Exception {
-        Protocol flow_control_prot=flow_control_class.newInstance();
+        Protocol flow_control_prot=flow_control_class.getDeclaredConstructor().newInstance();
         flow_control_prot.setValue("min_credits", 1000).setValue("max_credits", 10000).setValue("max_block_time", 1000);
 
-        ch=new JChannel(new SHARED_LOOPBACK().setValue("thread_pool_rejection_policy", "run"),
+        ch=new JChannel(new SHARED_LOOPBACK(),
                         new SHARED_LOOPBACK_PING(),
                         new NAKACK2().setValue("use_mcast_xmit", false),
                         new UNICAST3(),
@@ -61,7 +60,7 @@ public class FCTest {
         setUp(flow_control_class);
         ch.setReceiver(r);
         for(int i=1; i <= NUM_MSGS; i++) {
-            Message msg=new Message(null, null, createPayload(SIZE));
+            Message msg=new Message(null, createPayload(SIZE));
             ch.send(msg);
             if(i % PRINT == 0)
                 System.out.println("==> " + i);
@@ -75,7 +74,7 @@ public class FCTest {
                 break;
             num_tries--;
         }
-        assert num_received == NUM_MSGS;
+        assert num_received == NUM_MSGS : String.format("expected %d messages, but got %d", NUM_MSGS, num_received);
     }
 
 
@@ -90,7 +89,7 @@ public class FCTest {
     }
 
 
-    static class Receiver extends ReceiverAdapter {
+    protected static class Receiver extends ReceiverAdapter {
         int num_mgs_received=0;
 
         public void receive(Message msg) {

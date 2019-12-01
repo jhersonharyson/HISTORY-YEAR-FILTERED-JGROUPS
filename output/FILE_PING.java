@@ -7,9 +7,9 @@ import org.jgroups.View;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.util.NameCache;
 import org.jgroups.util.Responses;
 import org.jgroups.util.TimeScheduler;
-import org.jgroups.util.UUID;
 import org.jgroups.util.Util;
 
 import java.io.*;
@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 
 /**
@@ -36,46 +37,49 @@ public class FILE_PING extends Discovery {
 
 
     @Property(description="The absolute path of the shared file")
-    protected String location=File.separator + "tmp" + File.separator + "jgroups";
-
-    @Deprecated @Property(description="Interval (in milliseconds) at which the own Address is written. 0 disables it.")
-    protected long interval=60000;
+    protected String  location=File.separator + "tmp" + File.separator + "jgroups";
 
     @Property(description="If true, on a view change, the new coordinator removes files from old coordinators")
-    protected boolean remove_old_coords_on_view_change=false;
+    protected boolean remove_old_coords_on_view_change;
 
-    @Property(description="If true, on a view change, the new coordinator removes all files except its own")
-    protected boolean remove_all_files_on_view_change=false;
+    @Property(description="If true, on a view change, the new coordinator removes all data except its own")
+    protected boolean remove_all_data_on_view_change;
 
-    @Property(description="The max number of times my own information should be written to the DB after a view change")
-    protected int info_writer_max_writes_after_view=2;
+    @Property(description="The max number of times my own information should be written to the storage after a view change")
+    protected int     info_writer_max_writes_after_view=2;
 
     @Property(description="Interval (in ms) at which the info writer should kick in")
-    protected long info_writer_sleep_time=10000;
+    protected long    info_writer_sleep_time=10000;
 
     @Property(description="When a non-initial discovery is run, and InfoWriter is not running, write the data to " +
       "disk (if true). JIRA: https://issues.jboss.org/browse/JGRP-2288")
     protected boolean write_data_on_find;
 
+    @Property(description = "If set, a shutdown hook is registered with the JVM to remove the local address "
+      + "from the store. Default is true", writable = false)
+    protected boolean register_shutdown_hook = true;
+
+    @Property(description="Change the backend store when the view changes. If off, then the file is only changed on " +
+      "joins, but not on leaves. Enabling this will increase traffic to the backend store.")
+    protected boolean update_store_on_view_change=true;
+
     @ManagedAttribute(description="Number of writes to the file system or cloud store")
-    protected int writes;
+    protected int     writes;
 
     @ManagedAttribute(description="Number of reads from the file system or cloud store")
-    protected int reads;
+    protected int     reads;
 
 
     /* --------------------------------------------- Fields ------------------------------------------------------ */
     protected File                        root_dir=null;
-    protected static final FilenameFilter filter=new FilenameFilter() {
-        public boolean accept(File dir, String name) {return name.endsWith(SUFFIX);}
-    };
+    protected static final FilenameFilter filter=(dir, name1) -> name1.endsWith(SUFFIX);
     protected Future<?>                   info_writer;
 
     public boolean   isDynamic()                             {return true;}
     public String    getLocation()                           {return location;}
     public FILE_PING setLocation(String l)                   {this.location=l; return this;}
-    public boolean   getRemoveAllDataOnViewChange()          {return remove_all_files_on_view_change;}
-    public FILE_PING setRemoveAllDataOnViewChange(boolean r) {remove_all_files_on_view_change=r; return this;}
+    public boolean   getRemoveAllDataOnViewChange()          {return remove_all_data_on_view_change;}
+    public FILE_PING setRemoveAllDataOnViewChange(boolean r) {remove_all_data_on_view_change=r; return this;}
 
     @ManagedAttribute(description="Whether the InfoWriter task is running")
     public synchronized boolean isInfoWriterRunning() {return info_writer != null && !info_writer.isDone();}
@@ -86,19 +90,16 @@ public class FILE_PING extends Discovery {
     public void init() throws Exception {
         super.init();
         createRootDir();
-        try {
-            Runtime.getRuntime().addShutdownHook(new Thread() {
-                public void run() {
-                    remove(cluster_name, local_addr);
-                }
-            });
-        }
-        // This can be thrown if the JVM is already in the process of shutting down
-        catch (IllegalStateException e) {
-            log.debug("Unable to add shutdown hook for " + this.getClass().getCanonicalName() + ". File " + cluster_name + "/" + addressToFilename(local_addr) + " may not be deleted.");
+        if(register_shutdown_hook) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> remove(cluster_name, local_addr)));
         }
     }
 
+    public void stop() {
+        super.stop();
+        stopInfoWriter();
+        remove(cluster_name, local_addr);
+    }
 
     public void resetStats() {
         super.resetStats();
@@ -111,12 +112,9 @@ public class FILE_PING extends Discovery {
                 View old_view=view;
                 boolean previous_coord=is_coord;
                 Object retval=super.down(evt);
-                View new_view=(View)evt.getArg();
+                View new_view=evt.getArg();
                 handleView(new_view, old_view, previous_coord != is_coord);
                 return retval;
-            case Event.DISCONNECT:
-                remove(cluster_name, local_addr);
-                break;
         }
         return super.down(evt);
     }
@@ -126,7 +124,7 @@ public class FILE_PING extends Discovery {
             readAll(members, cluster_name, responses);
             if(responses.isEmpty()) {
                 PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS,local_addr));
-                PingData coord_data=new PingData(local_addr, true, UUID.get(local_addr), physical_addr).coord(is_coord);
+                PingData coord_data=new PingData(local_addr, true, NameCache.get(local_addr), physical_addr).coord(is_coord);
                 write(Collections.singletonList(coord_data), cluster_name);
                 return;
             }
@@ -144,10 +142,10 @@ public class FILE_PING extends Discovery {
                     ; // use case #1 if we have predefined files: most members join but are not coord
             }
             else {
-                sendDiscoveryResponse(local_addr, phys_addr, UUID.get(local_addr), null, false);
+                sendDiscoveryResponse(local_addr, phys_addr, NameCache.get(local_addr), null, is_coord);
             }
             // write the data if write_data_on_find is true
-            if(write_data_on_find && (remove_all_files_on_view_change || remove_old_coords_on_view_change)
+            if(write_data_on_find && (remove_all_data_on_view_change || remove_old_coords_on_view_change)
               && !initial_discovery && is_coord && (data == null || !data.isCoord()) && !isInfoWriterRunning()) {
                 // a coordinator in a separate partition may have deleted this coordinator's file
                 writeAll();
@@ -160,18 +158,8 @@ public class FILE_PING extends Discovery {
 
 
 
-    /** Only add the discovery response if the logical address is not present or the physical addrs are different */
-    protected boolean addDiscoveryResponseToCaches(Address mbr, String logical_name, PhysicalAddress physical_addr) {
-        PhysicalAddress phys_addr=(PhysicalAddress)down_prot.down(new Event(Event.GET_PHYSICAL_ADDRESS, mbr));
-        boolean added=phys_addr == null || !phys_addr.equals(physical_addr);
-        super.addDiscoveryResponseToCaches(mbr, logical_name, physical_addr);
-        if(added && is_coord)
-            writeAll();
-        return added;
-    }
-
     protected static String addressToFilename(Address mbr) {
-        String logical_name=UUID.get(mbr);
+        String logical_name=NameCache.get(mbr);
         String name=(addressAsString(mbr) + (logical_name != null? "." + logical_name + SUFFIX : SUFFIX));
         return regexp.matcher(name).replaceAll("-");
     }
@@ -192,18 +180,17 @@ public class FILE_PING extends Discovery {
     // remove all files which are not from the current members
     protected void handleView(View new_view, View old_view, boolean coord_changed) {
         if(is_coord) {
-            if(coord_changed) {
-                if(remove_all_files_on_view_change)
-                    removeAll(cluster_name);
-                else if(remove_old_coords_on_view_change) {
-                    Address old_coord=old_view != null? old_view.getCreator() : null;
-                    if(old_coord != null)
-                        remove(cluster_name, old_coord);
-                }
+            if(remove_all_data_on_view_change)
+                removeAll(cluster_name);
+            else if(remove_old_coords_on_view_change) {
+                Address old_coord=old_view != null? old_view.getCreator() : null;
+                if(old_coord != null)
+                    remove(cluster_name, old_coord);
             }
-            if(coord_changed || View.diff(old_view, new_view)[1].length > 0) {
-                writeAll();
-                if(remove_all_files_on_view_change || remove_old_coords_on_view_change)
+            Address[] left=View.diff(old_view, new_view)[1];
+            if(coord_changed || update_store_on_view_change || left.length > 0) {
+                writeAll(left);
+                if(remove_all_data_on_view_change || remove_old_coords_on_view_change)
                     startInfoWriter();
             }
         }
@@ -214,13 +201,9 @@ public class FILE_PING extends Discovery {
     protected void remove(String clustername, Address addr) {
         if(clustername == null || addr == null)
             return;
-
         File dir=new File(root_dir, clustername);
         if(!dir.exists())
             return;
-
-        log.debug("remove %s", clustername);
-
         String filename=addressToFilename(addr);
         File file=new File(dir, filename);
         deleteFile(file);
@@ -290,22 +273,30 @@ public class FILE_PING extends Discovery {
         }
     }
 
-
     /** Write information about all of the member to file (only if I'm the coord) */
     protected void writeAll() {
+        writeAll(null);
+    }
+
+    protected void writeAll(Address[] excluded_mbrs) {
         Map<Address,PhysicalAddress> cache_contents=
-          (Map<Address,PhysicalAddress>)down_prot.down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS, false));
+          (Map<Address,PhysicalAddress>)down_prot.down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS, true));
+
+        if(excluded_mbrs != null)
+            for(Address excluded_mbr : excluded_mbrs)
+                cache_contents.remove(excluded_mbr);
 
         List<PingData> list=new ArrayList<>(cache_contents.size());
         for(Map.Entry<Address,PhysicalAddress> entry: cache_contents.entrySet()) {
             Address         addr=entry.getKey();
+            if(update_store_on_view_change && (view != null && !view.containsMember(addr)))
+                continue;
             PhysicalAddress phys_addr=entry.getValue();
-            PingData data=new PingData(addr, true, UUID.get(addr), phys_addr).coord(addr.equals(local_addr));
+            PingData data=new PingData(addr, true, NameCache.get(addr), phys_addr).coord(addr.equals(local_addr));
             list.add(data);
         }
         write(list, cluster_name);
-        if(log.isTraceEnabled())
-            log.trace("%s: wrote to backend store: %s", local_addr, list);
+        log.trace("%s: wrote to backend store: %s", local_addr, list.stream().map(PingData::getAddress).collect(Collectors.toList()));
     }
 
     protected void write(List<PingData> list, String clustername) {
@@ -339,13 +330,11 @@ public class FILE_PING extends Discovery {
 
     protected boolean deleteFile(File file) {
         boolean result = true;
-        if(log.isTraceEnabled())
-            log.trace("Attempting to delete file : "+file.getAbsolutePath());
 
         if(file != null && file.exists()) {
             try {
                 result=file.delete();
-                log.trace("Deleted file result: "+file.getAbsolutePath() +" : "+result);
+                log.trace("deleted file %s: result=%b ", file.getAbsolutePath(), result);
             }
             catch(Throwable e) {
                 log.error(Util.getMessage("FailedToDeleteFile") + file.getAbsolutePath(), e);

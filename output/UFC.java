@@ -1,16 +1,14 @@
 package org.jgroups.protocols;
 
 import org.jgroups.Address;
-import org.jgroups.Event;
 import org.jgroups.Header;
 import org.jgroups.Message;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
-import org.jgroups.util.Average;
+import org.jgroups.util.Credit;
 import org.jgroups.util.Util;
 
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -43,9 +41,7 @@ public class UFC extends FlowControl {
      * Map<Address,Long>: keys are members, values are credits left. For each send,
      * the number of credits is decremented by the message size
      */
-    protected final Map<Address,Credit> sent=Util.createConcurrentMap();
-
-    protected final Average             avg_block_time=new Average(); // in ns
+    protected final Map<Address,? extends Credit> sent=Util.createConcurrentMap();
 
 
 
@@ -57,18 +53,11 @@ public class UFC extends FlowControl {
     
     @ManagedOperation(description="Print credits")
     public String printCredits() {
-        StringBuilder sb=new StringBuilder(super.printCredits());
-        sb.append("\nsenders:\n").append(printMap(sent));
-        return sb.toString();
+        return String.format("%s\nsenders:\n%s", super.printCredits(), printMap(sent));
     }
 
-    public Map<String, Object> dumpStats() {
-        Map<String, Object> retval=super.dumpStats();
-        retval.put("senders", printMap(sent));
-        return retval;
-    }
 
-    protected boolean handleMulticastMessage()          {return false;}
+    protected boolean          handleMulticastMessage() {return false;}
     @Override protected Header getReplenishHeader()     {return UFC_REPLENISH_HDR;}
     @Override protected Header getCreditRequestHeader() {return UFC_CREDIT_REQUEST_HDR;}
 
@@ -76,6 +65,7 @@ public class UFC extends FlowControl {
 
     public void unblock() {
         super.unblock();
+        sent.values().forEach(cred -> cred.increment(max_credits, max_credits));
     }
 
     @ManagedAttribute(description="Number of times flow control blocks sender")
@@ -88,56 +78,47 @@ public class UFC extends FlowControl {
 
     @ManagedAttribute(description="Average time blocked (in ms) in flow control when trying to send a message")
     public double getAverageTimeBlocked() {
-        return avg_block_time.getAverage() / 1000000.0;
+        return sent.values().stream().mapToDouble(c -> c.getAverageBlockTime() / 1_000_000).average().orElse(0.0);
     }
 
-    public void init() throws Exception {
-        super.init();
-        TP transport=getTransport();
-        if(transport instanceof BasicTCP)
-            log.info(this.getClass().getSimpleName() + " is not needed (and can be removed) as we're running on a TCP transport");
-    }
 
     public void stop() {
         super.stop();
-        for(Credit cred: sent.values())
-            cred.set(max_credits);
+        unblock();
     }
 
     public void resetStats() {
         super.resetStats();
-        avg_block_time.clear();
-        for(Credit cred: sent.values())
-            cred.reset();
-
+        sent.values().forEach(Credit::reset);
     }
 
-    protected Object handleDownMessage(final Event evt, final Message msg, Address dest, int length) {
+    @Override
+    protected Object handleDownMessage(final Message msg) {
+        Address dest=msg.dest();
         if(dest == null) { // 2nd line of defense, not really needed
             log.error("%s doesn't handle multicast messages; passing message down", getClass().getSimpleName());
-            return down_prot.down(evt);
+            return down_prot.down(msg);
         }
 
         Credit cred=sent.get(dest);
         if(cred == null)
-            return down_prot.down(evt);
+            return down_prot.down(msg);
 
+        int length=msg.length();
         long block_time=max_block_times != null? getMaxBlockTime(length) : max_block_time;
         
         while(running && sent.containsKey(dest)) {
-            boolean rc=cred.decrementIfEnoughCredits(length, block_time);
+            boolean rc=cred.decrementIfEnoughCredits(msg, length, block_time);
             if(rc || !running || max_block_times != null)
                 break;
 
-            if(cred.needToSendCreditRequest())
+            if(cred.needToSendCreditRequest(max_block_time))
                 sendCreditRequest(dest, Math.max(0, max_credits - cred.get()));
         }
 
         // send message - either after regular processing, or after blocking (when enough credits available again)
-        return down_prot.down(evt);
+        return down_prot.down(msg);
     }
-
-
 
 
     protected void handleViewChange(List<Address> mbrs) {
@@ -145,17 +126,10 @@ public class UFC extends FlowControl {
         if(mbrs == null) return;
 
         // add members not in membership to received and sent hashmap (with full credits)
-        for(Address addr: mbrs) {
-            if(!sent.containsKey(addr))
-                sent.put(addr, new Credit(max_credits, avg_block_time));
-        }
+        mbrs.stream().filter(addr -> !sent.containsKey(addr)).forEach(addr -> sent.put(addr, createCredit((int)max_credits)));
 
         // remove members that left
-        for(Iterator<Address> it=sent.keySet().iterator(); it.hasNext();) {
-            Address addr=it.next();
-            if(!mbrs.contains(addr))
-                it.remove(); // modified the underlying map
-        }
+        sent.keySet().retainAll(mbrs);
     }
 
 
@@ -168,7 +142,11 @@ public class UFC extends FlowControl {
             long new_credit=Math.min(max_credits, cred.get() + increase);
             log.trace("received %d credits from %s, old credits: %s, new credits: %d", increase, sender, cred, new_credit);
         }
-        cred.increment(increase);
+        cred.increment(increase, max_credits);
+    }
+
+    protected <T extends Credit> T createCredit(int initial_credits) {
+        return (T)new Credit(initial_credits);
     }
     
 

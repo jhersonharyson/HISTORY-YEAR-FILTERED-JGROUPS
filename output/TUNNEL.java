@@ -2,7 +2,6 @@ package org.jgroups.protocols;
 
 import org.jgroups.Address;
 import org.jgroups.Event;
-import org.jgroups.Message;
 import org.jgroups.PhysicalAddress;
 import org.jgroups.annotations.Experimental;
 import org.jgroups.annotations.ManagedOperation;
@@ -11,20 +10,20 @@ import org.jgroups.stack.GossipData;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.RouterStub;
 import org.jgroups.stack.RouterStubManager;
-import org.jgroups.util.AsciiString;
-import org.jgroups.util.ByteArrayDataOutputStream;
 import org.jgroups.util.Util;
 
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Replacement for UDP. Instead of sending packets via UDP, a TCP connection is opened to a Router
  * (using the RouterStub client-side stub), the IP address/port of which was given using channel
- * properties <code>router_host</code> and <code>router_port</code>. All outgoing traffic is sent
+ * properties {@code router_host} and {@code router_port}. All outgoing traffic is sent
  * via this TCP socket to the Router which distributes it to all connected TUNNELs in this group.
  * Incoming traffic received from Router will simply be passed up the stack.
  * 
@@ -41,8 +40,8 @@ import java.util.List;
 public class TUNNEL extends TP implements RouterStub.StubReceiver {
 
     public interface TUNNELPolicy {
-        void sendToAllMembers(String group, byte[] data, int offset, int length) throws Exception;
-        void sendToSingleMember(String group, Address dest, byte[] data, int offset, int length) throws Exception;
+        void sendToAllMembers(String group, Address sender, byte[] data, int offset, int length) throws Exception;
+        void sendToSingleMember(String group, Address dest, Address sender, byte[] data, int offset, int length) throws Exception;
     }
 
     /* ----------------------------------------- Properties -------------------------------------------------- */
@@ -51,16 +50,19 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
     protected long    reconnect_interval=5000;
 
     @Property(description="Should TCP no delay flag be turned on")
-    protected boolean tcp_nodelay=false;
+    protected boolean tcp_nodelay;
 
     @Property(description="Whether to use blocking (false) or non-blocking (true) connections. If GossipRouter is used, " +
       "this needs to be false; if GossipRouterNio is used, it needs to be true")
     protected boolean use_nio;
 
+    @Property(description="A comma-separated list of GossipRouter hosts, e.g. HostA[12001],HostB[12001]")
+    protected String  gossip_router_hosts;
+
     /* ------------------------------------------ Fields ----------------------------------------------------- */
 
-    protected final List<InetSocketAddress> gossip_router_hosts = new ArrayList<>();
-    protected TUNNELPolicy                  tunnel_policy = new DefaultTUNNELPolicy();
+    protected final List<InetSocketAddress> gossip_routers=new ArrayList<>();
+    protected TUNNELPolicy                  tunnel_policy=new DefaultTUNNELPolicy();
     protected DatagramSocket                sock; // used to get a unique client address
     protected volatile RouterStubManager    stubManager;
 
@@ -75,14 +77,13 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
         return true;
     }
 
-    @Property(description="A comma-separated list of GossipRouter hosts, e.g. HostA[12001],HostB[12001]")
+
     public void setGossipRouterHosts(String hosts) throws UnknownHostException {
-        gossip_router_hosts.clear();
+        gossip_routers.clear();
         // if we get passed value of List<SocketAddress>#toString() we have to strip []
-        if (hosts.startsWith("[") && hosts.endsWith("]")) {
-            hosts = hosts.substring(1, hosts.length() - 1);
-        }
-        gossip_router_hosts.addAll(Util.parseCommaDelimitedHosts2(hosts, 1));
+        if(hosts.startsWith("[") && hosts.endsWith("]"))
+            hosts=hosts.substring(1, hosts.length() - 1);
+        gossip_router_hosts=hosts; //.addAll(Util.parseCommaDelimitedHosts2(hosts, port_range));
     }
 
     @ManagedOperation(description="Prints all stubs and the reconnect list")
@@ -127,24 +128,20 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
 
     public void init() throws Exception {
         super.init();
-        if (timer == null)
+        if(timer == null)
             throw new Exception("timer cannot be retrieved from protocol stack");
-      
-        // TODO [JGRP-1194] - Revisit implementation of TUNNEL and shared transport
-        if (isSingleton())
-            throw new Exception("TUNNEL and shared transport mode are not supported!");
-
-        if(gossip_router_hosts.isEmpty())
+        gossip_routers.clear();
+        gossip_routers.addAll(Util.parseCommaDelimitedHosts2(gossip_router_hosts, port_range));
+        if(gossip_routers.isEmpty())
             throw new IllegalStateException("gossip_router_hosts needs to contain at least one address of a GossipRouter");
-        log.debug("GossipRouters are:" + gossip_router_hosts.toString());
-        
-        stubManager = RouterStubManager.emptyGossipClientStubManager(this).useNio(this.use_nio);
-        sock = getSocketFactory().createDatagramSocket("jgroups.tunnel.ucast_sock", bind_port, bind_addr);
+        log.debug("gossip routers are %s", gossip_routers);
+        stubManager=RouterStubManager.emptyGossipClientStubManager(this).useNio(this.use_nio);
+        sock=getSocketFactory().createDatagramSocket("jgroups.tunnel.ucast_sock", bind_port, bind_addr);
     }
     
     public void destroy() {        
         stubManager.destroyStubs();
-        if (sock != null) sock.close();
+        Util.close(sock);
         super.destroy();
     }
 
@@ -152,22 +149,22 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
         stubManager.disconnectStubs();
     }
 
-    public Object handleDownEvent(Event evt) {
-        Object retEvent = super.handleDownEvent(evt);
+    @Override
+    public Object down(Event evt) {
+        Object retEvent = super.down(evt);
         switch (evt.getType()) {
             case Event.CONNECT:
             case Event.CONNECT_WITH_STATE_TRANSFER:
             case Event.CONNECT_USE_FLUSH:
             case Event.CONNECT_WITH_STATE_TRANSFER_USE_FLUSH:
-                String group=(String)evt.getArg();
+                String group=evt.getArg();
                 Address local=local_addr;
-
                 if(stubManager != null)
                     stubManager.destroyStubs();
                 PhysicalAddress physical_addr=getPhysicalAddressFromCache(local);
-                String logical_name=org.jgroups.util.UUID.get(local);
+                String logical_name=org.jgroups.util.NameCache.get(local);
                 stubManager = new RouterStubManager(this,group,local, logical_name, physical_addr, getReconnectInterval()).useNio(this.use_nio);
-                for (InetSocketAddress gr : gossip_router_hosts) {
+                for(InetSocketAddress gr : gossip_routers) {
                     stubManager.createAndRegisterStub(new IpAddress(bind_addr, bind_port), new IpAddress(gr.getAddress(), gr.getPort()))
                       .receiver(this).set("tcp_nodelay", tcp_nodelay);
                 }
@@ -185,14 +182,16 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
     public void receive(GossipData data) {
         switch (data.getType()) {
             case MESSAGE:
+                if(Objects.equals(local_addr, data.getSender()))
+                    return;
                 byte[] msg=data.getBuffer();
-                receive(data.getAddress(), msg, 0, msg.length);
+                receive(data.getSender(), msg, 0, msg.length);
                 break;
             case SUSPECT:
                 Address suspect=data.getAddress();
                 if(suspect != null) {
                     log.debug("%s: firing suspect event for %s", local_addr, suspect);
-                    up(new Event(Event.SUSPECT, suspect));
+                    up(new Event(Event.SUSPECT, Collections.singletonList(suspect)));
                 }
                 break;
         }
@@ -200,35 +199,25 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
 
 
 
-    @Override
-    protected void send(Message msg, Address dest) throws Exception {
-
-        // we don't currently support message bundling in TUNNEL
-        TpHeader hdr=(TpHeader)msg.getHeader(this.id);
-        if(hdr == null)
-            throw new Exception("message " + msg + " doesn't have a transport header, cannot route it");
+    public void sendMulticast(byte[] data, int offset, int length) throws Exception {
         String group=cluster_name != null? cluster_name.toString() : null;
-
-        ByteArrayDataOutputStream dos=new ByteArrayDataOutputStream((int)(msg.size() + 50));
-        writeMessage(msg, dos, dest == null);
-
-        if(stats) {
-            num_msgs_sent++;
-            num_bytes_sent+=dos.position();
-        }
-        if(dest == null)
-            tunnel_policy.sendToAllMembers(group, dos.buffer(), 0, dos.position());
-        else
-            tunnel_policy.sendToSingleMember(group, dest, dos.buffer(), 0, dos.position());
-    }
-
-
-    public void sendMulticast(AsciiString cluster_name, byte[] data, int offset, int length) throws Exception {
-        throw new UnsupportedOperationException("sendMulticast() should not get called on TUNNEL");
+        tunnel_policy.sendToAllMembers(group, local_addr, data, offset, length);
     }
 
     public void sendUnicast(PhysicalAddress dest, byte[] data, int offset, int length) throws Exception {
-        throw new UnsupportedOperationException("sendUnicast() should not get called on TUNNEL");
+        String group=cluster_name != null? cluster_name.toString() : null;
+        tunnel_policy.sendToSingleMember(group, dest, local_addr, data, offset, length);
+    }
+
+    protected void sendToSingleMember(final Address dest, byte[] buf, int offset, int length) throws Exception {
+        if(dest instanceof PhysicalAddress)
+            throw new IllegalArgumentException(String.format("destination %s cannot be a physical address", dest));
+        sendUnicast(dest, buf, offset, length);
+    }
+
+    protected void sendUnicast(Address dest, byte[] data, int offset, int length) throws Exception {
+        String group=cluster_name != null? cluster_name.toString() : null;
+        tunnel_policy.sendToSingleMember(group, dest, local_addr, data, offset, length);
     }
 
     public String getInfo() {
@@ -242,32 +231,32 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
 
     private class DefaultTUNNELPolicy implements TUNNELPolicy {
 
-        public void sendToAllMembers(final String group, final byte[] data, final int offset, final int length) throws Exception {
-            stubManager.forAny(new RouterStubManager.Consumer() {
-                @Override public void accept(RouterStub stub) {
-                    try {
-                        if(log.isTraceEnabled())
-                            log.trace("sent a message to all members, GR used %s", stub.gossipRouterAddress());
-                        stub.sendToAllMembers(group, data, offset, length);
-                    }
-                    catch (Exception ex) {
-                        log.warn("failed sending a message to all members, router used %s", stub.gossipRouterAddress());
-                    }
+        public void sendToAllMembers(final String group, Address sender,
+                                     final byte[] data, final int offset, final int length) throws Exception {
+            stubManager.forAny( stub -> {
+                try {
+                    if(log.isTraceEnabled())
+                        log.trace("%s: sending a message to all members, GR used %s", local_addr, stub.gossipRouterAddress());
+                    stub.sendToAllMembers(group, sender, data, offset, length);
+                }
+                catch(Exception ex) {
+                    log.warn("%s: failed sending a message to all members, router used %s: %s",
+                             local_addr, stub.gossipRouterAddress(), ex);
                 }
             });
         }
 
-        public void sendToSingleMember(final String group, final Address dest, final byte[] data, final int offset, final int length) throws Exception {
-            stubManager.forAny(new RouterStubManager.Consumer() {
-                @Override public void accept(RouterStub stub) {
-                    try {
-                        if(log.isTraceEnabled())
-                            log.trace("sent a message to all members, GR used %s", stub.gossipRouterAddress());
-                        stub.sendToMember(group, dest, data, offset, length);
-                    }
-                    catch (Exception ex) {
-                        log.warn("failed sending a message to all members, router used %s", stub.gossipRouterAddress());
-                    }
+        public void sendToSingleMember(final String group, final Address dest, Address sender,
+                                       final byte[] data, final int offset, final int length) throws Exception {
+            stubManager.forAny( stub -> {
+                try {
+                    if(log.isTraceEnabled())
+                        log.trace("%s: sending a message to %s (router used %s)", local_addr, dest, stub.gossipRouterAddress());
+                    stub.sendToMember(group, dest, sender, data, offset, length);
+                }
+                catch(Exception ex) {
+                    log.warn("%s: failed sending a message to %s (router used %s): %s", local_addr, dest,
+                             stub.gossipRouterAddress(), ex);
                 }
             });
         }

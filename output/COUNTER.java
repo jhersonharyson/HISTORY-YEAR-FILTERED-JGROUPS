@@ -7,14 +7,9 @@ import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
 
 
 /**
@@ -138,13 +133,19 @@ public class COUNTER extends Protocol {
         Owner owner=getOwner();
         GetOrCreateRequest req=new GetOrCreateRequest(owner, name, initial_value);
         Promise<long[]> promise=new Promise<>();
-        pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
+        pending_requests.put(owner, new Tuple<>(req, promise));
         sendRequest(coord, req);
-        long[] result=promise.getResultWithTimeout(timeout);
-        long value=result[0], version=result[1];
-        if(!coord.equals(local_addr))
-            counters.put(name, new VersionedValue(value, version));
-        return new CounterImpl(name);
+        long[] result=new long[0];
+        try {
+            result=promise.getResultWithTimeout(timeout);
+            long value=result[0], version=result[1];
+            if(!coord.equals(local_addr))
+                counters.put(name, new VersionedValue(value, version));
+            return new CounterImpl(name);
+        }
+        catch(TimeoutException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     /** Sent asynchronously - we don't wait for an ack */
@@ -161,10 +162,10 @@ public class COUNTER extends Protocol {
     public Object down(Event evt) {
         switch(evt.getType()) {
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=(Address)evt.getArg();
+                local_addr=evt.getArg();
                 break;
             case Event.VIEW_CHANGE:
-                handleView((View)evt.arg());
+                handleView(evt.arg());
                 break;
         }
         return down_prot.down(evt);
@@ -172,37 +173,37 @@ public class COUNTER extends Protocol {
 
     public Object up(Event evt) {
         switch(evt.getType()) {
-            case Event.MSG:
-                Message msg=(Message)evt.getArg();
-                CounterHeader hdr=(CounterHeader)msg.getHeader(id);
-                if(hdr == null)
-                    break;
-
-                try {
-                    Object obj=streamableFromBuffer(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-                    if(log.isTraceEnabled())
-                        log.trace("[" + local_addr + "] <-- [" + msg.getSrc() + "] " + obj);
-
-                    if(obj instanceof Request) {
-                        handleRequest((Request)obj, msg.getSrc());
-                    }
-                    else if(obj instanceof Response) {
-                        handleResponse((Response)obj, msg.getSrc());
-                    }
-                    else {
-                        log.error(Util.getMessage("ReceivedObjectIsNeitherARequestNorAResponse") + obj);
-                    }
-                }
-                catch(Exception ex) {
-                    log.error(Util.getMessage("FailedHandlingMessage"), ex);
-                }
-                return null;
-
             case Event.VIEW_CHANGE:
-                handleView((View)evt.getArg());
+                handleView(evt.getArg());
                 break;
         }
         return up_prot.up(evt);
+    }
+
+    public Object up(Message msg) {
+        CounterHeader hdr=msg.getHeader(id);
+        if(hdr == null)
+            return up_prot.up(msg);
+
+        try {
+            Object obj=streamableFromBuffer(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+            if(log.isTraceEnabled())
+                log.trace("[" + local_addr + "] <-- [" + msg.getSrc() + "] " + obj);
+
+            if(obj instanceof Request) {
+                handleRequest((Request)obj, msg.getSrc());
+            }
+            else if(obj instanceof Response) {
+                handleResponse((Response)obj, msg.getSrc());
+            }
+            else {
+                log.error(Util.getMessage("ReceivedObjectIsNeitherARequestNorAResponse") + obj);
+            }
+        }
+        catch(Exception ex) {
+            log.error(Util.getMessage("FailedHandlingMessage"), ex);
+        }
+        return null;
     }
 
     
@@ -293,10 +294,8 @@ public class COUNTER extends Protocol {
                         counter_name=reconcile_req.names[i];
                         long version=reconcile_req.versions[i];
                         VersionedValue my_value=map.get(counter_name);
-                        if(my_value != null) {
-                            if(my_value.version <= version)
-                                map.remove(counter_name);
-                        }
+                        if(my_value != null && my_value.version <= version)
+                            map.remove(counter_name);
                     }
                 }
 
@@ -404,7 +403,7 @@ public class COUNTER extends Protocol {
         if(!members.isEmpty())
             coord=members.get(0);
 
-        if(coord != null && coord.equals(local_addr)) {
+        if(Objects.equals(coord, local_addr)) {
             List<Address> old_backups=backup_coords != null? new ArrayList<>(backup_coords) : null;
             backup_coords=new CopyOnWriteArrayList<>(Util.pickNext(members, local_addr, num_backups));
 
@@ -441,7 +440,7 @@ public class COUNTER extends Protocol {
             if(log.isTraceEnabled())
                 log.trace("[" + local_addr + "] --> [" + (dest == null? "ALL" : dest) + "] " + req);
 
-            down_prot.down(new Event(Event.MSG, msg));
+            down_prot.down(msg);
         }
         catch(Exception ex) {
             log.error(Util.getMessage("FailedSending") + req + " request: " + ex);
@@ -459,7 +458,7 @@ public class COUNTER extends Protocol {
             if(log.isTraceEnabled())
                 log.trace("[" + local_addr + "] --> [" + dest + "] " + rsp);
 
-            down_prot.down(new Event(Event.MSG, rsp_msg));
+            down_prot.down(rsp_msg);
         }
         catch(Exception ex) {
             log.error(Util.getMessage("FailedSending") + rsp + " message to " + dest + ": " + ex);
@@ -485,7 +484,7 @@ public class COUNTER extends Protocol {
             Message rsp_msg=new Message(dest, buffer).putHeader(id, new CounterHeader());
             if(bypass_bundling)
                 rsp_msg.setFlag(Message.Flag.DONT_BUNDLE);
-            down_prot.down(new Event(Event.MSG, rsp_msg));
+            down_prot.down(rsp_msg);
         }
         catch(Exception ex) {
             log.error(Util.getMessage("FailedSendingMessageTo") + dest + ": " + ex);
@@ -507,7 +506,8 @@ public class COUNTER extends Protocol {
     }
 
     protected static Buffer streamableToBuffer(byte req_or_rsp, byte type, Streamable obj) throws Exception {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(100);
+        int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 100;
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size);
         out.writeByte(req_or_rsp);
         out.writeByte(type);
         obj.writeTo(out);
@@ -587,7 +587,7 @@ public class COUNTER extends Protocol {
     }
 
 
-    protected static void writeReconciliation(DataOutput out, String[] names, long[] values, long[] versions) throws Exception {
+    protected static void writeReconciliation(DataOutput out, String[] names, long[] values, long[] versions) throws IOException {
         if(names == null) {
             out.writeInt(0);
             return;
@@ -601,14 +601,14 @@ public class COUNTER extends Protocol {
             Bits.writeLong(version, out);
     }
 
-    protected static String[] readReconciliationNames(DataInput in, int len) throws Exception {
+    protected static String[] readReconciliationNames(DataInput in, int len) throws IOException {
         String[] retval=new String[len];
         for(int i=0; i < len; i++)
             retval[i]=Bits.readString(in);
         return retval;
     }
 
-    protected static long[] readReconciliationLongs(DataInput in, int len) throws Exception {
+    protected static long[] readReconciliationLongs(DataInput in, int len) throws IOException {
         long[] retval=new long[len];
         for(int i=0; i < len; i++)
             retval[i]=Bits.readLong(in);
@@ -654,15 +654,21 @@ public class COUNTER extends Protocol {
             Owner owner=getOwner();
             Request req=new SetRequest(owner, name, new_value);
             Promise<long[]> promise=new Promise<>();
-            pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
+            pending_requests.put(owner, new Tuple<>(req, promise));
             sendRequest(coord, req);
-            Object obj=promise.getResultWithTimeout(timeout);
-            if(obj instanceof Throwable)
-                throw new IllegalStateException((Throwable)obj);
-            long[] result=(long[])obj;
-            long value=result[0], version=result[1];
-            if(!coord.equals(local_addr))
-                counters.put(name, new VersionedValue(value, version));
+            Object obj=null;
+            try {
+                obj=promise.getResultWithTimeout(timeout);
+                if(obj instanceof Throwable)
+                    throw new IllegalStateException((Throwable)obj);
+                long[] result=(long[])obj;
+                long value=result[0], version=result[1];
+                if(!coord.equals(local_addr))
+                    counters.put(name, new VersionedValue(value, version));
+            }
+            catch(TimeoutException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
@@ -677,18 +683,24 @@ public class COUNTER extends Protocol {
             Owner owner=getOwner();
             Request req=new CompareAndSetRequest(owner, name, expect, update);
             Promise<long[]> promise=new Promise<>();
-            pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
+            pending_requests.put(owner, new Tuple<>(req, promise));
             sendRequest(coord, req);
-            Object obj=promise.getResultWithTimeout(timeout);
-            if(obj instanceof Throwable)
-                throw new IllegalStateException((Throwable)obj);
-            if(obj == null)
-                return false;
-            long[] result=(long[])obj;
-            long value=result[0], version=result[1];
-            if(!coord.equals(local_addr))
-                counters.put(name, new VersionedValue(value, version));
-            return true;
+            Object obj=null;
+            try {
+                obj=promise.getResultWithTimeout(timeout);
+                if(obj instanceof Throwable)
+                    throw new IllegalStateException((Throwable)obj);
+                if(obj == null)
+                    return false;
+                long[] result=(long[])obj;
+                long value=result[0], version=result[1];
+                if(!coord.equals(local_addr))
+                    counters.put(name, new VersionedValue(value, version));
+                return true;
+            }
+            catch(TimeoutException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
@@ -713,16 +725,22 @@ public class COUNTER extends Protocol {
             Owner owner=getOwner();
             Request req=new AddAndGetRequest(owner, name, delta);
             Promise<long[]> promise=new Promise<>();
-            pending_requests.put(owner, new Tuple<Request,Promise>(req, promise));
+            pending_requests.put(owner, new Tuple<>(req, promise));
             sendRequest(coord, req);
-            Object obj=promise.getResultWithTimeout(timeout);
-            if(obj instanceof Throwable)
-                throw new IllegalStateException((Throwable)obj);
-            long[] result=(long[])obj;
-            long value=result[0], version=result[1];
-            if(!coord.equals(local_addr))
-                counters.put(name, new VersionedValue(value, version));
-            return value;
+            Object obj=null;
+            try {
+                obj=promise.getResultWithTimeout(timeout);
+                if(obj instanceof Throwable)
+                    throw new IllegalStateException((Throwable)obj);
+                long[] result=(long[])obj;
+                long value=result[0], version=result[1];
+                if(!coord.equals(local_addr))
+                    counters.put(name, new VersionedValue(value, version));
+                return value;
+            }
+            catch(TimeoutException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
@@ -735,12 +753,12 @@ public class COUNTER extends Protocol {
 
 
 
-    protected abstract static class Request implements Streamable {
+    protected interface Request extends Streamable {
 
     }
 
 
-    protected static class SimpleRequest extends Request {
+    protected static class SimpleRequest implements Request {
         protected Owner   owner;
         protected String  name;
 
@@ -753,12 +771,14 @@ public class COUNTER extends Protocol {
             this.name=name;
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             owner.writeTo(out);
             Bits.writeString(name,out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             owner=new Owner();
             owner.readFrom(in);
             name=Bits.readString(in);
@@ -769,9 +789,11 @@ public class COUNTER extends Protocol {
         }
     }
 
-    protected static class ResendPendingRequests extends Request {
-        public void writeTo(DataOutput out) throws Exception {}
-        public void readFrom(DataInput in) throws Exception {}
+    protected static class ResendPendingRequests implements Request {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {}
+        @Override
+        public void readFrom(DataInput in) throws IOException {}
         public String toString() {return "ResendPendingRequests";}
     }
 
@@ -785,12 +807,14 @@ public class COUNTER extends Protocol {
             this.initial_value=initial_value;
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             super.readFrom(in);
             initial_value=Bits.readLong(in);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             super.writeTo(out);
             Bits.writeLong(initial_value, out);
         }
@@ -831,12 +855,14 @@ public class COUNTER extends Protocol {
             this.value=value;
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             super.readFrom(in);
             value=Bits.readLong(in);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             super.writeTo(out);
             Bits.writeLong(value, out);
         }
@@ -856,13 +882,15 @@ public class COUNTER extends Protocol {
             this.update=update;
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             super.readFrom(in);
             expected=Bits.readLong(in);
             update=Bits.readLong(in);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             super.writeTo(out);
             Bits.writeLong(expected, out);
             Bits.writeLong(update, out);
@@ -872,7 +900,7 @@ public class COUNTER extends Protocol {
     }
 
 
-    protected static class ReconcileRequest extends Request {
+    protected static class ReconcileRequest implements Request {
         protected String[] names;
         protected long[]   values;
         protected long[]   versions;
@@ -885,11 +913,13 @@ public class COUNTER extends Protocol {
             this.versions=versions;
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             writeReconciliation(out, names, values, versions);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException {
             int len=in.readInt();
             names=readReconciliationNames(in, len);
             values=readReconciliationLongs(in, len);
@@ -900,7 +930,7 @@ public class COUNTER extends Protocol {
     }
 
 
-    protected static class UpdateRequest extends Request {
+    protected static class UpdateRequest implements Request {
         protected String name;
         protected long   value;
         protected long   version;
@@ -913,13 +943,15 @@ public class COUNTER extends Protocol {
             this.version=version;
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             Bits.writeString(name,out);
             Bits.writeLong(value, out);
             Bits.writeLong(version, out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException {
             name=Bits.readString(in);
             value=Bits.readLong(in);
             version=Bits.readLong(in);
@@ -930,11 +962,11 @@ public class COUNTER extends Protocol {
 
 
 
-    protected static abstract class Response implements Streamable {}
+    protected interface Response extends Streamable {}
 
     
     /** Response without data */
-    protected static class SimpleResponse extends Response {
+    protected static class SimpleResponse implements Response {
         protected Owner owner;
         protected long  version;
 
@@ -945,13 +977,15 @@ public class COUNTER extends Protocol {
             this.version=version;
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             owner=new Owner();
             owner.readFrom(in);
             version=Bits.readLong(in);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             owner.writeTo(out);
             Bits.writeLong(version, out);
         }
@@ -970,12 +1004,14 @@ public class COUNTER extends Protocol {
             this.result=result;
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             super.readFrom(in);
             result=in.readBoolean();
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             super.writeTo(out);
             out.writeBoolean(result);
         }
@@ -993,12 +1029,14 @@ public class COUNTER extends Protocol {
             this.result=result;
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             super.readFrom(in);
             result=Bits.readLong(in);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             super.writeTo(out);
             Bits.writeLong(result, out);
         }
@@ -1028,12 +1066,14 @@ public class COUNTER extends Protocol {
             this.error_message=error_message;
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             super.readFrom(in);
             error_message=Bits.readString(in);
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             super.writeTo(out);
             Bits.writeString(error_message,out);
         }
@@ -1043,7 +1083,7 @@ public class COUNTER extends Protocol {
 
 
     
-    protected static class ReconcileResponse extends Response {
+    protected static class ReconcileResponse implements Response {
         protected String[] names;
         protected long[]   values;
         protected long[]   versions;
@@ -1056,11 +1096,13 @@ public class COUNTER extends Protocol {
             this.versions=versions;
         }
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             writeReconciliation(out,names,values,versions);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException {
             int len=in.readInt();
             names=readReconciliationNames(in, len);
             values=readReconciliationLongs(in, len);
@@ -1076,9 +1118,14 @@ public class COUNTER extends Protocol {
 
 
     public static class CounterHeader extends Header {
-        public int size() {return 0;}
-        public void writeTo(DataOutput out) throws Exception {}
-        public void readFrom(DataInput in) throws Exception {}
+        public Supplier<? extends Header> create() {return CounterHeader::new;}
+        public short getMagicId() {return 74;}
+        @Override
+        public int serializedSize() {return 0;}
+        @Override
+        public void writeTo(DataOutput out) {}
+        @Override
+        public void readFrom(DataInput in) {}
     }
     
 

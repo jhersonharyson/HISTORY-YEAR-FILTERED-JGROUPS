@@ -57,24 +57,19 @@ public class ClientGmsImpl extends GmsImpl {
      * Otherwise, we continue trying to send join() messages to the coordinator,
      * until we succeed (or there is no member in the group. In this case, we
      * create our own singleton group).
-     * <p>
-     * When GMS.disable_initial_coord is set to true, then we won't become
-     * coordinator on receiving an initial membership of 0, but instead will
-     * retry (forever) until we get an initial membership of > 0.
      *
      * @param mbr Our own address (assigned through SET_LOCAL_ADDRESS)
      */
     protected void joinInternal(Address mbr, boolean joinWithStateTransfer, boolean useFlushIfPresent) {
-        long  join_attempts=0;
-        leaving=false;
+        int  join_attempts=0;
         join_promise.reset();
 
-        while(!leaving) {
+        while(!gms.isLeaving()) {
             if(installViewIfValidJoinRsp(join_promise, false))
                 return;
 
             long start=System.currentTimeMillis();
-            Responses responses=(Responses)gms.getDownProtocol().down(Event.FIND_INITIAL_MBRS_EVT);
+            Responses responses=(Responses)gms.getDownProtocol().down(new Event(Event.FIND_INITIAL_MBRS, gms.getJoinTimeout()));
 
             // Sept 2008 (bela): return if we got a belated JoinRsp (https://jira.jboss.org/jira/browse/JGRP-687)
             if(installViewIfValidJoinRsp(join_promise, false))
@@ -83,8 +78,12 @@ public class ClientGmsImpl extends GmsImpl {
             responses.waitFor(gms.join_timeout);
             responses.done();
             long diff=System.currentTimeMillis() - start;
-            if(responses.isEmpty()) {
-                log.trace("%s: no members discovered after %d ms: creating cluster as first member", gms.local_addr, diff);
+            boolean empty;
+            if((empty=responses.isEmpty()) || responses.isCoord(gms.local_addr)) {
+                String m=String.format("%s: %s: creating cluster as coordinator", gms.local_addr,
+                                       empty? String.format("no members discovered after %d ms", diff)
+                                         : "I'm the first member");
+                log.info(m);
                 becomeSingletonMember(mbr);
                 return;
             }
@@ -124,8 +123,7 @@ public class ClientGmsImpl extends GmsImpl {
 
 
 
-    public void leave(Address mbr) {
-        leaving=true;
+    public void leave() {
         wrongMethod("leave");
     }
 
@@ -153,7 +151,7 @@ public class ClientGmsImpl extends GmsImpl {
         }
         finally {
             if(success)
-                sendViewAck(rsp.getView().getCreator());
+                gms.sendViewAck(rsp.getView().getCreator());
         }
     }
 
@@ -171,13 +169,13 @@ public class ClientGmsImpl extends GmsImpl {
         log.trace("%s: nodes to choose new coord from are: %s", gms.local_addr, clients);
         Address new_coord=clients.first();
         if(new_coord.equals(joiner)) {
-            log.trace("%s: I (%s) am the first of the nodes, will become coordinator", gms.local_addr, joiner);
+            log.trace("%s: I'm the FIRST of the nodes, will become coordinator", gms.local_addr);
             becomeSingletonMember(joiner);
             return true;
         }
-        log.trace("%s: I (%s) am not the first of the nodes, waiting for another client to become coordinator",
-                  gms.local_addr, joiner);
-        Util.sleep(500);
+        log.trace("%s: I'm not the first of the nodes, waiting for %d ms for another client to become coordinator",
+                  gms.local_addr, gms.all_clients_retry_timeout);
+        Util.sleep(gms.all_clients_retry_timeout);
         return false;
     }
 
@@ -222,33 +220,13 @@ public class ClientGmsImpl extends GmsImpl {
     }
 
 
-    protected static String print(List<PingData> rsps) {
-        StringBuilder sb=new StringBuilder();
-        for(PingData rsp: rsps)
-            sb.append(rsp.getAddress() + " ");
-        return sb.toString();
-    }
-
-    protected static String print(Responses rsps) {
-        StringBuilder sb=new StringBuilder();
-        for(PingData rsp: rsps)
-            sb.append(rsp.getAddress() + " ");
-        return sb.toString();
-    }
-
     void sendJoinMessage(Address coord, Address mbr,boolean joinWithTransfer, boolean useFlushIfPresent) {
-        Message msg=new Message(coord).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL);
-        GMS.GmsHeader hdr=joinWithTransfer? new GMS.GmsHeader(GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER, mbr,useFlushIfPresent)
-          : new GMS.GmsHeader(GMS.GmsHeader.JOIN_REQ, mbr,useFlushIfPresent);
-        msg.putHeader(gms.getId(), hdr);
-        gms.getDownProtocol().down(new Event(Event.MSG, msg));
+        byte type=joinWithTransfer? GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER : GMS.GmsHeader.JOIN_REQ;
+        GMS.GmsHeader hdr=new GMS.GmsHeader(type, mbr, useFlushIfPresent);
+        Message msg=new Message(coord).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL).putHeader(gms.getId(), hdr);
+        gms.getDownProtocol().down(msg);
     }
 
-    void sendViewAck(Address coord) {
-        Message view_ack=new Message(coord).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
-          .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.VIEW_ACK));
-        gms.getDownProtocol().down(new Event(Event.MSG, view_ack)); // send VIEW_ACK to sender of view
-    }
 
     /** Returns all members whose PingData is flagged as coordinator */
     private static List<Address> getCoords(Iterable<PingData> mbrs) {
@@ -280,6 +258,6 @@ public class ClientGmsImpl extends GmsImpl {
         gms.getUpProtocol().up(new Event(Event.BECOME_SERVER));
         gms.getDownProtocol().down(new Event(Event.BECOME_SERVER));
         log.debug("%s: created cluster (first member). My view is %s, impl is %s",
-                  gms.getLocalAddress(), gms.getViewId(), gms.getImpl().getClass().getName());
+                  gms.getLocalAddress(), gms.getViewId(), gms.getImpl().getClass().getSimpleName());
     }
 }

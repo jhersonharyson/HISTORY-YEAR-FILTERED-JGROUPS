@@ -3,12 +3,15 @@ package org.jgroups.protocols;
 import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.Global;
+import org.jgroups.Message;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.DefaultThreadFactory;
 import org.jgroups.util.ThreadFactory;
 import org.jgroups.util.Util;
 import org.testng.annotations.Test;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -19,9 +22,7 @@ import java.util.Map;
  */
 @Test(groups=Global.TIME_SENSITIVE,singleThreaded=true)
 public class VERIFY_SUSPECT_Test {
-    static final Address a=Util.createRandomAddress("A"),
-      b=Util.createRandomAddress("B"),
-      c=Util.createRandomAddress("C");
+    static final Address a=Util.createRandomAddress("A"), b=Util.createRandomAddress("B");
     long start;
 
     public void testTimer() {
@@ -31,10 +32,10 @@ public class VERIFY_SUSPECT_Test {
         ver.setDownProtocol(new NoopProtocol());
 
         start=System.currentTimeMillis();
-        ver.up(new Event(Event.SUSPECT, a));
+        ver.up(new Event(Event.SUSPECT, Collections.singletonList(a)));
 
         Util.sleep(100);
-        ver.up(new Event(Event.SUSPECT,b));
+        ver.up(new Event(Event.SUSPECT,Collections.singletonList(b)));
 
         Map<Address,Long> map=impl.getMap();
 
@@ -57,16 +58,16 @@ public class VERIFY_SUSPECT_Test {
         ver.setDownProtocol(new NoopProtocol());
 
         start=System.currentTimeMillis();
-        ver.up(new Event(Event.SUSPECT, a));
+        ver.up(new Event(Event.SUSPECT, Collections.singletonList(a)));
 
         Util.sleep(100);
-        ver.up(new Event(Event.SUSPECT,b));
+        ver.up(new Event(Event.SUSPECT,Collections.singletonList(b)));
 
         Map<Address,Long> map=impl.getMap();
 
         for(int i=0; i < 5; i++) {
             Address addr=Util.createRandomAddress(String.valueOf(i));
-            ver.up(new Event(Event.SUSPECT, addr));
+            ver.up(new Event(Event.SUSPECT, Collections.singletonList(addr)));
             Util.sleep(500);
         }
 
@@ -82,6 +83,7 @@ public class VERIFY_SUSPECT_Test {
             public Object down(Event evt) {
                 return null;
             }
+            public Object down(Message msg) {return null;}
 
             public ThreadFactory getThreadFactory() {
                 return new DefaultThreadFactory("foo",false,true);
@@ -89,8 +91,8 @@ public class VERIFY_SUSPECT_Test {
         });
 
         start=System.currentTimeMillis();
-        ver.up(new Event(Event.SUSPECT, a));
-        ver.up(new Event(Event.SUSPECT,b));
+        ver.up(new Event(Event.SUSPECT, Collections.singletonList(a)));
+        ver.up(new Event(Event.SUSPECT, Collections.singletonList(b)));
 
         Util.sleep(1000);
         ver.unsuspect(a);
@@ -110,10 +112,12 @@ public class VERIFY_SUSPECT_Test {
 
         public Object up(Event evt) {
             if(evt.getType() == Event.SUSPECT) {
-                Address suspect=(Address)evt.getArg();
+                Collection<Address> suspects=evt.getArg();
                 long diff=System.currentTimeMillis() - start;
-                map.put(suspect, diff);
-                System.out.println("[" + diff + "] evt = " + evt);
+                for(Address suspect: suspects) {
+                    map.put(suspect, diff);
+                    System.out.println("[" + diff + "] evt = " + evt);
+                }
             }
             return null;
         }
@@ -121,6 +125,7 @@ public class VERIFY_SUSPECT_Test {
 
     protected static class NoopProtocol extends Protocol {
         public Object down(Event evt) {return null;}
-        public ThreadFactory getThreadFactory() {return new DefaultThreadFactory("y",false,true);}
+        public Object down(Message msg) {return null;}
+        public ThreadFactory getThreadFactory() {return new DefaultThreadFactory("y", false, true);}
     }
 }

@@ -42,7 +42,7 @@ public class ConnectStressTest {
         }
     }
 
-    @AfterMethod protected void destroy() {Util.close(channels);}
+    @AfterMethod protected void destroy() {Util.closeFast(channels);}
 
 
     public void testConcurrentJoining() throws Exception {
@@ -102,15 +102,14 @@ public class ConnectStressTest {
         }
     }
 
-    protected JChannel createChannel(String name) throws Exception {
+    protected static JChannel createChannel(String name) throws Exception {
         return new JChannel(new SHARED_LOOPBACK(),
                             new SHARED_LOOPBACK_PING(),
                             new MERGE3().setValue("min_interval", 2000).setValue("max_interval", 5000),
                             new NAKACK2().setValue("log_discard_msgs", false),
                             new UNICAST3(),
                             new STABLE(),
-                            new GMS().joinTimeout(1000).setValue("view_bundling", true).setValue("max_bundling_time", 300)
-                              .setValue("print_local_addr", false),
+                            new GMS().joinTimeout(1000).setValue("print_local_addr", false),
                             new FRAG2().fragSize(8000));
 
     }

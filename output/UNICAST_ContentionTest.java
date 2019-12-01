@@ -30,8 +30,6 @@ public class UNICAST_ContentionTest {
     @DataProvider
     static Object[][] provider() {
         return new Object[][] {
-          {UNICAST.class},
-          {UNICAST2.class},
           {UNICAST3.class}
         };
     }
@@ -112,12 +110,6 @@ public class UNICAST_ContentionTest {
             if(r1.getNum() == NUM_EXPECTED_MSGS && r2.getNum() == NUM_EXPECTED_MSGS)
                 break;
             Util.sleep(2000);
-            UNICAST2 unicast2=(UNICAST2)a.getProtocolStack().findProtocol(UNICAST2.class);
-            if(unicast2 != null)
-                unicast2.sendStableMessages();
-            unicast2=(UNICAST2)b.getProtocolStack().findProtocol(UNICAST2.class);
-            if(unicast2 != null)
-                unicast2.sendStableMessages();
         }
 
         System.out.println("c1 received " + r1.getNum() + " msgs, " + getNumberOfRetransmissions(a) + " retransmissions");
@@ -128,13 +120,13 @@ public class UNICAST_ContentionTest {
     }
 
     protected JChannel create(Class<? extends Protocol> unicast_class, String name) throws Exception {
-        return new JChannel(new SHARED_LOOPBACK(), unicast_class.newInstance().setValue("xmit_interval", 500)).name(name);
+        return new JChannel(new SHARED_LOOPBACK(), unicast_class.getDeclaredConstructor().newInstance().setValue("xmit_interval", 500)).name(name);
     }
 
     private static long getNumberOfRetransmissions(JChannel ch) {
         Protocol prot=ch.getProtocolStack().findProtocol(Util.getUnicastProtocols());
-        if(prot instanceof UNICAST)
-            return ((UNICAST)prot).getNumXmits();
+        if(prot instanceof UNICAST3)
+            return ((UNICAST3)prot).getNumXmits();
         return 0;
     }
 
@@ -162,7 +154,7 @@ public class UNICAST_ContentionTest {
             }
             for(int i=0; i < NUM_MSGS; i++) {
                 try {
-                    Message msg=new Message(dest, null, buf);
+                    Message msg=new Message(dest, buf);
                     ch.send(msg);
                 }
                 catch(Exception e) {

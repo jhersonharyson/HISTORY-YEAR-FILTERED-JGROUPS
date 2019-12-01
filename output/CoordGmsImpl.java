@@ -32,6 +32,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
     public void init() throws Exception {
         super.init();
         merger.cancelMerge(null);
+        gms.getViewHandler().resume();
     }
 
     public void join(Address mbr,boolean useFlushIfPresent) {
@@ -43,21 +44,21 @@ public class CoordGmsImpl extends ServerGmsImpl {
     }
 
     /** The coordinator itself wants to leave the group */
-    public void leave(Address mbr) {
-        if(mbr == null) {
-            if(log.isErrorEnabled()) log.error(Util.getMessage("MemberSAddressIsNull"));
-            return;
-        }
-        if(mbr.equals(gms.local_addr))
-            leaving=true;
-        gms.getViewHandler().add(new Request(Request.LEAVE, mbr, false));
-        gms.getViewHandler().stop(true); // wait until all requests have been processed, then close the queue and leave
-
-        // If we're the coord leaving, ignore gms.leave_timeout: https://issues.jboss.org/browse/JGRP-1509
-        long timeout=(long)(Math.max(gms.leave_timeout, gms.view_ack_collection_timeout) * 1.10);
-        gms.getViewHandler().waitUntilCompleted(timeout);
+    public void leave() {
+        ViewHandler<Request> vh=gms.getViewHandler();
+        vh.add(new Request(Request.COORD_LEAVE)); // https://issues.jboss.org/browse/JGRP-2293
+        vh.waitUntilComplete();
     }
 
+    public void handleCoordLeave() {
+        try {
+            gms.suspendViewHandler(); // clears the queue and drops subsequent requests
+            leaver.leave();
+        }
+        finally {
+            gms.initState();
+        }
+    }
 
     public void suspect(Address mbr) {
         if(mbr.equals(gms.local_addr)) {
@@ -65,7 +66,7 @@ public class CoordGmsImpl extends ServerGmsImpl {
             return;
         }        
         Collection<Request> suspected=new LinkedHashSet<>(1);
-        suspected.add(new Request(Request.SUSPECT,mbr,true));
+        suspected.add(new Request(Request.SUSPECT,mbr));
         handleMembershipChange(suspected);
     }
 
@@ -87,8 +88,8 @@ public class CoordGmsImpl extends ServerGmsImpl {
         Collection<Address> suspected_mbrs=new LinkedHashSet<>(requests.size());
         Collection<Address> leaving_mbrs=new LinkedHashSet<>(requests.size());
 
+        log.trace("%s: handleMembershipChange(%s)", gms.getLocalAddress(), requests);
         boolean self_leaving=false; // is the coord leaving
-
         for(Request req: requests) {
             switch(req.type) {
                 case Request.JOIN:
@@ -103,13 +104,9 @@ public class CoordGmsImpl extends ServerGmsImpl {
                         useFlushIfPresent=true;
                     break;
                 case Request.LEAVE:
-                    if(req.suspected)
-                        suspected_mbrs.add(req.mbr);
-                    else {
-                        leaving_mbrs.add(req.mbr);
-                        if(gms.local_addr != null && gms.local_addr.equals(req.mbr))
-                            self_leaving=true;
-                    }
+                    leaving_mbrs.add(req.mbr);
+                    if(Objects.equals(gms.local_addr, req.mbr))
+                        self_leaving=true;
                     break;
                 case Request.SUSPECT:
                     suspected_mbrs.add(req.mbr);
@@ -154,7 +151,6 @@ public class CoordGmsImpl extends ServerGmsImpl {
         }
         
         View new_view=gms.getNextView(new_mbrs, leaving_mbrs, suspected_mbrs);
-
         if(new_view.size() == 0 && gms.local_addr != null && gms.local_addr.equals(new_view.getCreator())) {
             if(self_leaving)
                 gms.initState(); // in case connect() is called again
@@ -199,31 +195,16 @@ public class CoordGmsImpl extends ServerGmsImpl {
             sendLeaveResponses(leaving_mbrs); // no-op if no leaving members
 
             // we don't need to send the digest to existing members: https://issues.jboss.org/browse/JGRP-1317
-            gms.castViewChange(new_view, null, new_mbrs);
-            gms.sendJoinResponses(join_rsp, new_mbrs);
+            gms.castViewChangeAndSendJoinRsps(new_view, null, new_view.getMembers(), new_mbrs, join_rsp);
         }
         finally {
             if(hasJoiningMembers)
                 gms.getDownProtocol().down(new Event(Event.RESUME_STABLE));
             if(!joinAndStateTransferInitiated && useFlushIfPresent)
                 gms.stopFlush();
-            if(self_leaving)
-                gms.initState(); // in case connect() is called again
         }
     }
 
-
-    /**
-     * Called by the GMS when a VIEW is received.
-     * @param new_view The view to be installed
-     * @param digest   If view is a MergeView, digest contains the seqno digest of all members and has to
-     *                 be set by GMS
-     */
-    public void handleViewChange(View new_view, Digest digest) {
-        if(leaving && !new_view.containsMember(gms.local_addr))
-            return;
-        gms.installView(new_view, digest);
-    }
 
 
     public void stop() {
@@ -235,10 +216,10 @@ public class CoordGmsImpl extends ServerGmsImpl {
     
     private void sendLeaveResponses(Collection<Address> leaving_members) {
         for(Address address: leaving_members){
-            Message msg=new Message(address).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.NO_RELIABILITY)
+            Message msg=new Message(address).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
               .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.LEAVE_RSP));
             log.trace("%s: sending LEAVE response to %s", gms.local_addr, address);
-            gms.getDownProtocol().down(new Event(Event.MSG, msg));
+            gms.getDownProtocol().down(msg);
         }
     }
 

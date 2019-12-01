@@ -23,7 +23,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * <code>STATE_SOCK</code> has the state provider create a server socket to which the state
+ * {@code STATE_SOCK} has the state provider create a server socket to which the state
  * requester connects and from which the latter reads the state.
  * <p/>
  * When implementing {@link org.jgroups.MessageListener#getState(java.io.OutputStream)}, the state should be written in
@@ -115,19 +115,16 @@ public class STATE_SOCK extends StreamingStateTransfer {
 
     protected Tuple<InputStream,Object> createStreamToProvider(Address provider, StateHeader hdr) throws Exception {
         IpAddress address=hdr.bind_addr;
-        Tuple<InputStream,Object> retval=new Tuple<>(null,null);
         Socket socket=null;
         try {
             socket=getSocketFactory().createSocket("jgroups.state_sock.sock");
-            retval.setVal2(socket);
             socket.bind(new InetSocketAddress(bind_addr, 0));
             socket.setReceiveBufferSize(buffer_size);
             Util.connect(socket, new InetSocketAddress(address.getIpAddress(), address.getPort()), 0);
             log.debug("%s: connected to state provider %s:%d", local_addr, address.getIpAddress(), address.getPort());
             DataOutputStream out=new DataOutputStream(socket.getOutputStream());
             Util.writeAddress(local_addr, out);
-            retval.setVal1(new BufferedInputStream(socket.getInputStream(), buffer_size));
-            return retval;
+            return new Tuple<>(new BufferedInputStream(socket.getInputStream(), buffer_size), socket);
         }
         catch(Throwable t) {
             Util.close(socket);
@@ -202,11 +199,7 @@ public class STATE_SOCK extends StreamingStateTransfer {
                 try {
                     final Socket socket=serverSocket.accept();
                     try {
-                        pool.execute(new Runnable() {
-                            public void run() {
-                                process(socket);
-                            }
-                        });
+                        pool.execute(() -> process(socket));
                     }
                     catch(RejectedExecutionException rejected) {
                         Util.close(socket);

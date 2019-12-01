@@ -68,7 +68,8 @@ public class PDC extends Protocol {
         switch(evt.getType()) {
             case Event.GET_PHYSICAL_ADDRESS:
                 Object addr=down_prot.down(evt);
-                return addr != null? addr : cache.get((Address)evt.getArg());
+                Address arg=evt.getArg();
+                return addr != null? addr : cache.get(arg);
 
             case Event.GET_PHYSICAL_ADDRESSES:
                 Collection<PhysicalAddress> addrs=(Collection<PhysicalAddress>)down_prot.down(evt);
@@ -82,29 +83,27 @@ public class PDC extends Protocol {
                 new_map.putAll(cache);
                 return new_map;
 
-            case Event.SET_PHYSICAL_ADDRESS:
-                Tuple<Address,PhysicalAddress> new_val=(Tuple<Address, PhysicalAddress>)evt.getArg();
+            case Event.ADD_PHYSICAL_ADDRESS:
+                Tuple<Address,PhysicalAddress> new_val=evt.getArg();
                 if(new_val != null) {
                     cache.put(new_val.getVal1(), new_val.getVal2());
                     writeNodeToDisk(new_val.getVal1(), new_val.getVal2());
                 }
                 break;
             case Event.REMOVE_ADDRESS:
-                Address tmp_addr=(Address)evt.getArg();
+                Address tmp_addr=evt.getArg();
                 if(cache.remove(tmp_addr) != null)
                     removeNodeFromDisk(tmp_addr);
                 break;
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=(Address)evt.getArg();
+                local_addr=evt.getArg();
                 break;
             case Event.VIEW_CHANGE:
                 List<Address> members=((View)evt.getArg()).getMembers();
-                for(Address mbr: cache.keySet()) {
-                    if(!members.contains(mbr)) {
-                        cache.remove(mbr);
-                        removeNodeFromDisk(mbr);
-                    }
-                }
+                cache.keySet().stream().filter(mbr -> !members.contains(mbr)).forEach(mbr -> {
+                    cache.remove(mbr);
+                    removeNodeFromDisk(mbr);
+                });
                 break;
         }
         return down_prot.down(evt);
@@ -124,11 +123,7 @@ public class PDC extends Protocol {
         if(!root_dir.exists())
             throw new IllegalArgumentException("location " + root_dir.getPath() + " could not be accessed");
 
-        filter=new FilenameFilter() {
-            public boolean accept(File dir, String name) {
-                return name.endsWith(SUFFIX);
-            }
-        };
+        filter=(dir, name1) -> name1.endsWith(SUFFIX);
     }
 
     /** Reads all mappings from disk */
@@ -160,8 +155,8 @@ public class PDC extends Protocol {
             else {
                 if(data != null && data.getLogicalAddr() != null && data.getPhysicalAddr() != null) {
                     cache.put(data.getLogicalAddr(), (PhysicalAddress)data.getPhysicalAddr());
-                    if(data.getLogicalName() != null && UUID.get(data.getLogicalAddr()) == null)
-                        UUID.add(data.getLogicalAddr(), data.getLogicalName());
+                    if(data.getLogicalName() != null && NameCache.get(data.getLogicalAddr()) == null)
+                        NameCache.add(data.getLogicalAddr(), data.getLogicalName());
                 }
             }
         }
@@ -192,7 +187,7 @@ public class PDC extends Protocol {
         // this is because the writing can be very slow under some circumstances
         File tmpFile=null, destination=null;
         try {
-            tmpFile=writeToTempFile(root_dir, logical_addr, physical_addr, UUID.get(logical_addr));
+            tmpFile=writeToTempFile(root_dir, logical_addr, physical_addr, NameCache.get(logical_addr));
             if(tmpFile == null)
                 return;
 
@@ -273,9 +268,6 @@ public class PDC extends Protocol {
      */
     protected boolean deleteFile(File file) {
         boolean result = true;
-        if(log.isTraceEnabled())
-            log.trace("Attempting to delete file : "+file.getAbsolutePath());
-
         if(file != null && file.exists()) {
             try {
                 result=file.delete();
@@ -308,13 +300,15 @@ public class PDC extends Protocol {
         public Address  getPhysicalAddr() {return physical_addr;}
         public String   getLogicalName()  {return logical_name;}
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             Util.writeAddress(logical_addr, out);
             Util.writeAddress(physical_addr, out);
             Bits.writeString(logical_name,out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
             logical_addr=Util.readAddress(in);
             physical_addr=Util.readAddress(in);
             logical_name=Bits.readString(in);

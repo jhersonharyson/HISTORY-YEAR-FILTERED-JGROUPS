@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Supplier;
 
 /**
  * The FORK protocol; multiplexes messages to different forks in a stack (https://issues.jboss.org/browse/JGRP-1613).
@@ -67,6 +68,13 @@ public class FORK extends Protocol {
 
     public void setUnknownForkHandler(UnknownForkHandler unknownForkHandler) {
         this.unknownForkHandler = unknownForkHandler;
+        fork_stacks.values().forEach(p -> {
+            if(p instanceof ForkProtocol) {
+                ForkProtocolStack st=getForkStack(p);
+                if(st != null)
+                    st.setUnknownForkHandler(unknownForkHandler);
+            }
+        });
     }
 
     public UnknownForkHandler getUnknownForkHandler() {
@@ -95,7 +103,7 @@ public class FORK extends Protocol {
     public Object down(Event evt) {
         switch(evt.getType()) {
             case Event.SET_LOCAL_ADDRESS:
-                local_addr=(Address)evt.getArg();
+                local_addr=evt.getArg();
                 break;
         }
         return down_prot.down(evt);
@@ -103,17 +111,8 @@ public class FORK extends Protocol {
 
     public Object up(Event evt) {
         switch(evt.getType()) {
-            case Event.MSG:
-                Message msg=(Message)evt.getArg();
-                ForkHeader hdr=(ForkHeader)msg.getHeader(id);
-                if(hdr == null)
-                    break;
-                if(hdr.fork_stack_id == null)
-                    throw new IllegalArgumentException("header has a null fork_stack_id");
-                Protocol bottom_prot=get(hdr.fork_stack_id);
-                return bottom_prot != null? bottom_prot.up(evt) : this.unknownForkHandler.handleUnknownForkStack(msg, hdr.fork_stack_id);
-
             case Event.VIEW_CHANGE:
+            case Event.SITE_UNREACHABLE:
                 for(Protocol bottom: fork_stacks.values())
                     bottom.up(evt);
                 break;
@@ -127,24 +126,30 @@ public class FORK extends Protocol {
             case Event.STATE_TRANSFER_INPUTSTREAM:
                 if(!process_state_events)
                     break;
-                setStateInMainAndForkChannels((InputStream)evt.getArg());
+                setStateInMainAndForkChannels(evt.getArg());
                 return null;
         }
         return up_prot.up(evt);
+    }
+
+    public Object up(Message msg) {
+        ForkHeader hdr=msg.getHeader(id);
+        if(hdr == null)
+            return up_prot.up(msg);
+        if(hdr.fork_stack_id == null)
+            throw new IllegalArgumentException("header has a null fork_stack_id");
+        Protocol bottom_prot=get(hdr.fork_stack_id);
+        return bottom_prot != null? bottom_prot.up(msg) : this.unknownForkHandler.handleUnknownForkStack(msg, hdr.fork_stack_id);
     }
 
     public void up(MessageBatch batch) {
         // Sort fork messages by fork-stack-id
         Map<String,List<Message>> map=new HashMap<>();
         for(Message msg: batch) {
-            ForkHeader hdr=(ForkHeader)msg.getHeader(id);
+            ForkHeader hdr=msg.getHeader(id);
             if(hdr != null) {
                 batch.remove(msg);
-                List<Message> list=map.get(hdr.fork_stack_id);
-                if(list == null) {
-                    list=new ArrayList<>();
-                    map.put(hdr.fork_stack_id, list);
-                }
+                List<Message> list=map.computeIfAbsent(hdr.fork_stack_id, k -> new ArrayList<>());
                 list.add(msg);
             }
         }
@@ -154,8 +159,11 @@ public class FORK extends Protocol {
             String fork_stack_id=entry.getKey();
             List<Message> list=entry.getValue();
             Protocol bottom_prot=get(fork_stack_id);
-            if(bottom_prot == null)
+            if(bottom_prot == null) {
+                for(Message m: list)
+                    unknownForkHandler.handleUnknownForkStack(m, fork_stack_id);
                 continue;
+            }
             MessageBatch mb=new MessageBatch(batch.dest(), batch.sender(), batch.clusterName(), batch.multicast(), list);
             try {
                 bottom_prot.up(mb);
@@ -171,7 +179,7 @@ public class FORK extends Protocol {
 
 
     protected void getStateFromMainAndForkChannels(Event evt) {
-        final OutputStream out=(OutputStream)evt.getArg();
+        final OutputStream out=evt.getArg();
 
         try(DataOutputStream dos=new DataOutputStream(out)) {
             getStateFrom(null, up_prot, null, null, dos);
@@ -241,7 +249,7 @@ public class FORK extends Protocol {
                 }
             }
         }
-        catch(EOFException eof) {
+        catch(EOFException ignored) {
         }
         catch(Throwable ex) {
             log.error("%s: failed setting state in main channel", local_addr, ex);
@@ -262,8 +270,7 @@ public class FORK extends Protocol {
             String fork_stack_id=entry.getKey();
             if(get(fork_stack_id) != null)
                 continue;
-
-            List<Protocol> prots=createProtocols(null,entry.getValue());
+            List<Protocol> prots=Configurator.createProtocolsAndInitializeAttrs(entry.getValue(), null);
             createForkStack(fork_stack_id, prots, false);
         }
     }
@@ -307,14 +314,6 @@ public class FORK extends Protocol {
     }
 
 
-
-    /** Creates a fork-stack from the configuration, initializes all protocols (setting values),
-     * sets the protocol stack as top protocol, connects the protocols and calls init() on them. Returns
-     * the protocols in a list, from bottom to top */
-    protected static List<Protocol> createProtocols(ProtocolStack stack, List<ProtocolConfiguration> protocol_configs) throws Exception {
-        return Configurator.createProtocols(protocol_configs,stack);
-    }
-
     public static InputStream getForkStream(String config) throws IOException {
         InputStream configStream = null;
 
@@ -329,7 +328,7 @@ public class FORK extends Protocol {
             try {
                 configStream=new URL(config).openStream();
             }
-            catch (MalformedURLException mre) {
+            catch (MalformedURLException ignored) {
             }
         }
 
@@ -350,6 +349,8 @@ public class FORK extends Protocol {
             this.fork_stack_id=fork_stack_id;
             this.fork_channel_id=fork_channel_id;
         }
+        public short getMagicId() {return 83;}
+        public Supplier<? extends Header> create() {return ForkHeader::new;}
 
         public String getForkStackId() {
             return fork_stack_id;
@@ -367,14 +368,17 @@ public class FORK extends Protocol {
             this.fork_channel_id=fork_channel_id;
         }
 
-        public int size() {return Util.size(fork_stack_id) + Util.size(fork_channel_id);}
+        @Override
+        public int serializedSize() {return Util.size(fork_stack_id) + Util.size(fork_channel_id);}
 
-        public void writeTo(DataOutput out) throws Exception {
+        @Override
+        public void writeTo(DataOutput out) throws IOException {
             Bits.writeString(fork_stack_id,out);
             Bits.writeString(fork_channel_id,out);
         }
 
-        public void readFrom(DataInput in) throws Exception {
+        @Override
+        public void readFrom(DataInput in) throws IOException {
             fork_stack_id=Bits.readString(in);
             fork_channel_id=Bits.readString(in);
         }

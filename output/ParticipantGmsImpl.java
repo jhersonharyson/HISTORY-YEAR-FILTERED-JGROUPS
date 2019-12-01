@@ -1,11 +1,11 @@
 
 package org.jgroups.protocols.pbcast;
 
-import org.jgroups.*;
+import org.jgroups.Address;
+import org.jgroups.View;
+import org.jgroups.ViewId;
 import org.jgroups.util.Digest;
-import org.jgroups.util.Promise;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -15,8 +15,7 @@ import java.util.List;
  * @author Bela Ban
  */
 public class ParticipantGmsImpl extends ServerGmsImpl {
-    private final List<Address>     suspected_mbrs=new ArrayList<>(11);
-    private final Promise<Boolean>  leave_promise=new Promise<>();
+    private final Collection<Address> suspected_mbrs=new LinkedHashSet<>();
 
 
     public ParticipantGmsImpl(GMS g) {
@@ -27,7 +26,6 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
     public void init() throws Exception {
         super.init();
         suspected_mbrs.clear();
-        leave_promise.reset();
     }
 
     public void join(Address mbr, boolean useFlushIfPresent) {
@@ -39,38 +37,20 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
     }
 
 
-    /**
-     * Loop: determine coord. If coord is me --> handleLeave().
-     * Else send handleLeave() to coord until success
-     */
-    public void leave(Address mbr) {
-        leave_promise.reset();
-        if(mbr.equals(gms.local_addr))
-            leaving=true;
-
-        Address coord=gms.determineCoordinator();
-        if(coord != null) {
-            if(gms.local_addr.equals(coord)) { // I'm the coordinator
-                gms.becomeCoordinator();
-                gms.getImpl().leave(mbr);      // regular leave
-                return;
-            }
-
-            log.trace("%s: sending LEAVE request to %s", gms.local_addr, coord);
-            sendLeaveMessage(coord, mbr);
-            Boolean result=leave_promise.getResult(gms.leave_timeout);
-            if(result != null)
-                log.trace("%s: got LEAVE response from %s", gms.local_addr, coord);
+    public void leave() {
+        try {
+            leaver.leave();
         }
-        gms.becomeClient();
+        finally {
+            gms.initState();
+        }
     }
 
 
     /** In case we get a different JOIN_RSP from a previous JOIN_REQ sent by us (as a client), we simply apply the
      * new view if it is greater than ours
-     *
-     * @param join_rsp
      */
+    @Override
     public void handleJoinResponse(JoinRsp join_rsp) {
         View v=join_rsp.getView();
         ViewId tmp_vid=v != null? v.getViewId() : null;
@@ -81,14 +61,11 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
         }
     }
 
-    public void handleLeaveResponse() {
-        leave_promise.setResult(true);  // unblocks thread waiting in leave()
-    }
 
 
     public void suspect(Address mbr) {
         Collection<Request> suspected=new LinkedHashSet<>(1);
-        suspected.add(new Request(Request.SUSPECT,mbr,true));
+        suspected.add(new Request(Request.SUSPECT, mbr));
         handleMembershipChange(suspected);
     }
 
@@ -101,46 +78,45 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
 
 
     public void handleMembershipChange(Collection<Request> requests) {
-        Collection<Address> suspectedMembers=new LinkedHashSet<>(requests.size());
-        for(Request req: requests)
-            if(req.type == Request.SUSPECT)
-                suspectedMembers.add(req.mbr);
+        Collection<Address> leaving_mbrs=new LinkedHashSet<>(requests.size());
+        requests.forEach(r -> {
+            if(r.type == Request.SUSPECT)
+                suspected_mbrs.add(r.mbr);
+            else if(r.type == Request.LEAVE)
+                leaving_mbrs.add(r.mbr);
+        });
 
-        if(suspectedMembers.isEmpty())
+        if(suspected_mbrs.isEmpty() && leaving_mbrs.isEmpty())
             return;
 
-        for(Address mbr: suspectedMembers)
-            if(!suspected_mbrs.contains(mbr))
-                suspected_mbrs.add(mbr);
-
-        if(wouldIBeCoordinator()) {
-            log.debug("%s: members are %s, coord=%s: I'm the new coord !", gms.local_addr, gms.members, gms.local_addr);
-
+        if(wouldIBeCoordinator(leaving_mbrs)) {
+            log.debug("%s: members are %s, coord=%s: I'm the new coordinator", gms.local_addr, gms.members, gms.local_addr);
             gms.becomeCoordinator();
-            for(Address mbr: suspected_mbrs) {
-                gms.getViewHandler().add(new Request(Request.SUSPECT, mbr, true));
+            Collection<Request> leavingOrSuspectedMembers=new LinkedHashSet<>();
+            leaving_mbrs.forEach(mbr -> leavingOrSuspectedMembers.add(new Request(Request.LEAVE, mbr)));
+            suspected_mbrs.forEach(mbr -> {
+                leavingOrSuspectedMembers.add(new Request(Request.SUSPECT, mbr));
                 gms.ack_collector.suspect(mbr);
-            }
+            });
             suspected_mbrs.clear();
+            if(gms.isLeaving())
+                leavingOrSuspectedMembers.add(new Request(Request.COORD_LEAVE));
+            gms.getViewHandler().add(leavingOrSuspectedMembers);
         }
+        else
+            log.warn("%s: I'm not the coordinator (or next-in-line); dropping LEAVE request", gms.local_addr);
     }
 
 
-    /**
-     * If we are leaving, we have to wait for the view change (last msg in the current view) that
-     * excludes us before we can leave.
-     * @param new_view The view to be installed
-     * @param digest   If view is a MergeView, digest contains the seqno digest of all members and has to
-     *                 be set by GMS
-     */
-    public void handleViewChange(View new_view, Digest digest) {
+    public void handleViewChange(View view, Digest digest) {
         suspected_mbrs.clear();
-        if(leaving && !new_view.containsMember(gms.local_addr)) // received a view in which I'm not member: ignore
-            return;
-        gms.installView(new_view, digest);
+        super.handleViewChange(view, digest);
     }
 
-
+    @Override protected void coordChanged(Address from, Address to) {
+        super.coordChanged(from, to);
+        leaver.coordChanged(to);
+    }
 
     /* ---------------------------------- Private Methods --------------------------------------- */
 
@@ -152,18 +128,11 @@ public class ParticipantGmsImpl extends ServerGmsImpl {
      * D}. The resulting list is {B, C}. The first member of {B, C} is B, which is equal to the
      * local_addr. Therefore, true is returned.
      */
-    boolean wouldIBeCoordinator() {
-        List<Address> mbrs=gms.computeNewMembership(gms.members.getMembers(), null, null, suspected_mbrs);
-        if(mbrs.size() < 1) return false;
+    protected boolean wouldIBeCoordinator(Collection<Address> leaving_mbrs) {
+        List<Address> mbrs=gms.computeNewMembership(gms.members.getMembers(), null, leaving_mbrs, suspected_mbrs);
+        if(mbrs.isEmpty()) return false;
         Address new_coord=mbrs.get(0);
         return gms.local_addr.equals(new_coord);
-    }
-
-
-    void sendLeaveMessage(Address coord, Address mbr) {
-        Message msg=new Message(coord).setFlag(Message.Flag.OOB)
-          .putHeader(gms.getId(), new GMS.GmsHeader(GMS.GmsHeader.LEAVE_REQ, mbr));
-        gms.getDownProtocol().down(new Event(Event.MSG, msg));
     }
 
 

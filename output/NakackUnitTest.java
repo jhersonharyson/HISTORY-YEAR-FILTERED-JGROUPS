@@ -18,7 +18,7 @@ import java.util.List;
  * @author Bela Ban
  * @since  3.5
  */
-@Test(groups=Global.FUNCTIONAL,singleThreaded=false)
+@Test(groups=Global.FUNCTIONAL)
 public class NakackUnitTest {
     protected JChannel   a, b;
     protected MyReceiver ra, rb;
@@ -95,7 +95,7 @@ public class NakackUnitTest {
     protected JChannel create(String name, boolean use_batching) throws Exception {
         Protocol[] protocols={
           new SHARED_LOOPBACK(),
-          new SHARED_LOOPBACK_PING().timeout(1000),
+          new SHARED_LOOPBACK_PING(),
           new MAKE_BATCH().sleepTime(100).multicasts(use_batching),
           new NAKACK2(),
           new UNICAST3(),

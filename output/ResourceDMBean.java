@@ -9,10 +9,13 @@ import org.jgroups.logging.LogFactory;
 import org.jgroups.util.Util;
 
 import javax.management.*;
+import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
+import java.util.function.BiConsumer;
+import java.util.function.Predicate;
 
 /**
  * 
@@ -31,17 +34,20 @@ public class ResourceDMBean implements DynamicMBean {
     protected static final Class<?>[]              primitives= {int.class, byte.class, short.class, long.class,
                                                                 float.class, double.class, boolean.class, char.class };
 
-    protected static final String                  MBEAN_DESCRITION="MBeanDescription";
     protected static final List<Method>            OBJECT_METHODS; // all methods of java.lang.Object
     protected final boolean                        expose_all;
     protected final Log                            log=LogFactory.getLog(ResourceDMBean.class);
     protected final Object                         obj;
+    protected List<Object>                         objs;
     protected final MBeanAttributeInfo[]           attrInfo;
     protected final MBeanOperationInfo[]           opInfo;
     protected final HashMap<String,AttributeEntry> atts=new HashMap<>();
     protected final List<MBeanOperationInfo>       ops=new ArrayList<>();
 
     static {OBJECT_METHODS=new ArrayList<>(Arrays.asList(Object.class.getMethods()));}
+
+    protected static final Predicate<AccessibleObject> FILTER=obj -> obj.isAnnotationPresent(ManagedAttribute.class) ||
+      (obj.isAnnotationPresent(Property.class) && obj.getAnnotation(Property.class).exposeAsManagedAttribute());
 
 
     public ResourceDMBean(Object instance) {
@@ -51,9 +57,25 @@ public class ResourceDMBean implements DynamicMBean {
         Class<? extends Object> c=obj.getClass();
         expose_all=c.isAnnotationPresent(MBean.class) && c.getAnnotation(MBean.class).exposeAll();
 
-        findFields();
-        findMethods();
-        fixFields();
+        findFields(instance);
+        findMethods(instance);
+        fixFields(instance);
+
+        if(instance instanceof AdditionalJmxObjects) {
+            Object[] objects=((AdditionalJmxObjects)instance).getJmxObjects();
+            if(objects != null) {
+                for(Object inst: objects) {
+                    if(inst != null) {
+                        if(objs == null)
+                            objs=new ArrayList<>();
+                        objs.add(inst);
+                        findFields(inst);
+                        findMethods(inst);
+                        fixFields(inst);
+                    }
+                }
+            }
+        }
 
         attrInfo=new MBeanAttributeInfo[atts.size()];
         int i=0;
@@ -117,7 +139,19 @@ public class ResourceDMBean implements DynamicMBean {
             Class<?>[] classes=new Class[sig.length];
             for(int i=0;i < classes.length;i++)
                 classes[i]=getClassForName(sig[i]);
-            Method method=obj.getClass().getMethod(name, classes);
+            Method method=null;
+            if(objs != null) {
+                for(Object o: objs) {
+                    try {
+                        method=o.getClass().getMethod(name, classes);
+                    }
+                    catch(Throwable t) {
+                        continue;
+                    }
+                    return method.invoke(o, args);
+                }
+            }
+            method=obj.getClass().getMethod(name, classes);
             return method.invoke(obj, args);
         }
         catch(Exception e) {
@@ -140,6 +174,50 @@ public class ResourceDMBean implements DynamicMBean {
     }
 
 
+    public static void dumpStats(Object obj, final Map<String,Object> map, Log log) {
+        BiConsumer<Field,Object> field_func=(f,o) -> {
+            String attr_name=null;
+            try {
+                f.setAccessible(true);
+                Object value=f.get(o);
+                attr_name=Util.getNameFromAnnotation(f);
+                if(attr_name != null && !attr_name.trim().isEmpty())
+                    attr_name=attr_name.trim();
+                else
+                    attr_name=f.getName();
+                map.put(attr_name, value != null? value.toString() : null);
+            }
+            catch(Exception e) {
+                log.warn("Could not retrieve value of attribute (field) " + attr_name, e);
+            }
+        };
+        BiConsumer<Method,Object> getter_func=(m,o) -> {
+            String method_name=null;
+            if(!ResourceDMBean.isGetMethod(m))
+                return;
+            try {
+                Object value=m.invoke(o);
+                method_name=Util.getNameFromAnnotation(m);
+                if(method_name != null && !method_name.trim().isEmpty())
+                    method_name=method_name.trim();
+                else {
+                    String field_name=Util.methodNameToAttributeName(m.getName());
+                    method_name=Util.attributeNameToMethodName(field_name);
+                }
+                String attributeName=Util.methodNameToAttributeName(method_name);
+                if(value instanceof Double)
+                    value=String.format("%.2f", (double)value);
+                map.put(attributeName, value != null? value.toString() : null);
+            }
+            catch(Exception e) {
+                log.warn("Could not retrieve value of attribute (method) " + method_name,e);
+            }
+        };
+        Util.forAllFieldsAndMethods(obj, FILTER, field_func, getter_func);
+    }
+
+
+
 
     protected static Class<?> getClassForName(String name) throws ClassNotFoundException {
         try {
@@ -156,15 +234,15 @@ public class ResourceDMBean implements DynamicMBean {
         throw new ClassNotFoundException("Class " + name + " cannot be found");
     }
 
-    protected void findMethods() {
+    protected void findMethods(Object instance) {
         // find all methods but don't include methods from Object class
-        List<Method> methods = new ArrayList<>(Arrays.asList(obj.getClass().getMethods()));
+        List<Method> methods = new ArrayList<>(Arrays.asList(instance.getClass().getMethods()));
         methods.removeAll(OBJECT_METHODS);
 
         for(Method method: methods) {
             // does method have @ManagedAttribute annotation?
             if(method.isAnnotationPresent(ManagedAttribute.class) || method.isAnnotationPresent(Property.class)) {
-                exposeManagedAttribute(method);
+                exposeManagedAttribute(method, instance);
             }
             //or @ManagedOperation
             else if (method.isAnnotationPresent(ManagedOperation.class) || expose_all){
@@ -174,19 +252,21 @@ public class ResourceDMBean implements DynamicMBean {
         }
     }
 
-    /** Provides field-based getter and/or setters for all attributes in atts if not present */
-    protected void fixFields() {
+    /** Provides field-based getter and/or setters for all attributes in attrs if not present */
+    protected void fixFields(Object instance) {
         for(AttributeEntry attr: atts.values()) {
             if(attr.getter == null)
-                attr.getter=findGetter(obj, attr.name);
+                attr.getter=findGetter(instance, attr.name);
             if(attr.setter == null)
-                attr.setter=findSetter(obj, attr.name);
+                attr.setter=findSetter(instance, attr.name);
+            if(attr.setter == null)
+                attr.setter=new NoopAccessor();
         }
     }
 
 
 
-    protected void exposeManagedAttribute(Method method) {
+    protected void exposeManagedAttribute(Method method, Object instance) {
         String           methodName=method.getName();
         ManagedAttribute attr_annotation=method.getAnnotation(ManagedAttribute.class);
         Property         prop=method.getAnnotation(Property.class);
@@ -223,7 +303,7 @@ public class ResourceDMBean implements DynamicMBean {
                         log.warn("setter for \"" + attr_name + "\" is already defined (new method=" + method.getName() + ")");
                 }
                 else
-                    attr.setter=new MethodAccessor(method, obj);
+                    attr.setter=new MethodAccessor(method, instance);
             }
             else {
                 if(attr.getter != null) {
@@ -231,7 +311,7 @@ public class ResourceDMBean implements DynamicMBean {
                         log.warn("getter for \"" + attr_name + "\" is already defined (new method=" + method.getName() + ")");
                 }
                 else
-                    attr.getter=new MethodAccessor(method, obj);
+                    attr.getter=new MethodAccessor(method, instance);
             }
         }
         else { // create a new entry in atts
@@ -240,9 +320,9 @@ public class ResourceDMBean implements DynamicMBean {
             MBeanAttributeInfo info=new MBeanAttributeInfo(attr_name, type, descr, true, writable, methodName.startsWith("is"));
             AttributeEntry entry=new AttributeEntry(Util.methodNameToAttributeName(methodName), info);
             if(is_setter)
-                entry.setter(new MethodAccessor(method, obj));
+                entry.setter(new MethodAccessor(method, instance));
             else
-                entry.getter(new MethodAccessor(method, obj));
+                entry.getter(new MethodAccessor(method, instance));
             atts.put(attr_name, entry);
         }
     }
@@ -299,7 +379,7 @@ public class ResourceDMBean implements DynamicMBean {
         if(field != null)
             return new FieldAccessor(field, target);
 
-        return new NoopAccessor();
+        return null;
     }
 
     /** Returns a string with the first letter being lowercase */
@@ -310,9 +390,9 @@ public class ResourceDMBean implements DynamicMBean {
     }
 
 
-    protected void findFields() {
+    protected void findFields(Object instance) {
         // traverse class hierarchy and find all annotated fields
-        for(Class<?> clazz=obj.getClass(); clazz != null && clazz != Object.class; clazz=clazz.getSuperclass()) {
+        for(Class<?> clazz=instance.getClass(); clazz != null && clazz != Object.class; clazz=clazz.getSuperclass()) {
 
             Field[] fields=clazz.getDeclaredFields();
             for(Field field: fields) {
@@ -421,9 +501,9 @@ public class ResourceDMBean implements DynamicMBean {
     }
 
 
-    public static interface Accessor {
+    public interface Accessor {
         /** Invokes a getter or setter. For the getter, new_val must be ignored (null) */
-        public Object invoke(Object new_val) throws Exception;
+        Object invoke(Object new_val) throws Exception;
     }
 
 
@@ -442,7 +522,7 @@ public class ResourceDMBean implements DynamicMBean {
             return new_val != null? method.invoke(target, new_val) : method.invoke(target);
         }
 
-        public String toString() {return method.getName() + "()";}
+        public String toString() {return "method[" + method.getName() + "()]";}
     }
 
     public static class FieldAccessor implements Accessor {
@@ -471,7 +551,7 @@ public class ResourceDMBean implements DynamicMBean {
     }
 
 
-    protected static class NoopAccessor implements Accessor {
+    public static class NoopAccessor implements Accessor {
         public Object invoke(Object new_val) throws Exception {return null;}
 
         public String toString() {return "NoopAccessor";}

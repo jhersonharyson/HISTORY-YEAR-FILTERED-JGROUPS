@@ -26,18 +26,10 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
     protected final AtomicInteger   num_threads;
     protected final AtomicBoolean   unparking;
     protected Runner                bundler_thread;
+    protected final Runnable        run_function=this::readMessages;
     protected static final String   THREAD_NAME=RingBufferBundlerLockless2.class.getSimpleName();
     public static final Message     NULL_MSG=new Message(false); // public for unit test
-    protected final Runnable        run_function=new Runnable() {
-        public void run() {
-            readMessages();
-        }
-    };
-    protected final Runnable        stop_function=new Runnable() {
-        public void run() {
-            reset();
-        }
-    };
+
 
 
     public RingBufferBundlerLockless2() {this(1024, true);}
@@ -66,8 +58,7 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
 
     public void init(TP transport) {
         super.init(transport);
-        checkForSharedTransport(transport);
-        bundler_thread=new Runner(transport.getThreadFactory(), THREAD_NAME, run_function, stop_function);
+        bundler_thread=new Runner(transport.getThreadFactory(), THREAD_NAME, run_function, this::reset);
     }
 
     public void start() {
@@ -190,7 +181,7 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
                     output.writeInt(num_msgs);
                     output.position(current_pos);
                 }
-                transport.doSend(null, output.buffer(), 0, output.position(), dest);
+                transport.doSend(output.buffer(), 0, output.position(), dest);
                 if(transport.statsEnabled())
                     transport.incrBatchesSent(num_msgs);
             }

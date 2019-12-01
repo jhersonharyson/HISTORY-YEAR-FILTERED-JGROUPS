@@ -24,7 +24,7 @@ import static org.jgroups.util.Util.printViews;
 /**
  * Tests https://issues.jboss.org/browse/JGRP-2092:
  */
-@Test(groups=Global.FUNCTIONAL,sequential=true)
+@Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class MergeTest5 {
     protected JChannel a,b,c;
 
@@ -65,7 +65,7 @@ public class MergeTest5 {
                 break;
 
             for(JChannel ch: Arrays.asList(a,b,c)) {
-                MERGE3 merge=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
+                MERGE3 merge=ch.getProtocolStack().findProtocol(MERGE3.class);
                 merge.sendInfo(); // multicasts an INFO msg to everybody else
             }
             Util.sleep(1000);
@@ -77,7 +77,7 @@ public class MergeTest5 {
 
 
 
-    protected View createView(int id, JChannel ... mbrs) {
+    protected static View createView(int id, JChannel... mbrs) {
         Address[] members=new Address[mbrs.length];
         for(int i=0; i < mbrs.length; i++)
             members[i]=mbrs[i].getAddress();
@@ -86,38 +86,36 @@ public class MergeTest5 {
 
 
 
-    protected JChannel createChannel(String name) throws Exception {
-        JChannel ch=new JChannel(new SHARED_LOOPBACK(),
-                                 new SHARED_LOOPBACK_PING(),
-                                 new MERGE3().setValue("min_interval", 3000).setValue("max_interval", 4000).setValue("check_interval", 7000),
-                                 new NAKACK2().setValue("use_mcast_xmit", false)
-                                   .setValue("log_discard_msgs", false).setValue("log_not_found_msgs", false),
-                                 new UNICAST3(),
-                                 new STABLE().setValue("max_bytes", 50000),
-                                 new GMS().setValue("print_local_addr", false)
-                                   .setValue("join_timeout", 100)
-                                   .setValue("leave_timeout", 100)
-                                   .setValue("merge_timeout", 5000)
-                                   .setValue("log_view_warnings", false)
-                                   .setValue("view_ack_collection_timeout", 50)
-                                   .setValue("log_collect_msgs", false))
-          .name(name);
-        ch.connect("MergeTest5");
-        return ch;
+    protected static JChannel createChannel(String name) throws Exception {
+        return new JChannel(new SHARED_LOOPBACK(),
+                            new SHARED_LOOPBACK_PING(),
+                            new MERGE3().setValue("min_interval", 3000).setValue("max_interval", 4000).setValue("check_interval", 7000),
+                            new NAKACK2().setValue("use_mcast_xmit",false)
+                                       .setValue("log_discard_msgs",false).setValue("log_not_found_msgs",false),
+                            new UNICAST3(),
+                            new STABLE().setValue("max_bytes",50000),
+                            new GMS().setValue("print_local_addr",false)
+                                       .setValue("join_timeout", 100)
+                                       .setValue("leave_timeout", 100)
+                                       .setValue("merge_timeout",5000)
+                                       .setValue("log_view_warnings",false)
+                                       .setValue("view_ack_collection_timeout",50)
+                                       .setValue("log_collect_msgs",false))
+          .name(name).connect("MergeTest5");
     }
 
 
 
-    protected void injectView(View view, JChannel ... channels) {
+    protected static void injectView(View view, JChannel... channels) {
         for(JChannel ch: channels) {
-            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
             gms.installView(view);
         }
     }
 
-    protected void checkInconsistencies(JChannel ... channels) {
+    protected static void checkInconsistencies(JChannel... channels) {
         for(JChannel ch: channels) {
-            MERGE3 merge=(MERGE3)ch.getProtocolStack().findProtocol(MERGE3.class);
+            MERGE3 merge=ch.getProtocolStack().findProtocol(MERGE3.class);
             merge.checkInconsistencies();
         }
     }

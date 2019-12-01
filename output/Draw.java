@@ -54,13 +54,8 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
         if(no_channel)
             return;
 
-        channel=new JChannel(props);
-        if(gen != null)
-            channel.addAddressGenerator(gen);
-        if(name != null)
-            channel.setName(name);
-        channel.setReceiver(this);
-        channel.addChannelListener(this);
+        channel=new JChannel(props).addAddressGenerator(gen).setName(name);
+        channel.setReceiver(this).addChannelListener(this);
         this.send_own_state_on_merge=send_own_state_on_merge;
     }
 
@@ -132,10 +127,6 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
                 state_timeout=Long.parseLong(args[++i]);
                 continue;
             }
-            if("-bind_addr".equals(args[i])) {
-                System.setProperty("jgroups.bind_addr", args[++i]);
-                continue;
-            }
             if("-use_unicasts".equals(args[i])) {
                 use_unicasts=true;
                 continue;
@@ -174,7 +165,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
     static void help() {
         System.out.println("\nDraw [-help] [-no_channel] [-props <protocol stack definition>]" +
                 " [-clustername <name>] [-state] [-timeout <state timeout>] [-use_unicasts] " +
-                "[-bind_addr <addr>] [-jmx <true | false>] [-name <logical name>] [-send_own_state_on_merge true|false] " +
+                "[-jmx <true | false>] [-name <logical name>] [-send_own_state_on_merge true|false] " +
                              "[-uuid <UUID>]");
         System.out.println("-no_channel: doesn't use JGroups at all, any drawing will be relected on the " +
                 "whiteboard directly");
@@ -184,9 +175,9 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
 
 
     private Color selectColor() {
-        int red=Math.abs(random.nextInt()) % 255;
-        int green=Math.abs(random.nextInt()) % 255;
-        int blue=Math.abs(random.nextInt()) % 255;
+        int red=Math.abs(random.nextInt() % 255);
+        int green=Math.abs(random.nextInt() % 255);
+        int blue=Math.abs(random.nextInt() % 255);
         return new Color(red, green, blue);
     }
 
@@ -253,18 +244,15 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
         setTitle(null);
     }
 
-
-
     public void receive(Message msg) {
         byte[] buf=msg.getRawBuffer();
         if(buf == null) {
-            System.err.println("[" + channel.getAddress() + "] received null buffer from " + msg.getSrc() +
-                    ", headers: " + msg.printHeaders());
+            System.err.printf("%s: received null buffer from %s, headers: %s\n", channel.getAddress(), msg.src(), msg.printHeaders());
             return;
         }
 
         try {
-            DrawCommand comm=(DrawCommand)Util.streamableFromByteBuffer(DrawCommand.class, buf, msg.getOffset(), msg.getLength());
+            DrawCommand comm=Util.streamableFromByteBuffer(DrawCommand::new, buf, msg.getOffset(), msg.getLength());
             switch(comm.mode) {
                 case DrawCommand.DRAW:
                     if(panel != null)
@@ -348,7 +336,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
             if(use_unicasts)
                 sendToAll(buf);
             else
-                channel.send(new Message(null, null, buf));
+                channel.send(new Message(null, buf));
         }
         catch(Exception ex) {
             System.err.println(ex);
@@ -411,18 +399,18 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
 
     /* ------------------------------ ChannelListener interface -------------------------- */
 
-    public void channelConnected(Channel channel) {
+    public void channelConnected(JChannel channel) {
         if(jmx) {
-            Util.registerChannel((JChannel)channel, "jgroups");
+            Util.registerChannel(channel, "jgroups");
         }
     }
 
-    public void channelDisconnected(Channel channel) {
+    public void channelDisconnected(JChannel channel) {
         if(jmx) {
             MBeanServer server=Util.getMBeanServer();
             if(server != null) {
                 try {
-                    JmxConfigurator.unregisterChannel((JChannel)channel,server,cluster_name);
+                    JmxConfigurator.unregisterChannel(channel, server, cluster_name);
                 }
                 catch(Exception e) {
                     e.printStackTrace();
@@ -431,7 +419,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
         }
     }
 
-    public void channelClosed(Channel channel) {
+    public void channelClosed(JChannel channel) {
 
     }
 
@@ -541,7 +529,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
                 if(use_unicasts)
                     sendToAll(buf);
                 else
-                    channel.send(new Message(null, null, buf));
+                    channel.send(new Message(null, buf));
             }
             catch(Exception ex) {
                 System.err.println(ex);

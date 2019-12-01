@@ -73,12 +73,7 @@ public class Relayer {
         try {
             for(RelayConfig.BridgeConfig bridge_config: bridge_configs) {
                 Bridge bridge=new Bridge(bridge_config.createChannel(), bridge_config.getClusterName(), bridge_name,
-                                         new AddressGenerator() {
-                                             public Address generateAddress() {
-                                                 UUID uuid=UUID.randomUUID();
-                                                 return new SiteUUID(uuid, null, my_site_id);
-                                             }
-                                         });
+                                         () -> new SiteUUID(UUID.randomUUID(), null, my_site_id));
                 bridges.add(bridge);
             }
             for(Bridge bridge: bridges)
@@ -103,8 +98,7 @@ public class Relayer {
      */
     public void stop() {
         done=true;
-        for(Bridge bridge: bridges)
-            bridge.stop();
+        bridges.forEach(Bridge::stop);
         bridges.clear();
     }
 
@@ -140,11 +134,9 @@ public class Relayer {
         List<Route> retval=new ArrayList<>(routes.size());
         for(List<Route> list: routes.values()) {
             for(Route route: list) {
-                if(route != null) {
-                    if(!isExcluded(route, excluded_sites)) {
-                        retval.add(route);
-                        break;
-                    }
+                if(route != null && !isExcluded(route, excluded_sites)) {
+                    retval.add(route);
+                    break;
                 }
             }
         }
@@ -155,7 +147,7 @@ public class Relayer {
         if(cluster_name == null || bridges == null)
             return null;
         for(Bridge bridge: bridges) {
-            if(bridge.cluster_name != null && bridge.cluster_name.equals(cluster_name))
+            if(Objects.equals(bridge.cluster_name, cluster_name))
                 return bridge.view;
         }
         return null;
@@ -200,10 +192,28 @@ public class Relayer {
         }
 
         public void receive(Message msg) {
-            RELAY2.Relay2Header hdr=(RELAY2.Relay2Header)msg.getHeader(relay.getId());
+            RELAY2.Relay2Header hdr=msg.getHeader(relay.getId());
             if(hdr == null) {
                 log.warn("received a message without a relay header; discarding it");
                 return;
+            }
+            switch(hdr.type) {
+                case RELAY2.Relay2Header.TOPO_REQ:
+                    RELAY2.Relay2Header rsp_hdr=new RELAY2.Relay2Header(RELAY2.Relay2Header.TOPO_RSP)
+                      .setSites(relay.printLocalTopology());
+                    Message topo_rsp=new Message(msg.src()).putHeader(relay.getId(), rsp_hdr);
+                    try {
+                        channel.send(topo_rsp);
+                    }
+                    catch(Exception e) {
+                        log.warn("%s: failed sending TOPO-RSP message to %s: %s", channel.getAddress(), msg.src(), e);
+                    }
+                    return; // not relayed
+                case RELAY2.Relay2Header.TOPO_RSP:
+                    String[] sites=hdr.getSites();
+                    if(sites != null && sites.length > 0 && sites[0] != null)
+                        relay.topo_collector.add(msg.src(), sites[0]);
+                    return;
             }
             relay.handleRelayMessage(hdr, msg);
         }
@@ -214,63 +224,50 @@ public class Relayer {
             this.view=new_view;
             log.trace("[Relayer " + channel.getAddress() + "] view: " + new_view);
 
-            RouteStatusListener       listener=relay.getRouteStatusListener();
             Map<String,List<Address>> tmp=extract(new_view);
-            Set<String>               down=listener != null? new HashSet<>(routes.keySet()) : null;
-            Set<String>               up=listener != null? new HashSet<String>() : null;
+            Set<String>               down=new HashSet<>(routes.keySet());
+            Set<String>               up=new HashSet<>();
 
-            if(listener != null)
-                down.removeAll(tmp.keySet());
+            down.removeAll(tmp.keySet());
 
             routes.keySet().retainAll(tmp.keySet()); // remove all sites which are not in the view
 
             for(Map.Entry<String,List<Address>> entry: tmp.entrySet()) {
                 String key=entry.getKey();
                 List<Address> val=entry.getValue();
-                if(!routes.containsKey(key)) {
-                    routes.put(key, new ArrayList<Route>());
+
+                List<Route> newRoutes;
+                if(routes.containsKey(key))
+                    newRoutes=new ArrayList<>(routes.get(key));
+                else {
+                    newRoutes=new ArrayList<>();
                     if(up != null)
                         up.add(key);
                 }
 
-                List<Route> list=routes.get(key);
-
                 // Remove routes not in the view anymore:
-                for(Iterator<Route> it=list.iterator(); it.hasNext();) {
-                    Route route=it.next();
-                    if(!val.contains(route.siteMaster()))
-                        it.remove();
-                }
+                newRoutes.removeIf(route -> !val.contains(route.siteMaster()));
 
                 // Add routes that aren't yet in the routing table:
-                for(Address addr: val) {
-                    if(!contains(list, addr))
-                        list.add(new Route(addr, channel, relay, log).stats(stats));
-                }
+                val.stream().filter(addr -> !contains(newRoutes, addr))
+                  .forEach(addr -> newRoutes.add(new Route(addr, channel, relay, log).stats(stats)));
 
-                if(list.isEmpty()) {
+                if(newRoutes.isEmpty()) {
                     routes.remove(key);
-                    if(listener != null) {
-                        down.add(key);
-                        up.remove(key);
-                    }
+                    down.add(key);
+                    up.remove(key);
                 }
+                else
+                    routes.put(key, Collections.unmodifiableList(newRoutes));
             }
-
-            if(listener != null) {
-                if(!down.isEmpty())
-                    listener.sitesDown(down.toArray(new String[down.size()]));
-                if(!up.isEmpty())
-                    listener.sitesUp(up.toArray(new String[up.size()]));
-            }
+            if(!down.isEmpty())
+                relay.sitesChange(true, down.toArray(new String[0]));
+            if(!up.isEmpty())
+                relay.sitesChange(false, up.toArray(new String[0]));
         }
 
         protected boolean contains(List<Route> routes, Address addr) {
-            for(Route route: routes) {
-                if(route.siteMaster().equals(addr))
-                    return true;
-            }
-            return false;
+            return routes.stream().anyMatch(route -> route.siteMaster().equals(addr));
         }
 
         /** Returns a map containing the site keys and addresses as values */
@@ -279,11 +276,7 @@ public class Relayer {
             for(Address mbr: view) {
                 SiteAddress member=(SiteAddress)mbr;
                 String key=member.getSite();
-                List<Address> list=map.get(key);
-                if(list == null) {
-                    list=new ArrayList<>();
-                    map.put(key, list);
-                }
+                List<Address> list=map.computeIfAbsent(key, k -> new ArrayList<>());
                 if(!list.contains(member))
                     list.add(member);
             }

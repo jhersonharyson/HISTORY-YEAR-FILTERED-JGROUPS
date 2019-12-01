@@ -49,15 +49,15 @@ public class Relay2RpcDispatcherTest {
     	b = createNode(LON, "B");
     	al=new MyReceiver("A");
     	bl=new MyReceiver("B");
-    	rpca = new RpcDispatcher(a, al, al, new ServerObject(a, 1));
-    	rpcb = new RpcDispatcher(b, bl, bl, new ServerObject(b, 1));
+    	rpca = new RpcDispatcher(a, new ServerObject(1)).setMembershipListener(al);
+    	rpcb = new RpcDispatcher(b, new ServerObject(1)).setMembershipListener(bl);
     	
     	x = createNode(SFO, "X");
     	y = createNode(SFO, "Y");
     	xl=new MyReceiver("X");
     	yl=new MyReceiver("Y");
-    	rpcx = new RpcDispatcher(x, xl, xl, new ServerObject(x, 1));
-    	rpcy = new RpcDispatcher(y, yl, yl, new ServerObject(y, 1));
+    	rpcx = new RpcDispatcher(x, new ServerObject(1)).setMembershipListener(xl);
+    	rpcy = new RpcDispatcher(y, new ServerObject(1)).setMembershipListener(yl);
     }
     @AfterMethod protected void destroy() {Util.close(y,x,b,a);}
 
@@ -92,8 +92,8 @@ public class Relay2RpcDispatcherTest {
         assert a.getView().size() == 2;
         assert x.getView().size() == 2;
 
-        RELAY2 ar=(RELAY2)a.getProtocolStack().findProtocol(RELAY2.class);
-        RELAY2 xr=(RELAY2)x.getProtocolStack().findProtocol(RELAY2.class);
+        RELAY2 ar=a.getProtocolStack().findProtocol(RELAY2.class);
+        RELAY2 xr=x.getProtocolStack().findProtocol(RELAY2.class);
 
         assert ar != null && xr != null;
 
@@ -119,13 +119,6 @@ public class Relay2RpcDispatcherTest {
 
         System.out.println("B: sending message 0 to the site master of SFO");
         Address sm_sfo=new SiteMaster(SFO);
-        b.send(sm_sfo, 0);
-        checkMsgDelivery(xl);
-        
-        System.out.println("B: sending message to all members in both sites");
-        b.send(null, 0);
-        checkMsgDelivery(xl, yl, al, bl);
-        
         MethodCall call=new MethodCall(ServerObject.class.getMethod("foo"));
         System.out.println("B: call foo method on A");
         Object rsp = rpcb.callRemoteMethod(a.getAddress(), call, new RequestOptions(ResponseMode.GET_ALL,5000));
@@ -178,21 +171,20 @@ public class Relay2RpcDispatcherTest {
     	return ch;
     }
     
-    public static class ServerObject {
-    	int i;
-    	Channel ch;
-    	public ServerObject(Channel ch, int i) {
-    		this.ch = ch;
+    protected static class ServerObject {
+    	protected int i;
+
+    	public ServerObject(int i) {
     		this.i=i;
     	}
     	public int foo() {
-    		return i;}
+            System.out.println("foo()");
+            return i;
+        }
     	
     	public static long sleep(long timeout) {
-    		// System.out.println("sleep()");
     		long start=System.currentTimeMillis();
     		Util.sleep(timeout);
-    		//throw new NullPointerException("boom");
     		return System.currentTimeMillis() - start;
     	}
     }
@@ -224,7 +216,7 @@ public class Relay2RpcDispatcherTest {
     protected static void createPartition(JChannel ... channels) {
         for(JChannel ch: channels) {
             View view=View.create(ch.getAddress(), 5, ch.getAddress());
-            GMS gms=(GMS)ch.getProtocolStack().findProtocol(GMS.class);
+            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
             gms.installView(view);
         }
     }
@@ -236,7 +228,7 @@ public class Relay2RpcDispatcherTest {
         while(System.currentTimeMillis() < deadline) {
             boolean views_correct=true;
             for(JChannel ch: channels) {
-                RELAY2 relay=(RELAY2)ch.getProtocolStack().findProtocol(RELAY2.class);
+                RELAY2 relay=ch.getProtocolStack().findProtocol(RELAY2.class);
                 View bridge_view=relay.getBridgeView(BRIDGE_CLUSTER);
                 if(bridge_view == null || bridge_view.size() != expected_size) {
                     views_correct=false;
@@ -250,13 +242,13 @@ public class Relay2RpcDispatcherTest {
 
         System.out.println("Bridge views:\n");
         for(JChannel ch: channels) {
-            RELAY2 relay=(RELAY2)ch.getProtocolStack().findProtocol(RELAY2.class);
+            RELAY2 relay=ch.getProtocolStack().findProtocol(RELAY2.class);
             View bridge_view=relay.getBridgeView(BRIDGE_CLUSTER);
             System.out.println(ch.getAddress() + ": " + bridge_view);
         }
 
         for(JChannel ch: channels) {
-            RELAY2 relay=(RELAY2)ch.getProtocolStack().findProtocol(RELAY2.class);
+            RELAY2 relay=ch.getProtocolStack().findProtocol(RELAY2.class);
             View bridge_view=relay.getBridgeView(BRIDGE_CLUSTER);
             assert bridge_view != null && bridge_view.size() == expected_size
               : ch.getAddress() + ": bridge view=" + bridge_view + ", expected=" + expected_size;
@@ -265,7 +257,7 @@ public class Relay2RpcDispatcherTest {
 
 
     protected Route getRoute(JChannel ch, String site_name) {
-        RELAY2 relay=(RELAY2)ch.getProtocolStack().findProtocol(RELAY2.class);
+        RELAY2 relay=ch.getProtocolStack().findProtocol(RELAY2.class);
         return relay.getRoute(site_name);
     }
 
@@ -280,7 +272,7 @@ public class Relay2RpcDispatcherTest {
         public void          clear()              {list.clear();}
 
         public void          receive(Message msg) {
-            list.add((Integer)msg.getObject());
+            list.add(msg.getObject());
             System.out.println(chName + "<-- " + msg.getObject());
         }
     }

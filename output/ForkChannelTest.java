@@ -1,16 +1,20 @@
 package org.jgroups.tests;
 
-import org.jgroups.Event;
-import org.jgroups.Global;
-import org.jgroups.JChannel;
+import static org.testng.AssertJUnit.assertEquals;
+import static org.testng.AssertJUnit.assertNotNull;
+import static org.testng.AssertJUnit.assertTrue;
+
+import org.jgroups.*;
 import org.jgroups.blocks.ReplicatedHashMap;
 import org.jgroups.blocks.atomic.Counter;
 import org.jgroups.blocks.atomic.CounterService;
 import org.jgroups.fork.ForkChannel;
 import org.jgroups.fork.ForkProtocolStack;
+import org.jgroups.fork.UnknownForkHandler;
 import org.jgroups.protocols.COUNTER;
 import org.jgroups.protocols.FORK;
 import org.jgroups.protocols.FRAG2;
+import org.jgroups.protocols.UNICAST3;
 import org.jgroups.protocols.pbcast.STATE;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
@@ -20,7 +24,12 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.LinkedBlockingDeque;
 
 /**
  * Tests {@link org.jgroups.fork.ForkChannel}
@@ -33,7 +42,7 @@ public class ForkChannelTest {
     protected ForkChannel             fc1, fc2, fc3, fc4;
     protected static final String     CLUSTER="ForkChannelTest";
 
-    protected Protocol[] protocols() {return Util.getTestStack(new STATE(), new FORK());}
+    protected static Protocol[] protocols() {return Util.getTestStack(new STATE(), new FORK());}
 
     @BeforeMethod protected void setup() throws Exception {
         a=new JChannel(protocols()).name("A");
@@ -52,12 +61,70 @@ public class ForkChannelTest {
                 "hijack-stack",
                 "lead-hijacker",
                 true,
-                ProtocolStack.ABOVE,
+                ProtocolStack.Position.ABOVE,
                 FRAG2.class);
         assert fc.isOpen() && !fc.isConnected() && !fc.isClosed() : "state=" + fc.getState();
 
         Util.close(fc, c);
     }
+
+
+    public void testSimpleSend() throws Exception {
+        a.connect(CLUSTER);
+        fc1=new ForkChannel(a, "stack", "fc1").connect("bla");
+        fc2=new ForkChannel(a, "stack", "fc2").connect("bla");
+
+        b=new JChannel(protocols()).name("B").connect(CLUSTER);
+        fc3=new ForkChannel(b, "stack", "fc1").connect("bla");
+        fc4=new ForkChannel(b, "stack", "fc2").connect("bla");
+
+        MyReceiver r3=new MyReceiver().rawMsgs(true), r4=new MyReceiver().rawMsgs(true);
+        fc3.setReceiver(r3);
+        fc4.setReceiver(r4);
+
+        fc1.send(null, "hello");
+        List l3=r3.list(), l4=r4.list();
+        for(int i=0; i < 10; i++) {
+            if(!l3.isEmpty() || !l4.isEmpty())
+                break;
+            Util.sleep(1000);
+        }
+        assert !l3.isEmpty();
+        assert l4.isEmpty();
+
+        l3.clear();
+
+        Address dest=fc3.getAddress();
+
+        fc1.send(dest, "hello2");
+        for(int i=0; i < 10; i++) {
+            if(!l3.isEmpty() || !l4.isEmpty())
+                break;
+            Util.sleep(1000);
+        }
+        assert !l3.isEmpty();
+        assert l4.isEmpty();
+        l3.clear();
+
+        // send to non-existing member:
+        UNICAST3 ucast=a.getProtocolStack().findProtocol(UNICAST3.class);
+        ucast.setValue("conn_close_timeout", 10000);
+
+        Util.close(fc3,fc4,b);
+        Util.sleep(1000);
+
+        System.out.printf("---- sending message to non-existing member %s\n", dest);
+        fc1.send(dest, "hello3");
+        for(int i=0; i < 10; i++) {
+            if(!l3.isEmpty() || !l4.isEmpty())
+                break;
+            Util.sleep(500);
+        }
+        assert l3.isEmpty();
+        assert l4.isEmpty();
+    }
+
+
 
     public void testLifecycle() throws Exception {
         fc1=new ForkChannel(a, "stack", "fc1");
@@ -116,7 +183,7 @@ public class ForkChannelTest {
     }
 
     public void testRefcount() throws Exception {
-        FORK fork=(FORK)a.getProtocolStack().findProtocol(FORK.class);
+        FORK fork=a.getProtocolStack().findProtocol(FORK.class);
         Protocol prot=fork.get("stack");
         assert prot == null;
         fc1=new ForkChannel(a, "stack", "fc1");
@@ -175,7 +242,7 @@ public class ForkChannelTest {
 
         assert p1.inits == 1 && p2.inits == 1;
 
-        FORK fork=(FORK)a.getProtocolStack().findProtocol(FORK.class);
+        FORK fork=a.getProtocolStack().findProtocol(FORK.class);
         Protocol prot=fork.get("stack");
         ForkProtocolStack fork_stack=(ForkProtocolStack)getProtStack(prot);
         int inits=fork_stack.getInits();
@@ -254,6 +321,47 @@ public class ForkChannelTest {
             assert r1.list().contains(i) && r2.list().contains(i+5);
     }
 
+    public void testUnknownForkStack() throws Exception {
+        a.connect(CLUSTER);
+        fc1=new ForkChannel(a, "stack", "fc1").connect("bla");
+        fc2=new ForkChannel(a, "stack", "fc2").connect("bla");
+
+        b=new JChannel(protocols()).name("B").connect(CLUSTER);
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, a,b);
+        FORK f=b.getProtocolStack().findProtocol(FORK.class);
+        MyUnknownForkHandler ufh=new MyUnknownForkHandler();
+        f.setUnknownForkHandler(ufh);
+
+        fc1.send(new Message(null, "hello"));
+        fc2.send(new Message(null, "world"));
+
+        List<String> l=ufh.getUnknownForkStacks();
+        Util.waitUntil(10000, 500, () -> l.size() == 2);
+        assert l.size() == 2 && l.containsAll(Arrays.asList("stack", "stack"));
+    }
+
+    public void testUnknownForkChannel() throws Exception {
+        a.connect(CLUSTER);
+        fc1=new ForkChannel(a, "stack", "fc1").connect("bla");
+        fc2=new ForkChannel(a, "stack", "fc2").connect("bla");
+
+        b=new JChannel(protocols()).name("B").connect(CLUSTER);
+        Util.waitUntilAllChannelsHaveSameView(10000, 1000, a,b);
+        fc3=new ForkChannel(b, "stack", "fc1").connect("bla");
+        // "stack"/"fc2" is missing on B
+
+        FORK f=b.getProtocolStack().findProtocol(FORK.class);
+        MyUnknownForkHandler ufh=new MyUnknownForkHandler();
+        f.setUnknownForkHandler(ufh);
+
+        fc2.send(new Message(null, "hello"));
+        fc2.send(new Message(null, "world"));
+
+        List<String> l=ufh.getUnknownForkChannels();
+        Util.waitUntil(10000, 500, () -> l.size() == 2);
+        assert l.size() == 2 && l.containsAll(Arrays.asList("fc2", "fc2"));
+    }
+
 
     /**
      * Tests CounterService on 2 different fork-channels, using the *same* fork-stack. This means the 2 counter
@@ -262,8 +370,8 @@ public class ForkChannelTest {
      */
     public void testCounterService() throws Exception {
         a.connect(CLUSTER);
-        fc1=new ForkChannel(a, "stack", "fc1", false,ProtocolStack.ABOVE, FORK.class, new COUNTER());
-        fc2=new ForkChannel(a, "stack", "fc2", false,ProtocolStack.ABOVE, FORK.class, new COUNTER());
+        fc1=new ForkChannel(a, "stack", "fc1", false,ProtocolStack.Position.ABOVE, FORK.class, new COUNTER());
+        fc2=new ForkChannel(a, "stack", "fc2", false,ProtocolStack.Position.ABOVE, FORK.class, new COUNTER());
 
         fc1.connect("foo");
         fc2.connect("bar");
@@ -318,14 +426,50 @@ public class ForkChannelTest {
         assert rhm_fc2.equals(rhm_fc4);
     }
 
+    public void testSiteUnreachableReceived() throws Exception {
+        a.connect(CLUSTER);
+        fc1 = createForkChannel(a, "stack1", "fc1");
+        fc2 = createForkChannel(a, "stack2", "fc2");
 
-    protected ForkChannel createForkChannel(JChannel main, String stack_name, String ch_name) throws Exception {
+        EventQueueUpHandler fc1Handler = new EventQueueUpHandler();
+        EventQueueUpHandler fc2Handler = new EventQueueUpHandler();
+
+        fc1.setUpHandler(fc1Handler);
+        fc2.setUpHandler(fc2Handler);
+
+        assertEmpty(fc1Handler);
+        assertEmpty(fc2Handler);
+
+        ProtocolStack stack = a.getProtocolStack();
+        FORK fork = stack.findProtocol(FORK.class);
+
+        fork.up(new Event(Event.SITE_UNREACHABLE));
+
+        assertEvent(fc1Handler, Event.SITE_UNREACHABLE);
+        assertEvent(fc2Handler, Event.SITE_UNREACHABLE);
+
+        assertEmpty(fc1Handler);
+        assertEmpty(fc2Handler);
+    }
+
+
+    private static void assertEvent(EventQueueUpHandler upHandler, int eventType) {
+        Event e = upHandler.queue.poll();
+        assertNotNull(e);
+        assertEquals(eventType, e.getType());
+    }
+
+    private static void assertEmpty(EventQueueUpHandler upHandler) {
+        assertTrue(upHandler.queue.isEmpty());
+    }
+
+    protected static ForkChannel createForkChannel(JChannel main, String stack_name, String ch_name) throws Exception {
         ForkChannel fork_ch=new ForkChannel(main, stack_name, ch_name);
         fork_ch.connect(ch_name);
         return fork_ch;
     }
 
-    protected void addData(ReplicatedHashMap<String,Integer> a, ReplicatedHashMap<String,Integer> b, ReplicatedHashMap<String,Integer> c) {
+    protected static void addData(Map<String,Integer> a, Map<String,Integer> b, Map<String,Integer> c) {
         if(a != null) {
             a.put("id", 322649);
             a.put("version", 45);
@@ -349,22 +493,7 @@ public class ForkChannelTest {
         return prot instanceof ProtocolStack? (ProtocolStack)prot : null;
     }
 
-  /*  protected Entry[] create(boolean main_ch, boolean fc1, boolean fc2) {
-        Entry[] entry=new Entry[3];
 
-        return entry;
-    }
-
-
-    protected static class Entry {
-        protected final JChannel                          ch;
-        protected final ReplicatedHashMap<String,Integer> map;
-
-        public Entry(JChannel ch, ReplicatedHashMap<String,Integer> map) {
-            this.ch=ch;
-            this.map=map;
-        }
-    }*/
 
     protected static class Prot extends Protocol {
         protected final String myname;
@@ -403,8 +532,48 @@ public class ForkChannelTest {
             return down_prot.down(evt);
         }
 
+        public Object down(Message msg) {
+            System.out.println(myname + ": down(): " + msg);
+            return down_prot.down(msg);
+        }
+
         public String toString() {
             return myname;
+        }
+    }
+
+    protected static class MyUnknownForkHandler implements UnknownForkHandler {
+        protected final List<String> unknown_fork_stacks=new ArrayList<>();
+        protected final List<String> unknown_fork_channels=new ArrayList<>();
+
+        public List<String> getUnknownForkStacks()   {return unknown_fork_stacks;}
+        public List<String> getUnknownForkChannels() {return unknown_fork_channels;}
+
+        public Object handleUnknownForkStack(Message message, String forkStackId) {
+            unknown_fork_stacks.add(forkStackId);
+            return null;
+        }
+
+        public Object handleUnknownForkChannel(Message message, String forkChannelId) {
+            unknown_fork_channels.add(forkChannelId);
+            return null;
+        }
+    }
+
+    private static class EventQueueUpHandler implements UpHandler {
+
+        private final BlockingDeque<Event> queue = new LinkedBlockingDeque<>();
+
+        @Override
+        public Object up(Event evt) {
+            queue.add(evt);
+            return null;
+        }
+
+        @Override
+        public Object up(Message msg) {
+            //no-op
+            return null;
         }
     }
 }

@@ -4,11 +4,11 @@ import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.Message;
 import org.jgroups.blocks.*;
-import org.jgroups.protocols.*;
+import org.jgroups.protocols.SHARED_LOOPBACK;
+import org.jgroups.protocols.SHARED_LOOPBACK_PING;
+import org.jgroups.protocols.UNICAST3;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
-import org.jgroups.stack.Protocol;
-import org.jgroups.util.FutureListener;
 import org.jgroups.util.Util;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -17,7 +17,7 @@ import org.testng.annotations.Test;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -74,7 +74,8 @@ public class RpcDispatcherAsyncInvocationTest {
         List<Integer> list=invokeRpc(num_invocations, use_oob);
         long time=System.currentTimeMillis() - start;
         System.out.println("took " + time + " ms: " + list);
-        assert list.size() == num_invocations;
+        assert list.size() == num_invocations : String.format("expected %d, but list is %d (%s)",
+                                                              num_invocations, list.size(), list);
         assert time >= expected_min && time <= expected_max : // extreme GC could cause this (or even worse)
           "time was expected to be in range [" + expected_min + " .. " + expected_max + "] but was " + time;
     }
@@ -84,15 +85,16 @@ public class RpcDispatcherAsyncInvocationTest {
     protected List<Integer> invokeRpc(final int num_invocations, boolean use_oob) throws Exception {
         RequestOptions opts=RequestOptions.SYNC();
         if(use_oob)
-            opts.setFlags(Message.Flag.OOB);
+            opts.flags(Message.Flag.OOB);
 
         final List<Integer> results=new ArrayList<>(num_invocations);
 
-        FutureListener<Integer> listener=new FutureListener<Integer>() {
-            public void futureDone(Future<Integer> future) {
+        MethodCall call=new MethodCall(incr_method);
+        for(int i=0; i < num_invocations; i++) {
+            CompletableFuture<Object> future=disp1.callRemoteMethodWithFuture(b.getAddress(), call, opts);
+            future.whenComplete((result,ex) -> {
                 try {
-                    int result=future.get();
-                    results.add(result);
+                    results.add((Integer)result);
                     System.out.println("<-- " + result);
                     if(results.size() == num_invocations) {
                         synchronized(results) {
@@ -100,14 +102,8 @@ public class RpcDispatcherAsyncInvocationTest {
                         }
                     }
                 }
-                catch(Exception e) {
-                }
-            }
-        };
-
-        MethodCall call=new MethodCall(incr_method);
-        for(int i=0; i < num_invocations; i++) {
-            disp1.callRemoteMethodWithFuture(b.getAddress(),call,opts, listener);
+                catch(Exception ignored) {}
+            });
         }
 
         for(int i=0; i < 20; i++) {
@@ -122,30 +118,22 @@ public class RpcDispatcherAsyncInvocationTest {
 
 
     protected static JChannel createChannel(String name) throws Exception {
-        TP transport=new SHARED_LOOPBACK();
-        transport.setOOBThreadPoolMinThreads(10);
-        transport.setOOBThreadPoolMaxThreads(20);
-        transport.setOOBThreadPoolQueueEnabled(false);
-        return new JChannel(new Protocol[]{
-          transport,
-          new SHARED_LOOPBACK_PING(),
-          new NAKACK2(),
-          new UNICAST3(),
-          new GMS()
-        }).name(name);
+        return new JChannel(new SHARED_LOOPBACK().setThreadPoolMinThreads(10).setThreadPoolMaxThreads(20),
+                            new SHARED_LOOPBACK_PING(),
+                            new NAKACK2(),
+                            new UNICAST3(),
+                            new GMS()).name(name);
     }
 
 
-    protected class MyRequestHandler implements AsyncRequestHandler {
+    protected class MyRequestHandler implements RequestHandler {
         public void handle(final Message request, final Response response) throws Exception {
             if(request.isFlagSet(Message.Flag.OOB)) {
-                new Thread() {
-                    public void run() {
-                        int val=incr();
-                        if(response != null)
-                            response.send(val, false);
-                    }
-                }.start();
+                new Thread(() -> {
+                    int val=incr();
+                    if(response != null)
+                        response.send(val, false);
+                }).start();
             }
             else {
                 int val=incr();

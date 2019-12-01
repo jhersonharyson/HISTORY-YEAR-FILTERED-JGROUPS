@@ -33,7 +33,6 @@ public class UNICAST_DroppedAckTest {
     @DataProvider
     static Object[][] configProvider() {
         return new Object[][]{
-          {UNICAST.class},
           {UNICAST3.class}
         };
     }
@@ -42,13 +41,13 @@ public class UNICAST_DroppedAckTest {
     public void testNotEndlessXmits(Class<? extends Protocol> unicast_class) throws Exception {
         setup(unicast_class);
 
-        DISCARD discard_a=(DISCARD)a.getProtocolStack().findProtocol(DISCARD.class);
+        DISCARD discard_a=a.getProtocolStack().findProtocol(DISCARD.class);
         discard_a.setDropDownUnicasts(5); // drops the next 5 ACKs
 
         for(int i=1; i <= 5; i++)
             b.send(a.getAddress(), i);
 
-        Protocol unicast_b=b.getProtocolStack().findProtocol(UNICAST.class, UNICAST3.class);
+        Protocol unicast_b=b.getProtocolStack().findProtocol(UNICAST3.class);
         for(int i=0; i < 10; i++) {
             int num_unacked_msgs=numUnackedMessages(unicast_b);
             System.out.println("num_unacked_msgs=" + num_unacked_msgs);
@@ -60,24 +59,20 @@ public class UNICAST_DroppedAckTest {
         assert numUnackedMessages(unicast_b) == 0 : "num_unacked_msgs on B should be 0 but is " + numUnackedMessages(unicast_b);
     }
 
-    protected int numUnackedMessages(Protocol unicast) {
-        if(unicast instanceof UNICAST)
-            return ((UNICAST)unicast).getNumUnackedMessages();
+    protected static int numUnackedMessages(Protocol unicast) {
         if(unicast instanceof UNICAST3)
             return ((UNICAST3)unicast).getNumUnackedMessages();
-        throw new IllegalArgumentException("Protocol " + unicast.getClass().getSimpleName() + " needs to be UNICAST or UNICAST3");
+        throw new IllegalArgumentException("Protocol " + unicast.getClass().getSimpleName() + " needs to be UNICAST3");
     }
 
 
-    protected JChannel createChannel(Class<? extends Protocol> unicast_class, String name) throws Exception {
-        return new JChannel(new Protocol[] {
-          new SHARED_LOOPBACK(),
-          new SHARED_LOOPBACK_PING(),
-          new MERGE3().setValue("max_interval", 3000).setValue("min_interval", 1000),
-          new NAKACK2(),
-          new DISCARD(),
-          unicast_class.newInstance().setValue("xmit_interval", 500),
-          new GMS()
-        }).name(name);
+    protected static JChannel createChannel(Class<? extends Protocol> unicast_class, String name) throws Exception {
+        return new JChannel(new SHARED_LOOPBACK(),
+                            new SHARED_LOOPBACK_PING(),
+                            new MERGE3().setMaxInterval(3000).setMinInterval(1000),
+                            new NAKACK2(),
+                            new DISCARD(),
+                            unicast_class.getDeclaredConstructor().newInstance().setValue("xmit_interval", 500),
+                            new GMS()).name(name);
     }
 }

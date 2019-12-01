@@ -29,7 +29,7 @@ public class StateTransferTest extends ChannelTestBase {
     static final int                     MSG_SEND_COUNT=1000;
     static final String[]                names= {"A", "B", "C", "D"};
     static final int                     APP_COUNT=names.length;
-    static final Class<?>[]              NAK_PROTS={NAKACK2.class,NAKACK.class};
+    static final Class<?>[]              NAK_PROTS={NAKACK2.class};
     static final short[]                 ids=new short[NAK_PROTS.length];
     protected StateTransferApplication[] apps=new StateTransferApplication[APP_COUNT];
 
@@ -40,8 +40,8 @@ public class StateTransferTest extends ChannelTestBase {
     }
 
     @DataProvider(name="createChannels")
-    protected Iterator<Class<?>[]> createChannels() {
-        return new ArrayIterator<>(new Class<?>[][]{{STATE_TRANSFER.class}, {STATE.class}, {STATE_SOCK.class}});
+    protected Iterator<Object[]> createChannels() {
+        return new ArrayIterator<>(new Class[][]{{STATE_TRANSFER.class}, {STATE.class}, {STATE_SOCK.class}});
     }
 
 
@@ -54,7 +54,7 @@ public class StateTransferTest extends ChannelTestBase {
     }
 
     @Test(dataProvider="createChannels")
-    public void testStateTransferFromSelfWithRegularChannel(final Class<?> state_transfer_class) throws Exception {
+    public void testStateTransferFromSelfWithRegularChannel(final Class<? extends Protocol> state_transfer_class) throws Exception {
         JChannel ch=createChannel(true);
         replaceStateTransferProtocolWith(ch, state_transfer_class);
         ch.connect("StateTransferTest");
@@ -71,7 +71,7 @@ public class StateTransferTest extends ChannelTestBase {
 
     // @Test(dataProvider="createChannels",invocationCount=10)
     @Test(dataProvider="createChannels")
-    public void testStateTransferWhileSending(final Class<?> state_transfer_class) throws Exception {
+    public void testStateTransferWhileSending(final Class<? extends Protocol> state_transfer_class) throws Exception {
         Semaphore semaphore=new Semaphore(APP_COUNT, true); // fifo order
         semaphore.acquire(APP_COUNT);
         Thread[] threads=new Thread[APP_COUNT];
@@ -95,7 +95,7 @@ public class StateTransferTest extends ChannelTestBase {
         }
 
         // Make sure everyone is in sync
-        Channel[] tmp=new Channel[apps.length];
+        JChannel[] tmp=new JChannel[apps.length];
         for(int i=0; i < apps.length; i++)
             tmp[i]=apps[i].getChannel();
 
@@ -168,14 +168,14 @@ public class StateTransferTest extends ChannelTestBase {
 
     protected void resumeStableAndGC() {
         for(StateTransferApplication app: apps) {
-            STABLE stable=(STABLE)app.getChannel().getProtocolStack().findProtocol(STABLE.class);
+            STABLE stable=app.getChannel().getProtocolStack().findProtocol(STABLE.class);
             stable.down(new Event(Event.RESUME_STABLE));
             stable.gc();
         }
     }
 
 
-    protected String print(List<Long> list) {
+    protected static String print(List<Long> list) {
         if(list.isEmpty())
             return "[] (0 elements)";
         long first=list.get(0);
@@ -184,14 +184,14 @@ public class StateTransferTest extends ChannelTestBase {
         return "[" + first + " .. " + last + "] (" + size + " elements)";
     }
 
-    protected int getSize(Map<String,List<Long>> map) {
+    protected static int getSize(Map<String,List<Long>> map) {
         int retval=0;
         for(List<Long> list: map.values())
             retval+=list.size();
         return retval;
     }
 
-    protected long getSeqno(Message msg) {
+    protected static long getSeqno(Message msg) {
         for(short id: ids) {
             Header hdr=msg.getHeader(id);
             if(hdr != null)
@@ -200,25 +200,25 @@ public class StateTransferTest extends ChannelTestBase {
         return -1;
     }
 
-    protected long getSeqnoFromHeader(Header hdr) {
+    protected static long getSeqnoFromHeader(Header hdr) {
         Field field=Util.getField(hdr.getClass(), "seqno");
         return (Long)Util.getField(field, hdr);
     }
 
 
-    protected void replaceStateTransferProtocolWith(JChannel ch, Class<?> state_transfer_class) throws Exception {
+    protected static void replaceStateTransferProtocolWith(JChannel ch, Class<? extends Protocol> state_transfer_class) throws Exception {
         ProtocolStack stack=ch.getProtocolStack();
         if(stack.findProtocol(state_transfer_class) != null)
             return; // protocol of the right class is already in stack
         Protocol prot=stack.findProtocol(STATE_TRANSFER.class, StreamingStateTransfer.class);
-        Protocol new_state_transfer_protcol=(Protocol)state_transfer_class.newInstance();
+        Protocol new_state_transfer_protcol=state_transfer_class.getDeclaredConstructor().newInstance();
         if(prot != null) {
             stack.replaceProtocol(prot, new_state_transfer_protcol);
         }
         else { // no state transfer protocol found in stack
             Protocol flush=stack.findProtocol(FLUSH.class);
             if(flush != null)
-                stack.insertProtocol(new_state_transfer_protcol, ProtocolStack.BELOW, FLUSH.class);
+                stack.insertProtocol(new_state_transfer_protcol, ProtocolStack.Position.BELOW, FLUSH.class);
             else
                 stack.insertProtocolAtTop(new_state_transfer_protcol);
         }
@@ -255,7 +255,7 @@ public class StateTransferTest extends ChannelTestBase {
 
         protected void init() {
             for(String s: names)
-                map.put(s, new ArrayList<Long>(MSG_SEND_COUNT * APP_COUNT));
+                map.put(s, new ArrayList<>(MSG_SEND_COUNT * APP_COUNT));
         }
 
         public JChannel getChannel() {
@@ -275,7 +275,7 @@ public class StateTransferTest extends ChannelTestBase {
         }
 
         public void receive(Message msg) {
-            String key=(String)msg.getObject();
+            String key=msg.getObject();
 
             Address sender=msg.getSrc();
             AtomicInteger cnt=count.get(sender);
@@ -308,9 +308,8 @@ public class StateTransferTest extends ChannelTestBase {
             }
         }
 
-        @SuppressWarnings("unchecked")
         public void setState(InputStream istream) throws Exception {
-            Map<String,List<Long>> tmp=(Map<String,List<Long>>)Util.objectFromStream(new DataInputStream(istream));
+            Map<String,List<Long>> tmp=Util.objectFromStream(new DataInputStream(istream));
             synchronized(map) {
                 map.clear();
                 map.putAll(tmp);
