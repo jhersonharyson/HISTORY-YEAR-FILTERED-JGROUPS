@@ -14,7 +14,6 @@ import org.jgroups.util.*;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.io.NotSerializableException;
 import java.lang.reflect.InvocationTargetException;
 import java.util.*;
 import java.util.concurrent.ConcurrentMap;
@@ -34,16 +33,13 @@ public class RequestCorrelator {
     protected Protocol                               transport;
 
     /** The table of pending requests (keys=Long (request IDs), values=<tt>RequestEntry</tt>) */
-    protected final ConcurrentMap<Long,Request>      requests=Util.createConcurrentMap();
+    protected final ConcurrentMap<Long,Request<?>>   requests=Util.createConcurrentMap();
 
     /** To generate unique request IDs */
     protected static final AtomicLong                REQUEST_ID=new AtomicLong(1);
 
     /** The handler for the incoming requests. It is called from inside the dispatcher thread */
     protected RequestHandler                         request_handler;
-
-    /** Possibility for an external marshaller to marshal/unmarshal responses */
-    protected Marshaller                             marshaller;
 
     /** makes the instance unique (together with IDs) */
     protected short                                  corr_id=ClassConfigurator.getProtocolId(this.getClass());
@@ -74,9 +70,7 @@ public class RequestCorrelator {
      *
      * @param corr_id Used to differentiate between different RequestCorrelators (e.g. in different protocol layers).
      *                Has to be unique if multiple request correlators are used.
-     *
      * @param transport Used to send/pass up requests.
-     *
      * @param handler Request handler. Method {@code handle(Message)} will be called when a request is received.
      */
     public RequestCorrelator(short corr_id, Protocol transport, RequestHandler handler, Address local_addr) {
@@ -102,8 +96,6 @@ public class RequestCorrelator {
 
     public Address                getLocalAddress()              {return local_addr;}
     public RequestCorrelator      setLocalAddress(Address a)     {this.local_addr=a; return this;}
-    public Marshaller             getMarshaller()                {return marshaller;}
-    public RequestCorrelator      setMarshaller(Marshaller m)    {this.marshaller=m; return this;}
     public boolean                asyncDispatching()             {return async_dispatching;}
     public RequestCorrelator      asyncDispatching(boolean flag) {async_dispatching=flag; return this;}
     public boolean                wrapExceptions()               {return wrap_exceptions;}
@@ -112,26 +104,20 @@ public class RequestCorrelator {
 
     /**
      * Sends a request to a group. If no response collector is given, no responses are expected (making the call asynchronous)
-     * @param dest_mbrs The list of members who should receive the call. Usually a group RPC
-     *                  is sent via multicast, but a receiver drops the request if its own address
-     *                  is not in this list. Will not be used if it is null.
-     * @param data the data to be sent.
+     * @param dest_mbrs The list of members who should receive the call. Usually a group RPC is sent via multicast,
+     *                  but a receiver drops the request if its own address is not in this list. Will not be used if it is null.
+     * @param msg The message to be sent.
      * @param req A request (usually the object that invokes this method). Its methods {@code receiveResponse()} and
      *            {@code suspect()} will be invoked when a message has been received or a member is suspected.
      */
-    public void sendRequest(Collection<Address> dest_mbrs, Buffer data, Request req, RequestOptions opts) throws Exception {
-        if(transport == null) {
-            log.warn("transport is not available !");
-            return;
-        }
-
+    public <T> void sendRequest(Collection<Address> dest_mbrs, Message msg, Request<T> req, RequestOptions opts) throws Exception {
         // i.   Create the request correlator header and add it to the msg
         // ii.  If a reply is expected (coll != null), add a coresponding entry in the pending requests table
         Header hdr=opts.hasExclusionList()? new MultiDestinationHeader(Header.REQ, 0, this.corr_id, opts.exclusionList())
           : new Header(Header.REQ, 0, this.corr_id);
 
-        Message msg=new Message(null, data).putHeader(this.corr_id, hdr)
-          .setFlag(opts.flags()).setTransientFlag(opts.transientFlags());
+        msg.putHeader(this.corr_id, hdr)
+          .setFlag(opts.flags(), false).setFlag(opts.transientFlags(), true);
 
         if(req != null) { // sync
             long req_id=REQUEST_ID.getAndIncrement();
@@ -153,41 +139,33 @@ public class RequestCorrelator {
         }
 
         if(opts.anycasting()) {
-            if(opts.useAnycastAddresses()) {
-                transport.down(msg.dest(new AnycastAddress(dest_mbrs)));
-            }
-            else {
-                boolean first=true;
-                for(Address mbr: dest_mbrs) {
-                    Message copy=(first? msg : msg.copy(true)).dest(mbr);
-                    first=false;
-                    if(!mbr.equals(local_addr) && copy.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK))
-                        copy.clearTransientFlag(Message.TransientFlag.DONT_LOOPBACK);
-                    transport.down(copy);
-                }
+            boolean first=true;
+            for(Address mbr: dest_mbrs) {
+                Message copy=(first? msg : msg.copy(true, true)).setDest(mbr);
+                first=false;
+                if(!mbr.equals(local_addr) && copy.isFlagSet(Message.TransientFlag.DONT_LOOPBACK))
+                    copy.clearFlag(Message.TransientFlag.DONT_LOOPBACK);
+                transport.down(copy);
             }
         }
         else
             transport.down(msg);
     }
 
-    /** Sends a request to a single destination */
-    public void sendUnicastRequest(Address dest, Buffer data, Request req, RequestOptions opts) throws Exception {
-        if(transport == null) {
-            if(log.isWarnEnabled()) log.warn("transport is not available !");
-            return;
-        }
 
+    /** Sends a request to a single destination */
+    public <T> void sendUnicastRequest(Message msg, Request<T> req, RequestOptions opts) throws Exception {
+        Address dest=msg.getDest();
         Header hdr=new Header(Header.REQ, 0, this.corr_id);
-        Message msg=new Message(dest, data).putHeader(this.corr_id, hdr)
-          .setFlag(opts.flags()).setTransientFlag(opts.transientFlags());
+        msg.putHeader(this.corr_id, hdr).setFlag(opts.flags(), false)
+          .setFlag(opts.transientFlags(), true);
 
         if(req != null) { // sync RPC
             long req_id=REQUEST_ID.getAndIncrement();
             req.requestId(req_id);
             hdr.requestId(req_id); // set the request-id only for *synchronous RPCs*
             if(log.isTraceEnabled())
-                log.trace("%s: invoking unicast RPC [req-id=%d] on %s", local_addr, req_id, msg.dest());
+                log.trace("%s: invoking unicast RPC [req-id=%d] on %s", local_addr, req_id, dest);
             requests.putIfAbsent(req_id, req);
             // make sure no view is received before we add ourself as a view handler (https://issues.jboss.org/browse/JGRP-1428)
             req.viewChange(view);
@@ -332,14 +310,14 @@ public class RequestCorrelator {
 
     // .......................................................................
     protected RequestCorrelator removeEntry(long id) {
-        Request req=requests.remove(id);
+        Request<?> req=requests.remove(id);
         if(req != null) {
             long time_ns=req.start_time > 0? System.nanoTime() - req.start_time : 0;
             if(req instanceof UnicastRequest)
-                rpc_stats.add(RpcStats.Type.UNICAST, ((UnicastRequest)req).target, true, time_ns);
+                rpc_stats.add(RpcStats.Type.UNICAST, ((UnicastRequest<?>)req).target, true, time_ns);
             else if(req instanceof GroupRequest) {
                 if(req.options != null && req.options.anycasting())
-                    rpc_stats.addAnycast(true, time_ns, ((GroupRequest)req).rsps.keySet());
+                    rpc_stats.addAnycast(true, time_ns, ((GroupRequest<?>)req).rsps.keySet());
                 else
                     rpc_stats.add(RpcStats.Type.MULTICAST, null, true, time_ns);
             }
@@ -359,9 +337,11 @@ public class RequestCorrelator {
 
             case Header.RSP:
             case Header.EXC_RSP:
-                Request req=requests.get(hdr.req_id);
-                if(req != null)
-                    handleResponse(req, msg.src(), msg.getRawBuffer(), msg.getOffset(), msg.getLength(), hdr.type == Header.EXC_RSP);
+                Request<?> req=requests.get(hdr.req_id);
+                if(req != null) {
+                    Object retval=msg.getPayload();
+                    req.receiveResponse(retval, msg.getSrc(), hdr.type == Header.EXC_RSP);
+                }
                 break;
 
             default:
@@ -403,42 +383,19 @@ public class RequestCorrelator {
             sendReply(req, hdr.req_id, retval, threw_exception);
     }
 
-    protected void handleResponse(Request req, Address sender, byte[] buf, int offset, int length, boolean is_exception) {
-        Object retval;
-        try {
-            retval=replyFromBuffer(buf, offset, length, marshaller);
-        }
-        catch(Exception e) {
-            log.error(Util.getMessage("FailedUnmarshallingBufferIntoReturnValue"), e);
-            retval=e;
-            is_exception=true;
-        }
-        req.receiveResponse(retval, sender, is_exception);
-    }
-
 
     protected void sendReply(final Message req, final long req_id, Object reply, boolean is_exception) {
-        Buffer rsp_buf;
-        try {  // retval could be an exception, or a real value
-            rsp_buf=replyToBuffer(reply, marshaller);
-        }
-        catch(Throwable t) {
-            try {  // this call should succeed (all exceptions are serializable)
-                rsp_buf=replyToBuffer(t, marshaller);
-                is_exception=true;
-            }
-            catch(NotSerializableException not_serializable) {
-                if(log.isErrorEnabled()) log.error(Util.getMessage("FailedMarshallingRsp") + reply + "): not serializable");
-                return;
-            }
-            catch(Throwable tt) {
-                if(log.isErrorEnabled()) log.error(Util.getMessage("FailedMarshallingRsp") + reply + "): " + tt);
-                return;
-            }
-        }
-        Message rsp=req.makeReply().setFlag(req.getFlags()).setBuffer(rsp_buf)
+        Message rsp=makeReply(req).setFlag(req.getFlags(false), false)
+          .setPayload(reply)
           .clearFlag(Message.Flag.RSVP, Message.Flag.INTERNAL); // JGRP-1940
         sendResponse(rsp, req_id, is_exception);
+    }
+
+    protected static Message makeReply(Message msg) {
+        Message reply=msg.create().get().setDest(msg.getSrc());
+        if(msg.getDest() != null)
+            reply.setSrc(msg.getDest());
+        return reply;
     }
 
     protected void sendResponse(Message rsp, long req_id, boolean is_exception) {
@@ -448,22 +405,6 @@ public class RequestCorrelator {
             log.trace("sending rsp for %d to %s", req_id, rsp.getDest());
         transport.down(rsp);
     }
-
-    protected static Buffer replyToBuffer(Object obj, Marshaller marshaller) throws Exception {
-        int estimated_size=marshaller != null? marshaller.estimatedSize(obj) : (obj == null? 2 : 50);
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(estimated_size, true);
-        if(marshaller != null)
-            marshaller.objectToStream(obj, out);
-        else
-            Util.objectToStream(obj, out);
-        return out.getBuffer();
-    }
-
-    protected static Object replyFromBuffer(final byte[] buf, int offset, int length, Marshaller marshaller) throws Exception {
-        ByteArrayDataInputStream in=new ByteArrayDataInputStream(buf, offset, length);
-        return marshaller != null? marshaller.objectFromStream(in) : Util.objectFromStream(in);
-    }
-
 
     // .......................................................................
 
@@ -625,7 +566,7 @@ public class RequestCorrelator {
                 switch(key) {
                     case "requests":
                         StringBuilder sb=new StringBuilder();
-                        for(Map.Entry<Long,Request> entry: requests.entrySet())
+                        for(Map.Entry<Long,Request<?>> entry: requests.entrySet())
                             sb.append(entry.getKey()).append(": ").append(entry.getValue()).append("\n");
                         retval.put(key, sb.toString());
                         break;

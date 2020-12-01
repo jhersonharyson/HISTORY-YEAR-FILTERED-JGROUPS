@@ -1,9 +1,6 @@
 package org.jgroups.tests;
 
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
-import org.jgroups.ReceiverAdapter;
+import org.jgroups.*;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.DISCARD;
 import org.jgroups.protocols.pbcast.NAKACK2;
@@ -56,7 +53,7 @@ public class LastMessageDroppedTest extends ChannelTestBase {
         b.setReceiver(receiver);
         a.send(null, 1);
         a.send(null, 2);
-        discard.setDropDownMulticasts(1); // drop the next multicast
+        discard.dropDownMulticasts(1); // drop the next multicast
         a.send(null, 3);
 
         Collection<Integer> list=receiver.getMsgs();
@@ -81,7 +78,7 @@ public class LastMessageDroppedTest extends ChannelTestBase {
         b.setReceiver(receiver);
         a.send(null, 1);
         a.send(null, 2);
-        discard.setDropDownMulticasts(1); // drop the next multicast
+        discard.dropDownMulticasts(1); // drop the next multicast
         stack.insertProtocol(new LastSeqnoDropper(1), ProtocolStack.Position.BELOW, NAKACK2.class);
         a.send(null, 3);
 
@@ -128,7 +125,7 @@ public class LastMessageDroppedTest extends ChannelTestBase {
         }
     }
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         private final Collection<Integer> msgs=new ConcurrentLinkedQueue<>();
 
         public Collection<Integer> getMsgs() {

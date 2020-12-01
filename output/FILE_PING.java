@@ -7,6 +7,7 @@ import org.jgroups.View;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.util.NameCache;
 import org.jgroups.util.Responses;
 import org.jgroups.util.TimeScheduler;
@@ -48,7 +49,7 @@ public class FILE_PING extends Discovery {
     @Property(description="The max number of times my own information should be written to the storage after a view change")
     protected int     info_writer_max_writes_after_view=2;
 
-    @Property(description="Interval (in ms) at which the info writer should kick in")
+    @Property(description="Interval (in ms) at which the info writer should kick in",type=AttributeType.TIME)
     protected long    info_writer_sleep_time=10000;
 
     @Property(description="When a non-initial discovery is run, and InfoWriter is not running, write the data to " +
@@ -75,11 +76,32 @@ public class FILE_PING extends Discovery {
     protected static final FilenameFilter filter=(dir, name1) -> name1.endsWith(SUFFIX);
     protected Future<?>                   info_writer;
 
-    public boolean   isDynamic()                             {return true;}
-    public String    getLocation()                           {return location;}
-    public FILE_PING setLocation(String l)                   {this.location=l; return this;}
-    public boolean   getRemoveAllDataOnViewChange()          {return remove_all_data_on_view_change;}
-    public FILE_PING setRemoveAllDataOnViewChange(boolean r) {remove_all_data_on_view_change=r; return this;}
+    public boolean   isDynamic()                          {return true;}
+    public String    getLocation()                        {return location;}
+    public FILE_PING setLocation(String l)                {this.location=l; return this;}
+    public boolean   removeAllDataOnViewChange()          {return remove_all_data_on_view_change;}
+    public FILE_PING removeAllDataOnViewChange(boolean r) {remove_all_data_on_view_change=r; return this;}
+
+    public boolean   removeOldCoordsOnViewChange() {return remove_old_coords_on_view_change;}
+    public FILE_PING removeOldCoordsOnViewChange(boolean r) {this.remove_old_coords_on_view_change=r; return this;}
+
+    public int       getInfoWriterMaxWritesAfterView() {return info_writer_max_writes_after_view;}
+    public FILE_PING setInfoWriterMaxWritesAfterView(int i) {this.info_writer_max_writes_after_view=i; return this;}
+
+    public long      getInfoWriterSleepTime() {return info_writer_sleep_time;}
+    public FILE_PING setInfoWriterSleepTime(long i) {this.info_writer_sleep_time=i; return this;}
+
+    public boolean   writeDataOnFind() {return write_data_on_find;}
+    public FILE_PING writeDataOnFind(boolean w) {this.write_data_on_find=w; return this;}
+
+    public boolean   registerShutdownHook() {return register_shutdown_hook;}
+    public FILE_PING registerShutdownHook(boolean r) {this.register_shutdown_hook=r; return this;}
+
+    public boolean   updateStoreOnViewChange() {return update_store_on_view_change;}
+    public FILE_PING updateStoreOnViewChange(boolean u) {this.update_store_on_view_change=u; return this;}
+
+
+
 
     @ManagedAttribute(description="Whether the InfoWriter task is running")
     public synchronized boolean isInfoWriterRunning() {return info_writer != null && !info_writer.isDone();}

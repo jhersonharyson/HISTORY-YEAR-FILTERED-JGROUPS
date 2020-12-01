@@ -71,10 +71,10 @@ public class UNICAST_MessagesToSelfTest {
     protected static JChannel createChannel(Protocol unicast, DISCARD discard) throws Exception {
         JChannel ch=new JChannel(new SHARED_LOOPBACK(),
                                  new SHARED_LOOPBACK_PING(),
-                                 new NAKACK2().setValue("use_mcast_xmit", false),
+                                 new NAKACK2().useMcastXmit(false),
                                  unicast,
-                                 new STABLE().setValue("max_bytes", 50000),
-                                 new GMS().setValue("print_local_addr", false));
+                                 new STABLE().setMaxBytes(50000),
+                                 new GMS().printLocalAddress(false));
         if(discard != null)
             ch.getProtocolStack().insertProtocol(discard, ProtocolStack.Position.ABOVE, SHARED_LOOPBACK.class);
         return ch;
@@ -85,10 +85,10 @@ public class UNICAST_MessagesToSelfTest {
 
 
     private void _testReceptionOfAllMessages() throws Throwable {
-        final Receiver r=new Receiver();
+        final MyReceiver r=new MyReceiver();
         ch.setReceiver(r);
         for(int i=1; i <= NUM_MSGS; i++) {
-            Message msg=new Message(a1, createPayload(SIZE, i)); // unicast message
+            Message msg=new BytesMessage(a1, createPayload(SIZE, i)); // unicast message
             ch.send(msg);
             if(i % 1000 == 0)
                 System.out.println("==> " + i);
@@ -108,7 +108,7 @@ public class UNICAST_MessagesToSelfTest {
     }
 
 
-    protected String printList(List<Integer> list) {
+    protected static String printList(List<Integer> list) {
         StringBuilder sb=new StringBuilder();
         for(int i=0; i < 10; i++)
             sb.append(list.get(i) + " ");
@@ -127,7 +127,7 @@ public class UNICAST_MessagesToSelfTest {
     }
 
     /** Checks that messages 1 - NUM_MSGS are received in order */
-    protected static class Receiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         int num_mgs_received=0, next=1;
         Throwable exception=null;
         protected final List<Integer> list=new ArrayList<>(NUM_MSGS);
@@ -135,7 +135,7 @@ public class UNICAST_MessagesToSelfTest {
         public void receive(Message msg) {
             if(exception != null)
                 return;
-            ByteBuffer buf=ByteBuffer.wrap(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+            ByteBuffer buf=ByteBuffer.wrap(msg.getArray(), msg.getOffset(), msg.getLength());
             int seqno=buf.getInt();
             if(seqno != next) {
                 exception=new Exception("expected seqno was " + next + ", but received " + seqno);

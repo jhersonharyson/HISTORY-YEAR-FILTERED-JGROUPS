@@ -5,7 +5,6 @@ import org.jgroups.protocols.DISCARD;
 import org.jgroups.protocols.TP;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
-import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.Util;
 import org.testng.annotations.AfterMethod;
@@ -62,17 +61,17 @@ public class OOBTest extends ChannelTestBase {
     public void testRegularAndOOBUnicasts() throws Exception {
         DISCARD discard=new DISCARD();
         ProtocolStack stack=a.getProtocolStack();
-        stack.insertProtocol(discard, ProtocolStack.Position.BELOW,(Class<? extends Protocol>[])Util.getUnicastProtocols());
+        stack.insertProtocol(discard, ProtocolStack.Position.BELOW, Util.getUnicastProtocols());
 
         Address dest=b.getAddress();
-        Message m1=new Message(dest, 1);
-        Message m2=new Message(dest, 2).setFlag(Message.Flag.OOB);
-        Message m3=new Message(dest, 3);
+        Message m1=new BytesMessage(dest, 1);
+        Message m2=new BytesMessage(dest, 2).setFlag(Message.Flag.OOB);
+        Message m3=new BytesMessage(dest, 3);
 
         MyReceiver receiver=new MyReceiver("B");
         b.setReceiver(receiver);
         a.send(m1);
-        discard.setDropDownUnicasts(1);
+        discard.dropDownUnicasts(1);
         a.send(m2);
         a.send(m3);
 
@@ -90,19 +89,19 @@ public class OOBTest extends ChannelTestBase {
     public void testRegularAndOOBUnicasts2() throws Exception {
         DISCARD discard=new DISCARD();
         ProtocolStack stack=a.getProtocolStack();
-        stack.insertProtocol(discard, ProtocolStack.Position.BELOW,(Class<? extends Protocol>[])Util.getUnicastProtocols());
+        stack.insertProtocol(discard, ProtocolStack.Position.BELOW, Util.getUnicastProtocols());
 
         Address dest=b.getAddress();
-        Message m1=new Message(dest, 1);
-        Message m2=new Message(dest, 2).setFlag(Message.Flag.OOB);
-        Message m3=new Message(dest, 3).setFlag(Message.Flag.OOB);
-        Message m4=new Message(dest, 4);
+        Message m1=new BytesMessage(dest, 1);
+        Message m2=new BytesMessage(dest, 2).setFlag(Message.Flag.OOB);
+        Message m3=new BytesMessage(dest, 3).setFlag(Message.Flag.OOB);
+        Message m4=new BytesMessage(dest, 4);
 
         MyReceiver receiver=new MyReceiver("B");
         b.setReceiver(receiver);
         a.send(m1);
 
-        discard.setDropDownUnicasts(2);
+        discard.dropDownUnicasts(2);
         a.send(m2); // dropped
         a.send(m3); // dropped
         a.send(m4);
@@ -125,14 +124,14 @@ public class OOBTest extends ChannelTestBase {
         a.setDiscardOwnMessages(true);
 
         Address dest=null; // send to all
-        Message m1=new Message(dest, 1);
-        Message m2=new Message(dest, 2).setFlag(Message.Flag.OOB);
-        Message m3=new Message(dest, 3);
+        Message m1=new BytesMessage(dest, 1);
+        Message m2=new BytesMessage(dest, 2).setFlag(Message.Flag.OOB);
+        Message m3=new BytesMessage(dest, 3);
 
         MyReceiver receiver=new MyReceiver("B");
         b.setReceiver(receiver);
         a.send(m1);
-        discard.setDropDownMulticasts(1);
+        discard.dropDownMulticasts(1);
         a.send(m2);
         a.send(m3);
 
@@ -151,7 +150,6 @@ public class OOBTest extends ChannelTestBase {
 
 
     @Test(invocationCount=5)
-    @SuppressWarnings("unchecked")
     public void testRandomRegularAndOOBMulticasts() throws Exception {
         DISCARD discard=new DISCARD().setLocalAddress(a.getAddress()).setUpDiscardRate(0.5);
         ProtocolStack stack=a.getProtocolStack();
@@ -194,7 +192,7 @@ public class OOBTest extends ChannelTestBase {
 
         final int NUM=10;
         for(int i=1; i <= NUM; i++)
-            a.send(new Message(null, i).setFlag(Message.Flag.OOB));
+            a.send(new BytesMessage(null, i).setFlag(Message.Flag.OOB));
 
         STABLE stable=a.getProtocolStack().findProtocol(STABLE.class);
         if(stable != null)
@@ -225,7 +223,7 @@ public class OOBTest extends ChannelTestBase {
         final int NUM=10;
         final Address dest=b.getAddress();
         for(int i=1; i <= NUM; i++)
-            a.send(new Message(dest, i).setFlag(Message.Flag.OOB));
+            a.send(new BytesMessage(dest, i).setFlag(Message.Flag.OOB));
 
         Collection<Integer> msgs=receiver.getMsgs();
         for(int i=0; i < 20; i++) {
@@ -259,7 +257,7 @@ public class OOBTest extends ChannelTestBase {
                         JChannel sender=Util.tossWeightedCoin(0.5) ? a : b;
                         boolean oob=Util.tossWeightedCoin(oob_prob);
                         int num=counter.incrementAndGet();
-                        Message msg=new Message(dest, num);
+                        Message msg=new BytesMessage(dest, num);
                         if(oob)
                            msg.setFlag(Message.Flag.OOB);
                         try {
@@ -282,7 +280,7 @@ public class OOBTest extends ChannelTestBase {
         for(int i=0; i < num_msgs; i++) {
             JChannel sender=Util.tossWeightedCoin(0.5) ? a : b;
             boolean oob=Util.tossWeightedCoin(oob_prob);
-            Message msg=new Message(dest, i);
+            Message msg=new BytesMessage(dest, i);
             if(oob)
                msg.setFlag(Message.Flag.OOB);
             sender.send(msg);            
@@ -298,7 +296,7 @@ public class OOBTest extends ChannelTestBase {
 
         a.send(dest, 1); // the only regular message
         for(int i=2; i <= NUM; i++)
-            a.send(new Message(dest, i).setFlag(Message.Flag.OOB));
+            a.send(new BytesMessage(dest, i).setFlag(Message.Flag.OOB));
 
         sendStableMessages(a,b);
         List<Integer> list=receiver.getMsgs();
@@ -329,7 +327,6 @@ public class OOBTest extends ChannelTestBase {
             assert list.contains(i);
     }
 
-    @SuppressWarnings("unchecked")
     private static void check(final int num_expected_msgs, Collection<Integer> list, String name) {
         System.out.println(name  + ": " + list);
 
@@ -370,7 +367,7 @@ public class OOBTest extends ChannelTestBase {
         }
     }
 
-    private static class BlockingReceiver extends ReceiverAdapter {
+    private static class BlockingReceiver implements Receiver {
         final CountDownLatch latch;
         final List<Integer>  msgs=Collections.synchronizedList(new LinkedList<>());
 
@@ -394,7 +391,7 @@ public class OOBTest extends ChannelTestBase {
         }
     }
 
-    private static class MyReceiver extends ReceiverAdapter {
+    private static class MyReceiver implements Receiver {
         private final Collection<Integer> msgs=new ConcurrentLinkedQueue<>();
         final String name;
 

@@ -1,9 +1,7 @@
 package org.jgroups.protocols;
 
 
-import org.jgroups.Address;
-import org.jgroups.Global;
-import org.jgroups.Message;
+import org.jgroups.*;
 import org.jgroups.util.RingBuffer;
 import org.jgroups.util.Runner;
 import org.jgroups.util.Util;
@@ -56,6 +54,7 @@ public class RingBufferBundler extends BaseBundler {
     public RingBuffer<Message> buf()                     {return rb;}
     public Thread              getThread()               {return bundler_thread.getThread();}
     public int                 size()                    {return rb.size();}
+    public int                 getQueueSize()            {return rb.size();}
     public int                 numSpins()                {return num_spins;}
     public RingBufferBundler   numSpins(int n)           {num_spins=n; return this;}
     public String              waitStrategy()            {return print(wait_strategy);}
@@ -100,10 +99,10 @@ public class RingBufferBundler extends BaseBundler {
                 continue;
             }
 
-            Address dest=msg.dest();
+            Address dest=msg.getDest();
             try {
                 output.position(0);
-                Util.writeMessageListHeader(dest, msg.src(), cluster_name, 1, output, dest == null);
+                Util.writeMessageListHeader(dest, msg.getSrc(), cluster_name, 1, output, dest == null);
 
                 // remember the position at which the number of messages (an int) was written, so we can later set the
                 // correct value (when we know the correct number of messages)
@@ -135,14 +134,14 @@ public class RingBufferBundler extends BaseBundler {
         int num_msgs=0, bytes=0;
         for(;;) {
             Message msg=buf[start_index];
-            if(msg != null && Objects.equals(dest, msg.dest())) {
-                long size=msg.size();
+            if(msg != null && Objects.equals(dest, msg.getDest())) {
+                int size=msg.size();
                 if(bytes + size > max_bundle_size)
                     break;
                 bytes+=size;
                 num_msgs++;
                 buf[start_index]=null;
-                msg.writeToNoAddrs(msg.src(), output, transport.getId());
+                msg.writeToNoAddrs(msg.getSrc(), output, transport.getId());
             }
             if(start_index == end_index)
                 break;
@@ -191,7 +190,7 @@ public class RingBufferBundler extends BaseBundler {
             case "spin-yield":      return wait_strategy=SPIN_YIELD;
             default:
                 try {
-                    Class<BiConsumer<Integer,Integer>> clazz=Util.loadClass(st, this.getClass());
+                    Class<BiConsumer<Integer,Integer>> clazz=(Class<BiConsumer<Integer,Integer>>)Util.loadClass(st, this.getClass());
                     return clazz.getDeclaredConstructor().newInstance();
                 }
                 catch(Throwable t) {

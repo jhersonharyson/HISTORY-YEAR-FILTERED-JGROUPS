@@ -49,15 +49,15 @@ public class Relay2RpcDispatcherTest {
     	b = createNode(LON, "B");
     	al=new MyReceiver("A");
     	bl=new MyReceiver("B");
-    	rpca = new RpcDispatcher(a, new ServerObject(1)).setMembershipListener(al);
-    	rpcb = new RpcDispatcher(b, new ServerObject(1)).setMembershipListener(bl);
+    	rpca = new RpcDispatcher(a, new ServerObject(1)).setReceiver(al);
+    	rpcb = new RpcDispatcher(b, new ServerObject(1)).setReceiver(bl);
     	
     	x = createNode(SFO, "X");
     	y = createNode(SFO, "Y");
     	xl=new MyReceiver("X");
     	yl=new MyReceiver("Y");
-    	rpcx = new RpcDispatcher(x, new ServerObject(1)).setMembershipListener(xl);
-    	rpcy = new RpcDispatcher(y, new ServerObject(1)).setMembershipListener(yl);
+    	rpcx = new RpcDispatcher(x, new ServerObject(1)).setReceiver(xl);
+    	rpcy = new RpcDispatcher(y, new ServerObject(1)).setReceiver(yl);
     }
     @AfterMethod protected void destroy() {Util.close(y,x,b,a);}
 
@@ -161,11 +161,10 @@ public class Relay2RpcDispatcherTest {
     protected JChannel createNode(String site_name, String node_name) throws Exception {
     	JChannel ch=new JChannel(new SHARED_LOOPBACK(),
     			new SHARED_LOOPBACK_PING(),
-                new MERGE3().setValue("max_interval", 3000).setValue("min_interval", 1000),
+                new MERGE3().setMaxInterval(3000).setMinInterval(1000),
     			new NAKACK2(),
     			new UNICAST3(),
-    			new GMS().setValue("print_local_addr", false),
-    			new FORWARD_TO_COORD(),
+    			new GMS().printLocalAddress(false),
     			createRELAY2(site_name));
     	ch.setName(node_name);
     	return ch;
@@ -208,7 +207,7 @@ public class Relay2RpcDispatcherTest {
           new SHARED_LOOPBACK_PING(),
           new NAKACK2(),
           new UNICAST3(),
-          new GMS().setValue("print_local_addr", false)
+          new GMS().printLocalAddress(false)
         };
     }
 
@@ -222,7 +221,7 @@ public class Relay2RpcDispatcherTest {
     }
 
 
-    protected void waitForBridgeView(int expected_size, long timeout, long interval, JChannel ... channels) {
+    protected static void waitForBridgeView(int expected_size, long timeout, long interval, JChannel... channels) {
         long deadline=System.currentTimeMillis() + timeout;
 
         while(System.currentTimeMillis() < deadline) {
@@ -256,13 +255,13 @@ public class Relay2RpcDispatcherTest {
     }
 
 
-    protected Route getRoute(JChannel ch, String site_name) {
+    protected static Route getRoute(JChannel ch, String site_name) {
         RELAY2 relay=ch.getProtocolStack().findProtocol(RELAY2.class);
         return relay.getRoute(site_name);
     }
 
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected final List<Integer> list=new ArrayList<>(5);
         String chName;
         MyReceiver(String chName) {

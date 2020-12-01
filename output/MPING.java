@@ -1,5 +1,6 @@
 package org.jgroups.protocols;
 
+import org.jgroups.BytesMessage;
 import org.jgroups.Event;
 import org.jgroups.Global;
 import org.jgroups.Message;
@@ -8,7 +9,8 @@ import org.jgroups.annotations.Property;
 import org.jgroups.conf.PropertyConverters;
 import org.jgroups.util.*;
 
-import java.io.*;
+import java.io.DataInput;
+import java.io.IOException;
 import java.net.*;
 import java.util.*;
 
@@ -95,22 +97,20 @@ public class MPING extends PING implements Runnable {
     }
 
     public InetAddress            getBindAddr()               {return bind_addr;}
-    public void                   setBindAddr(InetAddress b)  {this.bind_addr=b;}
+    public MPING                  setBindAddr(InetAddress b)  {this.bind_addr=b; return this;}
     public List<NetworkInterface> getReceiveInterfaces()      {return receive_interfaces;}
     public List<NetworkInterface> getSendInterfaces()         {return send_interfaces;}
     public boolean                isReceiveOnAllInterfaces()  {return receive_on_all_interfaces;}
     public boolean                isSendOnAllInterfaces()     {return send_on_all_interfaces;}
     public int                    getTTL()                    {return ip_ttl;}
-    public void                   setTTL(int ip_ttl)          {this.ip_ttl=ip_ttl;}
+    public MPING                  setTTL(int ip_ttl)          {this.ip_ttl=ip_ttl; return this;}
     public InetAddress            getMcastAddr()              {return mcast_addr;}
     public MPING                  mcastAddress(InetAddress a) {this.mcast_addr=a; return this;}
-    public void                   setMcastAddr(InetAddress a) {this.mcast_addr=a;}
-    public void                   setMulticastAddress(String a) throws UnknownHostException {
-        mcast_addr=InetAddress.getByName(a);
-    }
+    public MPING                  setMcastAddr(InetAddress a) {this.mcast_addr=a; return this;}
     public int                    getMcastPort()              {return mcast_port;}
-    public void                   setMcastPort(int p)         {this.mcast_port=p;}
-    public MPING                  mcastPort(int p)            {this.mcast_port=p; return this;}
+    public MPING                  setMcastPort(int p)         {this.mcast_port=p; return this;}
+    public MPING                  setMulticastAddress(String a) throws UnknownHostException
+    {mcast_addr=InetAddress.getByName(a); return this;}
 
 
 
@@ -132,6 +132,8 @@ public class MPING extends PING implements Runnable {
     }
 
     public void start() throws Exception {
+        if(bind_addr == null)
+            bind_addr=getTransport().getBindAddr();
         if(Util.can_bind_to_mcast_addr) // https://jira.jboss.org/jira/browse/JGRP-836 - prevent cross talking on Linux
             mcast_receive_sock=Util.createMulticastSocket(getSocketFactory(), "jgroups.mping.mcast_sock", mcast_addr, mcast_port, log);
         else
@@ -149,22 +151,21 @@ public class MPING extends PING implements Runnable {
         }
         else {
             if(bind_addr != null)
-                mcast_receive_sock.setInterface(bind_addr);
-            mcast_receive_sock.joinGroup(mcast_addr);
+                mcast_receive_sock.setNetworkInterface(NetworkInterface.getByInetAddress(bind_addr));
+            InetSocketAddress group=new InetSocketAddress(mcast_addr, mcast_port);
+            NetworkInterface intf=bind_addr == null? null : NetworkInterface.getByInetAddress(bind_addr);
+            log.debug("%s: joining group %s on NIC %s\n", local_addr, group, intf);
+            mcast_receive_sock.joinGroup(group, intf);
         }
 
 
         // Create mcast sender socket
         if(send_on_all_interfaces || (send_interfaces != null && !send_interfaces.isEmpty())) {
-            List interfaces;
-            if(send_interfaces != null)
-                interfaces=send_interfaces;
-            else
-                interfaces=Util.getAllAvailableInterfaces();
-            mcast_send_sockets=new MulticastSocket[interfaces.size()];
+            List<NetworkInterface> nics=send_interfaces != null? send_interfaces : Util.getAllAvailableInterfaces();
+            mcast_send_sockets=new MulticastSocket[nics.size()];
             int index=0;
-            for(Iterator it=interfaces.iterator(); it.hasNext();) {
-                NetworkInterface intf=(NetworkInterface)it.next();
+            for(Iterator<NetworkInterface> it=nics.iterator(); it.hasNext();) {
+                NetworkInterface intf=it.next();
                 mcast_send_sockets[index]=new MulticastSocket();
                 mcast_send_sockets[index].setNetworkInterface(intf);
                 mcast_send_sockets[index].setTimeToLive(ip_ttl);
@@ -194,7 +195,7 @@ public class MPING extends PING implements Runnable {
             try {
                 mcast_receive_sock.receive(packet);
                 DataInput inp=new ByteArrayDataInputStream(packet.getData(), packet.getOffset(), packet.getLength());
-                Message msg=new Message();
+                Message msg=new BytesMessage();
                 msg.readFrom(inp);
                 if(!Objects.equals(local_addr,msg.getSrc())) // discard discovery request from self
                     up(msg);
@@ -206,7 +207,6 @@ public class MPING extends PING implements Runnable {
                 log.error(Util.getMessage("FailedReceivingPacketFrom"), packet.getSocketAddress(), ex);
             }
         }
-        log.debug("receiver thread terminated");
     }
 
 
@@ -223,7 +223,7 @@ public class MPING extends PING implements Runnable {
     protected <T extends MPING> T setInterface(InetAddress intf, MulticastSocket s) {
         try {
             if(s != null && intf != null)
-                s.setInterface(intf);
+                s.setNetworkInterface(NetworkInterface.getByInetAddress(intf));
         }
         catch(Throwable ex) {
             log.error("failed setting interface to %s: %s", intf, ex);
@@ -265,10 +265,10 @@ public class MPING extends PING implements Runnable {
         try {
             if(msg.getSrc() == null)
                 msg.setSrc(local_addr);
-            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream((int)(msg.size()+1));
+            ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(msg.size()+1);
             msg.writeTo(out);
-            Buffer buf=out.getBuffer();
-            DatagramPacket packet=new DatagramPacket(buf.getBuf(), buf.getOffset(), buf.getLength(), mcast_addr, mcast_port);
+            ByteArray buf=out.getBuffer();
+            DatagramPacket packet=new DatagramPacket(buf.getArray(), buf.getOffset(), buf.getLength(), mcast_addr, mcast_port);
             if(mcast_send_sockets != null) {
                 MulticastSocket s;
                 for(int i=0; i < mcast_send_sockets.length; i++) {

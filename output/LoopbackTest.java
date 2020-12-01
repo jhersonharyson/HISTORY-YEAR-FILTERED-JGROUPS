@@ -60,7 +60,7 @@ public class LoopbackTest extends ChannelTestBase {
         // send NUM messages to dest
         Address dest=unicast? channel.getAddress() : null;
         for(int i=1; i <= NUM; i++) {
-            channel.send(new Message(dest, i));
+            channel.send(new BytesMessage(dest, i));
             if(i % 100 == 0)
                 System.out.printf("-- [%s] sent %d\n", Thread.currentThread().getName(), i);
         }
@@ -108,7 +108,7 @@ public class LoopbackTest extends ChannelTestBase {
      * A receiver which waits for all messages to be received and 
      * then sets a promise.
      */
-    private static class MyReceiver extends ReceiverAdapter {
+    private static class MyReceiver implements Receiver {
         private final int numExpected ;
         private int       numReceived;
         private final Promise<Boolean> p ;

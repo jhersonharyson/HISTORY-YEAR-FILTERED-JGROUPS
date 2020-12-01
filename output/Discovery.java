@@ -5,6 +5,7 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.conf.ConfiguratorFactory;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
@@ -46,7 +47,7 @@ public abstract class Discovery extends Protocol {
 
     @Property(description="If greater than 0, we'll wait a random number of milliseconds in range [0..stagger_timeout] " +
       "before sending a discovery response. This prevents traffic spikes in large clusters when everyone sends their " +
-      "discovery response at the same time")
+      "discovery response at the same time",type=AttributeType.TIME)
     protected long                       stagger_timeout;
 
 
@@ -59,7 +60,7 @@ public abstract class Discovery extends Protocol {
       "not individual members")
     protected int                        max_members_in_discovery_request=500;
 
-    @Property(description="Expiry time of discovery responses in ms")
+    @Property(description="Expiry time of discovery responses in ms",type=AttributeType.TIME)
     protected long                       discovery_rsp_expiry_time=60000;
 
     @Property(description="If true then the discovery is done on a separate timer thread. Should be set to true when " +
@@ -104,7 +105,6 @@ public abstract class Discovery extends Protocol {
     protected final List<Future<?>>      discovery_req_futures=new ArrayList<>();
     @ManagedAttribute(description="Whether the transport supports multicasting")
     protected boolean                    transport_supports_multicasting=true;
-    protected boolean                    use_ip_addrs; // caches TP.use_ip_addrs
     @ManagedAttribute(description="True if sending a message can block at the transport level")
     protected boolean                    sends_can_block=true;
     protected Consumer<PingData>         discovery_rsp_callback; // called when a discovery response is received
@@ -120,7 +120,6 @@ public abstract class Discovery extends Protocol {
             throw new IllegalArgumentException("num_discovery_runs must be >= 1");
         transport_supports_multicasting=transport.supportsMulticasting();
         sends_can_block=transport instanceof TCP; // UDP and TCP_NIO2 won't block
-        use_ip_addrs=transport.getUseIpAddresses();
     }
 
     public void start() throws Exception {
@@ -131,7 +130,7 @@ public abstract class Discovery extends Protocol {
     }
 
     public void stop() {
-        is_server=false;
+        is_server=is_coord=false;
         clearRequestFutures();
     }
 
@@ -212,10 +211,6 @@ public abstract class Discovery extends Protocol {
      */
     protected abstract void findMembers(List<Address> members, boolean initial_discovery, Responses responses);
 
-    /** Calls {@link #findMembers(List, boolean, Responses)} */
-    protected void invokeFindMembers(List<Address> members, boolean initial_discovery, Responses rsps, boolean async) {
-        findMembers(members, initial_discovery, rsps); // ignores 'async' parameter
-    }
 
 
     public Responses findMembers(final List<Address> members, final boolean initial_discovery, boolean async, long timeout) {
@@ -225,7 +220,7 @@ public abstract class Discovery extends Protocol {
         Responses rsps=new Responses(num_expected, initial_discovery && break_on_coord_rsp, capacity);
         addResponse(rsps);
         if(async || async_discovery || (num_discovery_runs > 1) && initial_discovery) {
-            final Runnable find_method=() -> invokeFindMembers(members, initial_discovery, rsps, async);
+            final Runnable find_method=() -> callFindMembersInAllDiscoveryProtocols(members, initial_discovery, rsps);
             timer.execute(find_method);
             if(num_discovery_runs > 1 && initial_discovery) {
                 int num_reqs_to_send=num_discovery_runs-1;
@@ -241,7 +236,7 @@ public abstract class Discovery extends Protocol {
             }
         }
         else
-            invokeFindMembers(members, initial_discovery, rsps, async);
+            callFindMembersInAllDiscoveryProtocols(members, initial_discovery, rsps);
         weedOutCompletedDiscoveryResponses();
         return rsps;
     }
@@ -287,9 +282,9 @@ public abstract class Discovery extends Protocol {
     }
 
     public Object up(Event evt) {
-        switch(evt.getType()) {
-            case Event.FIND_MBRS:
-                return findMembers(evt.getArg(), false, true, 0); // this is done asynchronously
+        if(evt.getType() == Event.FIND_MBRS) {
+            Discovery d=findTopmostDiscoveryProtocol();
+            return d.findMembers(evt.getArg(), false, true, 0); // this is done asynchronously
         }
         return up_prot.up(evt);
     }
@@ -302,21 +297,21 @@ public abstract class Discovery extends Protocol {
         if(is_leaving)
             return null; // prevents merging back a leaving member (https://issues.jboss.org/browse/JGRP-1336)
 
-        PingData data=readPingData(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-        Address logical_addr=data != null? data.getAddress() : msg.src();
+        PingData data=readPingData(msg.getArray(), msg.getOffset(), msg.getLength());
+        Address logical_addr=data != null? data.getAddress() : msg.getSrc();
 
         switch(hdr.type) {
 
             case PingHeader.GET_MBRS_REQ:   // return Rsp(local_addr, coord)
                 if(cluster_name == null || hdr.cluster_name == null) {
                     log.warn("cluster_name (%s) or cluster_name of header (%s) is null; passing up discovery " +
-                               "request from %s, but this should not be the case", cluster_name, hdr.cluster_name, msg.src());
+                               "request from %s, but this should not be the case", cluster_name, hdr.cluster_name, msg.getSrc());
                 }
                 else {
                     if(!cluster_name.equals(hdr.cluster_name)) {
                         log.warn("%s: discarding discovery request for cluster '%s' from %s; " +
                                    "our cluster name is '%s'. Please separate your clusters properly",
-                                 logical_addr, hdr.cluster_name, msg.src(), cluster_name);
+                                 logical_addr, hdr.cluster_name, msg.getSrc(), cluster_name);
                         return null;
                     }
                 }
@@ -345,7 +340,7 @@ public abstract class Discovery extends Protocol {
 
                 // Only send a response if hdr.mbrs is not empty and contains myself. Otherwise always send my info
                 Collection<? extends Address> mbrs=data != null? data.mbrs() : null;
-                boolean drop_because_of_rank=use_ip_addrs && max_rank_to_reply > 0 && hdr.initialDiscovery() && Util.getRank(view, local_addr) > max_rank_to_reply;
+                boolean drop_because_of_rank=max_rank_to_reply > 0 && hdr.initialDiscovery() && Util.getRank(view, local_addr) > max_rank_to_reply;
                 if(drop_because_of_rank || (mbrs != null && !mbrs.contains(local_addr)))
                     return null;
                 PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
@@ -355,8 +350,12 @@ public abstract class Discovery extends Protocol {
             case PingHeader.GET_MBRS_RSP:
                 // add physical address (if available) to transport's cache
                 if(data != null) {
-                    log.trace("%s: received GET_MBRS_RSP from %s: %s", local_addr, msg.src(), data);
-                    handleDiscoveryResponse(data, msg.src());
+                    // find the top discovery prot and deliver the response: https://issues.redhat.com/browse/JGRP-2230
+                    Discovery d=findTopmostDiscoveryProtocol();
+                    log.trace("%s: received GET_MBRS_RSP from %s: %s%s",
+                              local_addr, msg.getSrc(), data,
+                              d != this? ", delivering it to " + d.getClass().getSimpleName() : "");
+                    d.handleDiscoveryResponse(data, msg.getSrc());
                 }
                 return null;
 
@@ -366,6 +365,23 @@ public abstract class Discovery extends Protocol {
         }
     }
 
+    /** Calls {@link #findMembers(List, boolean, Responses)} in this protocol and all discovery protocols below */
+    protected void callFindMembersInAllDiscoveryProtocols(List<Address> mbrs, boolean initial_discovery, Responses rsps) {
+        for(Protocol p=this; p != null; p=p.getDownProtocol()) {
+            if(p instanceof Discovery)
+                ((Discovery)p).findMembers(mbrs, initial_discovery, rsps);
+        }
+    }
+
+    /** Finds the top-most discovery protocol, starting from this. If none is found, returns this */
+    protected Discovery findTopmostDiscoveryProtocol() {
+        Discovery ret=this;
+        for(Protocol p=this; p != null; p=p.getUpProtocol()) {
+            if(p instanceof Discovery)
+                ret=(Discovery)p;
+        }
+        return ret;
+    }
 
     protected void handleDiscoveryResponse(PingData data, Address sender) {
         // add physical address (if available) to transport's cache
@@ -582,8 +598,13 @@ public abstract class Discovery extends Protocol {
         return Util.streamableFromByteBuffer(PingData::new, data);
     }
 
-    public static Buffer marshal(PingData data) {
-        return Util.streamableToBuffer(data);
+    public static ByteArray marshal(PingData data) {
+        try {
+            return Util.streamableToBuffer(data);
+        }
+        catch(Exception e) {
+            return null;
+        }
     }
 
     protected PingData readPingData(byte[] buffer, int offset, int length) {
@@ -598,9 +619,9 @@ public abstract class Discovery extends Protocol {
 
     protected void sendDiscoveryResponse(Address logical_addr, PhysicalAddress physical_addr,
                                          String logical_name, final Address sender, boolean coord) {
-        final PingData data=new PingData(logical_addr, is_server, logical_name, physical_addr).coord(coord);
-        final Message rsp_msg=new Message(sender).setFlag(Message.Flag.INTERNAL, Message.Flag.OOB, Message.Flag.DONT_BUNDLE)
-          .putHeader(this.id, new PingHeader(PingHeader.GET_MBRS_RSP)).setBuffer(marshal(data));
+        PingData data=new PingData(logical_addr, is_server, logical_name, physical_addr).coord(coord);
+        Message rsp_msg=new BytesMessage(sender).setFlag(Message.Flag.INTERNAL, Message.Flag.OOB, Message.Flag.DONT_BUNDLE)
+          .putHeader(this.id, new PingHeader(PingHeader.GET_MBRS_RSP)).setArray(marshal(data));
 
         if(stagger_timeout > 0) {
             int view_size=view != null? view.size() : 10;
@@ -633,7 +654,7 @@ public abstract class Discovery extends Protocol {
      * @param left_mbrs The members which left. These are excluded from dissemination. Can be null if no members left
      * @param new_mbrs The new members that we need to disseminate the information to. Will be all members if null.
      */
-    protected void disseminateDiscoveryInformation(List current_mbrs, List<Address> left_mbrs, List<Address> new_mbrs) {
+    protected void disseminateDiscoveryInformation(List<Address> current_mbrs, List<Address> left_mbrs, List<Address> new_mbrs) {
         if(new_mbrs == null || new_mbrs.isEmpty())
             return;
 

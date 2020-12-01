@@ -1,6 +1,7 @@
 package org.jgroups.protocols;
 
 import org.jgroups.Address;
+import org.jgroups.EmptyMessage;
 import org.jgroups.Global;
 import org.jgroups.Message;
 import org.jgroups.util.*;
@@ -28,7 +29,7 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
     protected Runner                bundler_thread;
     protected final Runnable        run_function=this::readMessages;
     protected static final String   THREAD_NAME=RingBufferBundlerLockless2.class.getSimpleName();
-    public static final Message     NULL_MSG=new Message(false); // public for unit test
+    public static final Message     NULL_MSG=new EmptyMessage(); // public for unit test
 
 
 
@@ -50,6 +51,7 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
     public int                        readIndex()     {return read_index.get();}
     public int                        writeIndex()    {return write_index.get();}
     public RingBufferBundlerLockless2 reset()         {ri=0; read_index.set(0); write_index.set(1); return this;}
+    public int                        getQueueSize()  {return size();}
     public int                        size()          {return _size(read_index.get(), write_index.get());}
 
     protected int _size(int ri, int wi) {
@@ -93,7 +95,7 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
     }
 
 
-    protected void unparkIfNeeded(long size) {
+    protected void unparkIfNeeded(int size) {
         long acc_bytes=size > 0? accumulated_bytes.addAndGet(size) : accumulated_bytes.get();
         boolean size_exceeded=acc_bytes >= transport.getMaxBundleSize() && accumulated_bytes.compareAndSet(acc_bytes, 0);
         boolean no_other_threads=num_threads.decrementAndGet() == 0;
@@ -165,10 +167,10 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
             if(msg == null)
                 break;
 
-            Address dest=msg.dest();
+            Address dest=msg.getDest();
             try {
                 output.position(0);
-                Util.writeMessageListHeader(dest, msg.src(), cluster_name, 1, output, dest == null);
+                Util.writeMessageListHeader(dest, msg.getSrc(), cluster_name, 1, output, dest == null);
 
                 // remember the position at which the number of messages (an int) was written, so we can later set the
                 // correct value (when we know the correct number of messages)
@@ -202,14 +204,14 @@ public class RingBufferBundlerLockless2 extends BaseBundler {
         int num_msgs=0, bytes=0;
         for(int i=start_index; i != end_index; i=increment(i)) {
             Message msg=buf[i];
-            if(msg != null && msg != NULL_MSG && Objects.equals(dest, msg.dest())) {
-                long msg_size=msg.size();
+            if(msg != null && msg != NULL_MSG && Objects.equals(dest, msg.getDest())) {
+                int msg_size=msg.size();
                 if(bytes + msg_size > max_bundle_size)
                     break;
                 bytes+=msg_size;
                 num_msgs++;
                 buf[i]=NULL_MSG;
-                msg.writeToNoAddrs(msg.src(), output, transport.getId());
+                msg.writeToNoAddrs(msg.getSrc(), output, transport.getId());
             }
         }
         return num_msgs;

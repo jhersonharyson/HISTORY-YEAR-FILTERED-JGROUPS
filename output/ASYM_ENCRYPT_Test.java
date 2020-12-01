@@ -1,20 +1,18 @@
 package org.jgroups.protocols;
 
 import org.jgroups.*;
-import org.jgroups.auth.MD5Token;
 import org.jgroups.protocols.pbcast.*;
+import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
-import org.jgroups.util.Buffer;
+import org.jgroups.util.ByteArray;
 import org.jgroups.util.ByteArrayDataOutputStream;
 import org.jgroups.util.Util;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
+import java.io.Serializable;
+import java.util.*;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -27,9 +25,17 @@ import static org.jgroups.util.Util.shutdown;
  */
 @Test(groups={Global.FUNCTIONAL,Global.ENCRYPT},singleThreaded=true)
 public class ASYM_ENCRYPT_Test extends EncryptTest {
-    protected static final String KEYSTORE="my-keystore.jks";
+    protected static final String KEYSTORE="keystore.jks";
     protected static final String KEYSTORE_PWD="password";
+    protected static final String ROGUE_KEYSTORE="rogue.jks";
 
+    protected static final Consumer<List<Protocol>> CHANGE_KEYSTORE=
+      prots -> prots.stream().filter(p -> p instanceof SSL_KEY_EXCHANGE)
+        .forEach(ssl -> {
+            SSL_KEY_EXCHANGE ke=(SSL_KEY_EXCHANGE)ssl;
+            ke.setKeystoreName(ROGUE_KEYSTORE).setKeystorePassword(KEYSTORE_PWD)
+              .setPortRange(5).setSocketTimeout(300);
+        });
 
 
     @BeforeMethod protected void init() throws Exception {
@@ -51,25 +57,23 @@ public class ASYM_ENCRYPT_Test extends EncryptTest {
     /** Verifies that a non-member (non-coord) cannot send a JOIN-RSP to a member */
     public void nonMemberInjectingJoinResponse() throws Exception {
         Util.close(rogue);
-        rogue=create("rogue");
+        rogue=create("rogue", CHANGE_KEYSTORE);
         ProtocolStack stack=rogue.getProtocolStack();
-        AUTH auth=stack.findProtocol(AUTH.class);
-        auth.setAuthToken(new MD5Token("unknown_pwd"));
         GMS gms=stack.findProtocol(GMS.class);
         gms.setMaxJoinAttempts(1);
-        DISCARD discard=new DISCARD().setDiscardAll(true);
+        DISCARD discard=new DISCARD().discardAll(true);
         stack.insertProtocol(discard, ProtocolStack.Position.ABOVE, TP.class);
         rogue.connect(cluster_name);
         assert rogue.getView().size() == 1;
-        discard.setDiscardAll(false);
+        discard.discardAll(false);
         stack.removeProtocol(NAKACK2.class, UNICAST3.class);
 
         View rogue_view=View.create(a.getAddress(), a.getView().getViewId().getId() +5,
                                     a.getAddress(),b.getAddress(),c.getAddress(),rogue.getAddress());
         JoinRsp join_rsp=new JoinRsp(rogue_view, null);
         GMS.GmsHeader gms_hdr=new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP);
-        Message rogue_join_rsp=new Message(b.getAddress(), rogue.getAddress()).putHeader(GMS_ID, gms_hdr)
-          .setBuffer(GMS.marshal(join_rsp)).setFlag(Message.Flag.NO_RELIABILITY); // bypasses NAKACK2 / UNICAST3
+        Message rogue_join_rsp=new BytesMessage(b.getAddress(), rogue.getAddress()).putHeader(GMS_ID, gms_hdr)
+          .setArray(GMS.marshal(join_rsp)).setFlag(Message.Flag.NO_RELIABILITY); // bypasses NAKACK2 / UNICAST3
         rogue.down(rogue_join_rsp);
         for(int i=0; i < 10; i++) {
             if(b.getView().size() > 3)
@@ -81,41 +85,22 @@ public class ASYM_ENCRYPT_Test extends EncryptTest {
 
 
 
-    /** The rogue node has an incorrect {@link AUTH} config (secret) and can thus not join */
-    public void rogueMemberCannotJoinDueToAuthRejection() throws Exception {
-        Util.close(rogue);
-        rogue=create("rogue");
-        AUTH auth=rogue.getProtocolStack().findProtocol(AUTH.class);
-        auth.setAuthToken(new MD5Token("unknown_pwd"));
-        GMS gms=rogue.getProtocolStack().findProtocol(GMS.class);
-        gms.setMaxJoinAttempts(2);
-        try {
-            rogue.connect(cluster_name);
-            assert false : "rogue member should not have been able to connect";
-        }
-        catch(SecurityException ex) {
-            System.out.printf("rogue member's connect() got (expected) exception: %s\n", ex);
-        }
-    }
-
 
     public void mergeViewInjectionByNonMember() throws Exception {
         Util.close(rogue);
-        rogue=create("rogue");
-        AUTH auth=rogue.getProtocolStack().findProtocol(AUTH.class);
-        auth.setAuthToken(new MD5Token("unknown_pwd"));
+        rogue=create("rogue", null);
         GMS gms=rogue.getProtocolStack().findProtocol(GMS.class);
         gms.setMaxJoinAttempts(1).setJoinTimeout(1000).setLeaveTimeout(1000);
 
         // make the rogue member become a singletone cluster
-        rogue.getProtocolStack().insertProtocol(new DISCARD().setDiscardAll(true), ProtocolStack.Position.ABOVE, TP.class);
+        rogue.getProtocolStack().insertProtocol(new DISCARD().discardAll(true), ProtocolStack.Position.ABOVE, TP.class);
         rogue.connect(cluster_name);
         rogue.getProtocolStack().removeProtocol(DISCARD.class);
 
         MergeView merge_view=new MergeView(a.getAddress(), a.getView().getViewId().getId()+5,
                                            Arrays.asList(a.getAddress(), b.getAddress(), c.getAddress(), rogue.getAddress()), null);
         GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.INSTALL_MERGE_VIEW, a.getAddress());
-        Message merge_view_msg=new Message(null, marshalView(merge_view)).putHeader(GMS_ID, hdr)
+        Message merge_view_msg=new BytesMessage(null, marshalView(merge_view)).putHeader(GMS_ID, hdr)
           .setFlag(Message.Flag.NO_RELIABILITY);
         System.out.printf("** %s: trying to install MergeView %s in all members\n", rogue.getAddress(), merge_view);
         rogue.down(merge_view_msg);
@@ -229,7 +214,7 @@ public class ASYM_ENCRYPT_Test extends EncryptTest {
 
     public void testMerge() throws Exception {
         Util.close(rogue);
-        d=create("D");
+        d=create("D", null);
         d.connect(getClass().getSimpleName());
         Util.waitUntilAllChannelsHaveSameView(10000, 1000, a,b,c,d);
 
@@ -269,21 +254,34 @@ public class ASYM_ENCRYPT_Test extends EncryptTest {
     }
 
 
+    public void testObjectMessage() throws Exception {
+        Person p=new Person("Bela Ban", 54, Util.generateArray(1200));
+        Message msg=new ObjectMessage(b.getAddress(), p);
+        a.send(msg);
+        Util.waitUntil(5000, 500, () -> rb.size() == 1);
+        Message m=rb.list().get(0);
+        assert m.getClass().equals(msg.getClass()) : String.format("expected %s, but got %s", msg.getClass(), m.getClass());
+        Person p2=m.getObject();
+        assert p2.name.equals(p.name) && p2.age == p.age;
+        Util.verifyArray(p2.buf);
+    }
 
-    protected JChannel create(String name) throws Exception {
-        return new JChannel(
+
+    @Override protected JChannel create(String name, Consumer<List<Protocol>> c) throws Exception {
+        List<Protocol> protocols=new ArrayList<>(Arrays.asList(
           new SHARED_LOOPBACK(),
           new SHARED_LOOPBACK_PING(),
           // omit MERGE3 from the stack -- nodes are leaving gracefully
           new SSL_KEY_EXCHANGE().setKeystoreName(KEYSTORE).setKeystorePassword(KEYSTORE_PWD).setPortRange(10),
           new ASYM_ENCRYPT().setUseExternalKeyExchange(useExternalKeyExchange())
             .symKeylength(128).symAlgorithm(symAlgorithm()).symIvLength(symIvLength()).asymKeylength(512).asymAlgorithm("RSA"),
-          new NAKACK2().setUseMcastXmit(false),
+          new NAKACK2().useMcastXmit(false),
           new UNICAST3(),
           new STABLE(),
-          new AUTH().setAuthCoord(true).setAuthToken(new MD5Token("mysecret")),
-          new GMS().joinTimeout(2000))
-          .name(name);
+          new GMS().setJoinTimeout(2000)));
+        if(c != null)
+            c.accept(protocols);
+        return new JChannel(protocols).name(name);
     }
 
     protected static void printSymVersion(JChannel... channels) {
@@ -295,7 +293,7 @@ public class ASYM_ENCRYPT_Test extends EncryptTest {
     }
 
 
-    protected static Buffer marshalView(final View view) throws Exception {
+    protected static ByteArray marshalView(final View view) throws Exception {
         final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(Global.SHORT_SIZE + view.serializedSize());
         out.writeShort(determineFlags(view));
         view.writeTo(out);
@@ -334,5 +332,23 @@ public class ASYM_ENCRYPT_Test extends EncryptTest {
             c.accept(asym);
         }
     }
+
+    protected static class Person implements Serializable {
+        private static final long serialVersionUID=8635045223414419580L;
+        protected String name;
+        protected int    age;
+        protected byte[] buf;
+
+        public Person(String name, int age, byte[] buf) {
+            this.name=name;
+            this.age=age;
+            this.buf=buf;
+        }
+
+        public String toString() {
+            return String.format("name=%s age=%d bytes=%d", name, age, buf != null? buf.length : 0);
+        }
+    }
+
 
 }

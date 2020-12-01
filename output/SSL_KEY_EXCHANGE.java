@@ -7,8 +7,10 @@ import org.jgroups.View;
 import org.jgroups.annotations.LocalAddress;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.util.Runner;
+import org.jgroups.util.SSLContextFactory;
 import org.jgroups.util.Tuple;
 import org.jgroups.util.Util;
 
@@ -89,7 +91,7 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     protected boolean         require_client_authentication=true;
 
     @Property(description="Timeout (in ms) for a socket read. This applies for example to the initial SSL handshake, " +
-      "e.g. if the client connects to a non-JGroups service accidentally running on the same port")
+      "e.g. if the client connects to a non-JGroups service accidentally running on the same port",type=AttributeType.TIME)
     protected int             socket_timeout=1000;
 
     @Property(description="The fully qualified name of a class implementing SessionVerifier")
@@ -97,6 +99,12 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
 
     @Property(description="The argument to the session verifier")
     protected String          session_verifier_arg;
+
+    @Property(description="The SSL protocol")
+    protected String          ssl_protocol= SSLContextFactory.DEFAULT_SSL_PROTOCOL;
+
+    @Property(description="Use Wildfly's OpenSSL impl if available")
+    protected boolean         use_native_if_available;
 
 
     protected SSLContext                   client_ssl_ctx;
@@ -134,12 +142,12 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     public SSL_KEY_EXCHANGE setKeystore(KeyStore ks)                       {this.key_store=ks; return this;}
     public SessionVerifier  getSessionVerifier()                           {return session_verifier;}
     public SSL_KEY_EXCHANGE setSessionVerifier(SessionVerifier s)          {this.session_verifier=s; return this;}
-    @Deprecated public SSLContext getSSLContext()                          {return client_ssl_ctx;}
-    @Deprecated public SSL_KEY_EXCHANGE setSSLContext(SSLContext ssl_ctx)  {this.client_ssl_ctx=ssl_ctx; return this;}
     public SSLContext getClientSSLContext()                                {return client_ssl_ctx;}
     public SSL_KEY_EXCHANGE setClientSSLContext(SSLContext client_ssl_ctx) {this.client_ssl_ctx = client_ssl_ctx; return this;}
     public SSLContext getServerSSLContext()                                {return server_ssl_ctx;}
     public SSL_KEY_EXCHANGE setServerSSLContext(SSLContext server_ssl_ctx) {this.server_ssl_ctx = server_ssl_ctx; return this;}
+    public boolean          useNativeIfAvailable()                         {return use_native_if_available;}
+    public SSL_KEY_EXCHANGE useNativeIfAvailable(boolean b)                {use_native_if_available=b; return this;}
 
 
     public Address getServerLocation() {
@@ -160,23 +168,28 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
             }
         }
 
-        // Skip key store initialization if it was already provided or a ready-made SSLContext was already provided
-        if (key_store == null && (client_ssl_ctx == null || server_ssl_ctx == null)) {
-            key_store = KeyStore.getInstance(keystore_type != null ? keystore_type : KeyStore.getDefaultType());
-
-            InputStream input;
-            try {
-                input = new FileInputStream(keystore_name);
-            } catch (FileNotFoundException not_found) {
-                input = Util.getResourceAsStream(keystore_name, getClass());
+        // Create an SSLContext if one was not already supplied
+        if (client_ssl_ctx == null || server_ssl_ctx == null) {
+            SSLContextFactory sslContextFactory = new SSLContextFactory();
+            SSLContext sslContext = sslContextFactory
+                    .classLoader(this.getClass().getClassLoader())
+                    .keyStore(key_store)
+                    .keyStoreType(keystore_type)
+                    .keyStoreFileName(keystore_name)
+                    .keyStorePassword(keystore_password.toCharArray())
+                    .trustStoreFileName(keystore_name)
+                    .trustStorePassword(keystore_password.toCharArray())
+                    .sslProtocol(ssl_protocol).useNativeIfAvailable(use_native_if_available).getContext();
+            if (client_ssl_ctx == null) {
+                client_ssl_ctx = sslContext;
             }
-            if (input == null)
-                throw new FileNotFoundException(keystore_name);
-            key_store.load(input, keystore_password.toCharArray());
+            if (server_ssl_ctx == null) {
+                server_ssl_ctx = sslContext;
+            }
         }
 
         if(session_verifier == null && session_verifier_class != null) {
-            Class<? extends SessionVerifier> verifier_class=Util.loadClass(session_verifier_class, getClass());
+            Class<? extends SessionVerifier> verifier_class=(Class<? extends SessionVerifier>)Util.loadClass(session_verifier_class, getClass());
             session_verifier=verifier_class.getDeclaredConstructor().newInstance();
             if(session_verifier_arg != null)
                 session_verifier.init(session_verifier_arg);
@@ -323,8 +336,7 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
 
 
     protected SSLServerSocket createServerSocket() throws Exception {
-        SSLContext ctx= this.server_ssl_ctx != null ? this.server_ssl_ctx : getContext();
-        SSLServerSocketFactory sslServerSocketFactory=ctx.getServerSocketFactory();
+        SSLServerSocketFactory sslServerSocketFactory=this.server_ssl_ctx.getServerSocketFactory();
 
         SSLServerSocket sslServerSocket;
         for(int i=0; i <= port_range; i++) {
@@ -340,8 +352,7 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
     }
 
     protected SSLSocket createSocketTo(Address target) throws Exception {
-        SSLContext ctx= this.client_ssl_ctx != null ? this.client_ssl_ctx : getContext();
-        SSLSocketFactory sslSocketFactory=ctx.getSocketFactory();
+        SSLSocketFactory sslSocketFactory=this.client_ssl_ctx.getSocketFactory();
 
         if(target instanceof IpAddress)
             return createSocketTo((IpAddress)target, sslSocketFactory);
@@ -394,26 +405,6 @@ public class SSL_KEY_EXCHANGE extends KeyExchange {
         catch(Throwable t) {
             throw new IllegalStateException(String.format("failed connecting to %s: %s", dest, t.getMessage()));
         }
-    }
-
-
-    protected SSLContext getContext() throws Exception {
-        if(this.client_ssl_ctx != null)
-            return this.client_ssl_ctx;
-        // Create key manager
-        KeyManagerFactory keyManagerFactory=KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-        keyManagerFactory.init(key_store, keystore_password.toCharArray());
-        KeyManager[] km=keyManagerFactory.getKeyManagers();
-
-        // Create trust manager
-        TrustManagerFactory trustManagerFactory=TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        trustManagerFactory.init(key_store);
-        TrustManager[] tm=trustManagerFactory.getTrustManagers();
-
-        // Initialize SSLContext
-        SSLContext sslContext=SSLContext.getInstance("TLSv1");
-        sslContext.init(km, tm, null);
-        return this.client_ssl_ctx=sslContext;
     }
 }
 

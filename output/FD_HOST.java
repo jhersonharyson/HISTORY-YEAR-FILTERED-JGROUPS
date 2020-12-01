@@ -8,6 +8,7 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
@@ -26,7 +27,7 @@ import java.util.concurrent.TimeUnit;
  * <p/>
  * FD_HOST does <em>not</em> detect the crash or hanging of single members on the local host, but only checks liveness
  * of all other hosts in a cluster. Therefore it is meant to be used together with other failure detection protocols,
- * e.g. {@link org.jgroups.protocols.FD_ALL} and {@link org.jgroups.protocols.FD_SOCK}.
+ * e.g. {@link org.jgroups.protocols.FD_ALL3} and {@link org.jgroups.protocols.FD_SOCK}.
  * <p/>
  * This protocol would typically be used when multiple cluster members are running on the same physical box.
  * <p/>
@@ -42,13 +43,14 @@ public class FD_HOST extends Protocol {
       "If null, InetAddress.isReachable() will be used by default")
     protected String                                     cmd;
 
-    @Property(description="Max time (in ms) after which a host is suspected if it failed all liveness checks")
+    @Property(description="Max time (in ms) after which a host is suspected if it failed all liveness checks",
+    type=AttributeType.TIME)
     protected long                                       timeout=60000;
 
-    @Property(description="The interval (in ms) at which the hosts are checked for liveness")
+    @Property(description="The interval (in ms) at which the hosts are checked for liveness",type=AttributeType.TIME)
     protected long                                       interval=20000;
 
-    @Property(description="Max time (in ms) that a liveness check for a single host can take")
+    @Property(description="Max time (in ms) that a liveness check for a single host can take",type=AttributeType.TIME)
     protected long                                       check_timeout=3000;
 
     @Property(description="Uses TimeService to get the current time rather than System.currentTimeMillis. Might get " +
@@ -98,9 +100,10 @@ public class FD_HOST extends Protocol {
         suspect_history.clear();
     }
 
-    public void setCommand(String command) {
+    public FD_HOST setCommand(String command) {
         this.cmd=command;
         ping_command=this.cmd != null? new ExternalPingCommand(cmd) : new IsReachablePingCommand();
+        return this;
     }
 
     @ManagedOperation(description="Prints history of suspected hosts")
@@ -286,10 +289,10 @@ public class FD_HOST extends Protocol {
 
         num_suspect_events+=suspects.size();
 
-        final List<Address> eligible_mbrs=new ArrayList<>();
+        final List<Address> eligible_mbrs;
         synchronized(this) {
             suspected_mbrs.addAll(suspects);
-            eligible_mbrs.addAll(members);
+            eligible_mbrs=new ArrayList<>(members);
             eligible_mbrs.removeAll(suspected_mbrs);
             has_suspected_mbrs=!suspected_mbrs.isEmpty();
         }

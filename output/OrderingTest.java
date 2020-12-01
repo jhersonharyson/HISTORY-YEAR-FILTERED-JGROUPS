@@ -58,12 +58,12 @@ public class OrderingTest {
         return new JChannel(new SHARED_LOOPBACK(),
                             new SHARED_LOOPBACK_PING(),
                             new SHUFFLE().setUp(false).setDown(false).setMaxSize(200), // reorders messages
-                            new NAKACK2().setValue("use_mcast_xmit", false).setValue("discard_delivered_msgs", true),
+                            new NAKACK2().useMcastXmit(false).setDiscardDeliveredMsgs(true),
                             new UNICAST3(),
-                            new STABLE().setValue("max_bytes", 50000).setValue("desired_avg_gossip", 1000),
-                            new GMS().joinTimeout(500).setValue("print_local_addr", false),
-                            new UFC().setValue("max_credits", 2000000),
-                            new MFC().setValue("max_credits", 2000000),
+                            new STABLE().setMaxBytes(50000).setDesiredAverageGossip(1000),
+                            new GMS().setJoinTimeout(500).printLocalAddress(false),
+                            new UFC().setMaxCredits(2000000),
+                            new MFC().setMaxCredits(2000000),
                             new FRAG2())
           .name(String.valueOf((char)('A' +index)));
     }
@@ -169,7 +169,7 @@ public class OrderingTest {
             }
             for(int i=1; i <= NUM_MSGS; i++) {
                 try {
-                    Message msg=new Message(dest, i);
+                    Message msg=new BytesMessage(dest, i);
                     ch.send(msg);
                     if(i % PRINT == 0)
                         System.out.println(ch.getAddress() + ": " + i + " sent");
@@ -181,7 +181,7 @@ public class OrderingTest {
         }
     }
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected final ConcurrentMap<Address,Integer> map=new ConcurrentHashMap<>();
         protected int   received, num_errors;
         protected final String name;

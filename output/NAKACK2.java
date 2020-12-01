@@ -2,6 +2,7 @@ package org.jgroups.protocols.pbcast;
 
 import org.jgroups.*;
 import org.jgroups.annotations.*;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.protocols.TCP;
 import org.jgroups.protocols.TP;
 import org.jgroups.stack.DiagnosticsHandler;
@@ -56,7 +57,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
      * be costly as every member in the cluster will send a response
      */
     @Property(description="Use a multicast to request retransmission of missing messages")
-    protected boolean use_mcast_xmit_req=false;
+    protected boolean use_mcast_xmit_req;
 
 
     /**
@@ -64,7 +65,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
      * true, discard_delivered_msgs will be set to false
      */
     @Property(description="Ask a random member for retransmission of a missing message. Default is false")
-    protected boolean xmit_from_random_member=false;
+    protected boolean xmit_from_random_member;
 
 
     /**
@@ -76,7 +77,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     @Property(description="Should messages delivered to application be discarded")
     protected boolean discard_delivered_msgs=true;
 
-    @Property(description="Timeout to rebroadcast messages. Default is 2000 msec")
+    @Property(description="Timeout to rebroadcast messages. Default is 2000 msec",type=AttributeType.TIME)
     protected long    max_rebroadcast_timeout=2000;
 
     /** If true, logs messages discarded because received from other members */
@@ -87,7 +88,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     protected boolean log_not_found_msgs=true;
 
     @Property(description="Interval (in milliseconds) at which missing messages (from all retransmit buffers) " +
-      "are retransmitted")
+      "are retransmitted",type=AttributeType.TIME)
     protected long    xmit_interval=1000;
 
     @Property(description="Number of rows of the matrix in the retransmission table (only for experts)",writable=false)
@@ -102,7 +103,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     protected double  xmit_table_resize_factor=1.2;
 
     @Property(description="Number of milliseconds after which the matrix in the retransmission table " +
-      "is compacted (only for experts)",writable=false)
+      "is compacted (only for experts)",writable=false,type=AttributeType.TIME)
     protected long    xmit_table_max_compaction_time=10000;
 
     @Property(description="Size of the queue to hold messages received after creating the channel, but before being " +
@@ -112,11 +113,12 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     protected int     become_server_queue_size=50;
 
     @Property(description="Time during which identical warnings about messages from a non member will be suppressed. " +
-      "0 disables this (every warning will be logged). Setting the log level to ERROR also disables this.")
+      "0 disables this (every warning will be logged). Setting the log level to ERROR also disables this.",
+      type=AttributeType.TIME)
     protected long    suppress_time_non_member_warnings=60000;
 
     @Property(description="Max number of messages to ask for in a retransmit request. 0 disables this and uses " +
-      "the max bundle size in the transport")
+      "the max bundle size in the transport",type=AttributeType.SCALAR)
     protected int     max_xmit_req_size;
 
     @Property(description="If enabled, multicasts the highest sent seqno every xmit_interval ms. This is skipped if " +
@@ -133,41 +135,47 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     /* -------------------------------------------------- JMX ---------------------------------------------------------- */
 
 
-    @ManagedAttribute(description="Number of messages sent")
+    @ManagedAttribute(description="Number of messages sent",type=AttributeType.SCALAR)
     protected int                          num_messages_sent;
 
-    @ManagedAttribute(description="Number of messages received")
+    @ManagedAttribute(description="Number of messages received",type=AttributeType.SCALAR)
     protected int                          num_messages_received;
 
-    protected static final Message         DUMMY_OOB_MSG=new Message().setFlag(Message.Flag.OOB);
+    protected static final Message DUMMY_OOB_MSG=new EmptyMessage().setFlag(Message.Flag.OOB);
 
     // Accepts messages which are (1) non-null, (2) no DUMMY_OOB_MSGs and (3) not OOB_DELIVERED
-    protected final Predicate<Message> no_dummy_and_no_oob_delivered_msgs_and_no_dont_loopback_msgs= msg ->
+    protected final Predicate<Message> no_dummy_and_no_oob_delivered_msgs_and_no_dont_loopback_msgs=msg ->
       msg != null && msg != DUMMY_OOB_MSG
-        && (!msg.isFlagSet(Message.Flag.OOB) || msg.setTransientFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED))
-        && !(msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK) && this.local_addr != null && this.local_addr.equals(msg.getSrc()));
+        && (!msg.isFlagSet(Message.Flag.OOB) || msg.setFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED))
+        && !(msg.isFlagSet(Message.TransientFlag.DONT_LOOPBACK) && this.local_addr != null && this.local_addr.equals(msg.getSrc()));
 
-    protected static final Predicate<Message> dont_loopback_filter=msg -> msg != null && msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK);
+    protected static final Predicate<Message> dont_loopback_filter=msg -> msg != null && msg.isFlagSet(Message.TransientFlag.DONT_LOOPBACK);
 
     protected static final BiConsumer<MessageBatch,Message> BATCH_ACCUMULATOR=MessageBatch::add;
 
+    protected static final Table.Visitor<Message> DECR=(seqno, msg, row, col) -> {
+        if(msg instanceof Refcountable)
+            ((Refcountable<Message>)msg).decr();
+        return true;
+    };
 
-    @ManagedAttribute(description="Number of retransmit requests received")
+
+    @ManagedAttribute(description="Number of retransmit requests received",type=AttributeType.SCALAR)
     protected final LongAdder xmit_reqs_received=new LongAdder();
 
-    @ManagedAttribute(description="Number of retransmit requests sent")
+    @ManagedAttribute(description="Number of retransmit requests sent",type=AttributeType.SCALAR)
     protected final LongAdder xmit_reqs_sent=new LongAdder();
 
-    @ManagedAttribute(description="Number of retransmit responses received")
+    @ManagedAttribute(description="Number of retransmit responses received",type=AttributeType.SCALAR)
     protected final LongAdder xmit_rsps_received=new LongAdder();
 
-    @ManagedAttribute(description="Number of retransmit responses sent")
+    @ManagedAttribute(description="Number of retransmit responses sent",type=AttributeType.SCALAR)
     protected final LongAdder xmit_rsps_sent=new LongAdder();
 
     @ManagedAttribute(description="Is the retransmit task running")
     public boolean isXmitTaskRunning() {return xmit_task != null && !xmit_task.isDone();}
 
-    @ManagedAttribute(description="Number of messages from non-members")
+    @ManagedAttribute(description="Number of messages from non-members",type=AttributeType.SCALAR)
     public int getNonMemberMessages() {
         return suppress_log_non_member != null? suppress_log_non_member.getCache().size() : 0;
     }
@@ -244,22 +252,68 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     public long    getXmitRequestsSent()                   {return xmit_reqs_sent.sum();}
     public long    getXmitResponsesReceived()              {return xmit_rsps_received.sum();}
     public long    getXmitResponsesSent()                  {return xmit_rsps_sent.sum();}
-    public boolean isUseMcastXmit()                        {return use_mcast_xmit;}
-    public boolean isXmitFromRandomMember()                {return xmit_from_random_member;}
-    public boolean isDiscardDeliveredMsgs()                {return discard_delivered_msgs;}
-    public boolean getLogDiscardMessages()                 {return log_discard_msgs;}
-    public NAKACK2 setUseMcastXmit(boolean use_mcast_xmit) {this.use_mcast_xmit=use_mcast_xmit; return this;}
-    public NAKACK2 setUseMcastXmitReq(boolean flag)        {this.use_mcast_xmit_req=flag; return this;}
-    public NAKACK2 setLogDiscardMessages(boolean flag)     {log_discard_msgs=flag; return this;}
-    public NAKACK2 setLogNotFoundMessages(boolean flag)    {log_not_found_msgs=flag; return this;}
+    public boolean useMcastXmit()                          {return use_mcast_xmit;}
+    public NAKACK2 useMcastXmit(boolean u)                 {this.use_mcast_xmit=u; return this;}
+    public boolean useMcastXmitReq()                       {return use_mcast_xmit_req;}
+    public NAKACK2 useMcastXmitReq(boolean flag)           {this.use_mcast_xmit_req=flag; return this;}
+    public boolean xmitFromRandomMember()                  {return xmit_from_random_member;}
+    public NAKACK2 xmitFromRandomMember(boolean x)         {this.xmit_from_random_member=x; return this;}
+    public boolean discardDeliveredMsgs()                  {return discard_delivered_msgs;}
+    public NAKACK2 discardDeliveredMsgs(boolean d)         {this.discard_delivered_msgs=d; return this;}
+    public boolean logDiscardMessages()                    {return log_discard_msgs;}
+    public NAKACK2 logDiscardMessages(boolean l)           {this.log_discard_msgs=l; return this;}
+    public boolean logNotFoundMessages()                   {return log_not_found_msgs;}
+    public NAKACK2 logNotFoundMessages(boolean flag)       {log_not_found_msgs=flag; return this;}
     public NAKACK2 setResendLastSeqnoMaxTimes(int n)       {this.resend_last_seqno_max_times=n; return this;}
+    public int getResendLastSeqnoMaxTimes()                {return resend_last_seqno_max_times;}
 
     public NAKACK2 setXmitFromRandomMember(boolean xmit_from_random_member) {
         this.xmit_from_random_member=xmit_from_random_member; return this;
     }
-    public void    setDiscardDeliveredMsgs(boolean discard_delivered_msgs) {
+
+    public NAKACK2 setDiscardDeliveredMsgs(boolean discard_delivered_msgs) {
         this.discard_delivered_msgs=discard_delivered_msgs;
+        return this;
     }
+
+    public long getMaxRebroadcastTimeout() {return max_rebroadcast_timeout;}
+    public NAKACK2 setMaxRebroadcastTimeout(long m) {this.max_rebroadcast_timeout=m; return this;}
+
+    public long getXmitInterval() {return xmit_interval;}
+    public NAKACK2 setXmitInterval(long x) {this.xmit_interval=x; return this;}
+
+    public int getXmitTableNumRows() {return xmit_table_num_rows;}
+    public NAKACK2 setXmitTableNumRows(int x) {this.xmit_table_num_rows=x; return this;}
+
+    public int getXmitTableMsgsPerRow() {return xmit_table_msgs_per_row;}
+    public NAKACK2 setXmitTableMsgsPerRow(int x) {this.xmit_table_msgs_per_row=x; return this;}
+
+    public double getXmitTableResizeFactor() {return xmit_table_resize_factor;}
+    public NAKACK2 setXmitTableResizeFactor(double x) {this.xmit_table_resize_factor=x; return this;}
+
+    public long getXmitTableMaxCompactionTime() {return xmit_table_max_compaction_time;}
+    public NAKACK2 setXmitTableMaxCompactionTime(long x) {this.xmit_table_max_compaction_time=x; return this;}
+
+    public int getBecomeServerQueueSize() {return become_server_queue_size;}
+    public NAKACK2 setBecomeServerQueueSize(int b) {this.become_server_queue_size=b; return this;}
+
+    public long getSuppressTimeNonMemberWarnings() {return suppress_time_non_member_warnings;}
+    public NAKACK2 setSuppressTimeNonMemberWarnings(long s) {this.suppress_time_non_member_warnings=s; return this;}
+
+    public int getMaxXmitReqSize() {return max_xmit_req_size;}
+    public NAKACK2 setMaxXmitReqSize(int m) {this.max_xmit_req_size=m; return this;}
+
+    public boolean sendsCanBlock() {return sends_can_block;}
+    public NAKACK2 sendsCanBlock(boolean s) {this.sends_can_block=s; return this;}
+
+    public int getNumMessagesSent() {return num_messages_sent;}
+    public NAKACK2 setNumMessagesSent(int n) {this.num_messages_sent=n; return this;}
+
+    public int getNumMessagesReceived() {return num_messages_received;}
+    public NAKACK2 setNumMessagesReceived(int n) {this.num_messages_received=n; return this;}
+
+    public boolean isTrace() {return is_trace;}
+    public NAKACK2 isTrace(boolean i) {this.is_trace=i; return this;}
 
     public <T extends Protocol> T setLevel(String level) {
         T retval=super.setLevel(level);
@@ -267,7 +321,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         return retval;
     }
 
-    @ManagedAttribute(description="Actual size of the become_server_queue")
+    @ManagedAttribute(description="Actual size of the become_server_queue",type=AttributeType.SCALAR)
     public int getBecomeServerQueueSizeActual() {
         return become_server_queue != null? become_server_queue.size() : -1;
     }
@@ -282,7 +336,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     public void setTimer(TimeScheduler timer) {this.timer=timer;}
     
 
-    @ManagedAttribute(description="Total number of undelivered messages in all retransmit buffers")
+    @ManagedAttribute(description="Total number of undelivered messages in all retransmit buffers",type=AttributeType.SCALAR)
     public int getXmitTableUndeliveredMsgs() {
         int num=0;
         for(Table<Message> buf: xmit_table.values())
@@ -290,7 +344,8 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         return num;
     }
 
-    @ManagedAttribute(description="Total number of missing (= not received) messages in all retransmit buffers")
+    @ManagedAttribute(description="Total number of missing (= not received) messages in all retransmit buffers"
+      ,type=AttributeType.SCALAR)
     public int getXmitTableMissingMessages() {
         int num=0;
         for(Table<Message> buf: xmit_table.values())
@@ -312,7 +367,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     }
 
     @ManagedAttribute(description="Returns the number of bytes of all messages in all retransmit buffers. " +
-      "To compute the size, Message.getLength() is used")
+      "To compute the size, Message.getLength() is used",type=AttributeType.BYTES)
     public long getSizeOfAllMessages() {
         long retval=0;
         for(Table<Message> buf: xmit_table.values())
@@ -321,7 +376,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
     }
 
     @ManagedAttribute(description="Returns the number of bytes of all messages in all retransmit buffers. " +
-      "To compute the size, Message.size() is used")
+      "To compute the size, Message.size() is used",type=AttributeType.BYTES)
     public long getSizeOfAllMessagesInclHeaders() {
         long retval=0;
         for(Table<Message> buf: xmit_table.values())
@@ -559,6 +614,8 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         Address dest=msg.getDest();
         if(dest != null || msg.isFlagSet(Message.Flag.NO_RELIABILITY))
             return down_prot.down(msg); // unicast address: not null and not mcast, pass down unchanged
+        if(msg instanceof Refcountable)
+            ((Refcountable<Message>)msg).incr();
         send(msg);
         return null;    // don't pass down the stack
     }
@@ -604,7 +661,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
             case NakAckHeader2.XMIT_REQ:
                 try {
-                    SeqnoList missing=Util.streamableFromBuffer(SeqnoList::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                    SeqnoList missing=msg.getObject();
                     if(missing != null)
                         handleXmitReq(msg.getSrc(), missing, hdr.sender);
                 }
@@ -618,7 +675,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                 return null;
 
             case NakAckHeader2.HIGHEST_SEQNO:
-                handleHighestSeqno(msg.src(), hdr.seqno);
+                handleHighestSeqno(msg.getSrc(), hdr.seqno);
                 return null;
 
             default:
@@ -652,7 +709,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                     break;
                 case NakAckHeader2.XMIT_REQ:
                     try {
-                        SeqnoList missing=Util.streamableFromBuffer(SeqnoList::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                        SeqnoList missing=msg.getObject();
                         if(missing != null)
                             handleXmitReq(msg.getSrc(), missing, hdr.sender);
                     }
@@ -754,10 +811,10 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         if(buf == null) // discard message if there is no entry for local_addr
             return;
 
-        if(msg.src() == null)
-            msg.src(local_addr); // this needs to be done so we can check whether the message sender is the local_addr
+        if(msg.getSrc() == null)
+            msg.setSrc(local_addr); // this needs to be done so we can check whether the message sender is the local_addr
 
-        boolean dont_loopback_set=msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK);
+        boolean dont_loopback_set=msg.isFlagSet(Message.TransientFlag.DONT_LOOPBACK);
         msg_id=seqno.incrementAndGet();
         long sleep=10;
         do {
@@ -814,7 +871,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         if(added && msg.isFlagSet(Message.Flag.OOB)) {
             if(loopback) { // sent by self
                 msg=buf.get(hdr.seqno); // we *have* to get a message, because loopback means we didn't add it to win !
-                if(msg != null && msg.isFlagSet(Message.Flag.OOB) && msg.setTransientFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED))
+                if(msg != null && msg.isFlagSet(Message.Flag.OOB) && msg.setFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED))
                     deliver(msg, sender, hdr.seqno, "OOB message");
             }
             else // sent by someone else
@@ -846,7 +903,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                 for(LongTuple<Message> tuple: msgs) {
                     long    seq=tuple.getVal1();
                     Message msg=buf.get(seq); // we *have* to get the message, because loopback means we didn't add it to win !
-                    if(msg != null && msg.isFlagSet(Message.Flag.OOB) && msg.setTransientFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED))
+                    if(msg != null && msg.isFlagSet(Message.Flag.OOB) && msg.setFlagIfAbsent(Message.TransientFlag.OOB_DELIVERED))
                         oob_batch.add(msg);
                 }
             }
@@ -959,7 +1016,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
     /**
      * Flushes the queue. Done in a separate thread as we don't want to block the
-     * {@link ClientGmsImpl#installView(org.jgroups.View,org.jgroups.util.Digest)} method (called when a view is installed).
+     * {@link GMS#installView(org.jgroups.View,org.jgroups.util.Digest)} method (called when a view is installed).
      */
     protected void flushBecomeServerQueue() {
         if(become_server_queue != null && !become_server_queue.isEmpty()) {
@@ -1015,7 +1072,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
             return;
         }
 
-        Message xmit_msg=msg.copy(true, true).dest(dest); // copy payload and headers
+        Message xmit_msg=msg.copy(true, true).setDest(dest); // copy payload and headers
         NakAckHeader2 hdr=xmit_msg.getHeader(id);
         NakAckHeader2 newhdr=hdr.copy();
         newhdr.type=NakAckHeader2.XMIT_RSP; // change the type in the copy from MSG --> XMIT_RSP
@@ -1139,7 +1196,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                     rebroadcast_done.await(sleep, TimeUnit.MILLISECONDS);
                     wait_time-=(System.currentTimeMillis() - start);
                 }
-                catch(InterruptedException e) {
+                catch(InterruptedException ignored) {
                 }
             }
             finally {
@@ -1155,7 +1212,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
         try {
             cancel_rebroadcasting=isGreaterThanOrEqual(tmp, rebroadcast_digest);
         }
-        catch(Throwable t) {
+        catch(Throwable ignored) {
             ;
         }
         finally {
@@ -1381,6 +1438,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
 
             // delete *delivered* msgs that are stable (all messages with seqnos <= seqno)
             if(hd >= 0 && buf != null) {
+                buf.forEach(buf.getLow(), hd, DECR);
                 log.trace("%s: deleting msgs <= %s from %s", local_addr, hd, member);
                 buf.purge(hd);
             }
@@ -1409,8 +1467,7 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
                 dest=random_member;
         }
 
-        Message retransmit_msg=new Message(dest).setBuffer(Util.streamableToBuffer(missing_msgs))
-          .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
+        Message retransmit_msg=new ObjectMessage(dest, missing_msgs).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
           .putHeader(this.id, NakAckHeader2.createXmitRequestHeader(sender));
 
         log.trace("%s --> %s: XMIT_REQ(%s)", local_addr, dest, missing_msgs);
@@ -1518,9 +1575,9 @@ public class NAKACK2 extends Protocol implements DiagnosticsHandler.ProbeHandler
             }
             else
                 num_resends++;
-            Message msg=new Message(null).putHeader(id, NakAckHeader2.createHighestSeqnoHeader(seqno))
+            Message msg=new EmptyMessage(null).putHeader(id, NakAckHeader2.createHighestSeqnoHeader(seqno))
               .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL)
-              .setTransientFlag(Message.TransientFlag.DONT_LOOPBACK); // we don't need to receive our own broadcast
+              .setFlag(Message.TransientFlag.DONT_LOOPBACK); // we don't need to receive our own broadcast
             down_prot.down(msg);
         }
     }

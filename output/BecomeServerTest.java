@@ -2,10 +2,7 @@ package org.jgroups.tests.byteman;
 
 import org.jboss.byteman.contrib.bmunit.BMNGRunner;
 import org.jboss.byteman.contrib.bmunit.BMScript;
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
-import org.jgroups.ReceiverAdapter;
+import org.jgroups.*;
 import org.jgroups.protocols.PING;
 import org.jgroups.protocols.SHARED_LOOPBACK;
 import org.jgroups.protocols.UNICAST3;
@@ -35,21 +32,18 @@ public class BecomeServerTest extends BMNGRunner {
     @BMScript(dir="scripts/BecomeServerTest", value="testSendingOfMsgsOnUnconnectedChannel")
     public void testSendingOfMsgsOnUnconnectedChannel() throws Exception {
         a=createChannel("A");
-        a.setReceiver(new ReceiverAdapter() {
+        a.setReceiver(new Receiver() {
             public void receive(Message msg)  {
                 System.out.println("A: received message from " + msg.getSrc() + ": " + msg.getObject());
             }
         });
         a.connect("BecomeServerTest");
 
-        new Thread("MsgSender-A") {
-            public void run() {
-                sendMessage(a, "hello from A"); // will be blocked by byteman rendezvous
-            }
-        }.start();
+        Thread t=new Thread(() -> sendMessage(a, "hello from A"), // will be blocked by byteman rendezvous
+                            "MsgSender-A");
 
         b=createChannel("B");
-        b.setReceiver(new ReceiverAdapter() {
+        b.setReceiver(new Receiver() {
             public void receive(Message msg) {
                 System.out.println("B: received message from " + msg.getSrc() + ": " + msg.getObject());
                 if(msg.getSrc().equals(a.getAddress())) {
@@ -63,6 +57,8 @@ public class BecomeServerTest extends BMNGRunner {
             }
         });
 
+        t.start();
+
         b.connect("BecomeServerTest");
 
         Util.waitUntilAllChannelsHaveSameView(20000, 1000, a, b);
@@ -73,7 +69,7 @@ public class BecomeServerTest extends BMNGRunner {
 
     protected void sendMessage(JChannel ch, String message) {
         try {
-            ch.send(new Message(null, message).setFlag(Message.Flag.OOB));
+            ch.send(new ObjectMessage(null, message).setFlag(Message.Flag.OOB));
         }
         catch(Exception e) {
             e.printStackTrace(System.err);
@@ -82,12 +78,12 @@ public class BecomeServerTest extends BMNGRunner {
 
 
 
-    protected JChannel createChannel(String name) throws Exception {
+    protected static JChannel createChannel(String name) throws Exception {
         JChannel ch=new JChannel(new SHARED_LOOPBACK(),
                                        new PING(),
-                                       new NAKACK2().setValue("become_server_queue_size", 10),
+                                       new NAKACK2().setBecomeServerQueueSize(10),
                                        new UNICAST3(),
-                                       new GMS().setValue("print_local_addr", false).setValue("join_timeout", 500));
+                                       new GMS().printLocalAddress(false).setJoinTimeout((500)));
         ch.setName(name);
         return ch;
     }

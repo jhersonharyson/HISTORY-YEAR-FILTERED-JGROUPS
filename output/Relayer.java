@@ -168,7 +168,7 @@ public class Relayer {
 
 
 
-    protected class Bridge extends ReceiverAdapter {
+    protected class Bridge implements Receiver {
         protected JChannel     channel;
         protected final String cluster_name;
         protected View         view;
@@ -201,7 +201,7 @@ public class Relayer {
                 case RELAY2.Relay2Header.TOPO_REQ:
                     RELAY2.Relay2Header rsp_hdr=new RELAY2.Relay2Header(RELAY2.Relay2Header.TOPO_RSP)
                       .setSites(relay.printLocalTopology());
-                    Message topo_rsp=new Message(msg.src()).putHeader(relay.getId(), rsp_hdr);
+                    Message topo_rsp=new EmptyMessage(msg.src()).putHeader(relay.getId(), rsp_hdr);
                     try {
                         channel.send(topo_rsp);
                     }

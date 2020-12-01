@@ -13,7 +13,6 @@ import org.jgroups.util.Util;
 
 import java.io.DataInput;
 import java.net.InetAddress;
-import java.nio.ByteBuffer;
 import java.util.*;
 
 
@@ -157,9 +156,7 @@ public class RouterStub extends ReceiverAdapter implements Comparable<RouterStub
             return;
         // if(!isConnected()) throw new Exception ("not connected");
         synchronized(get_members_map) {
-            List<MembersNotification> set=get_members_map.get(group);
-            if(set == null)
-                get_members_map.put(group, set=new ArrayList<>());
+            List<MembersNotification> set=get_members_map.computeIfAbsent(group, k -> new ArrayList<>());
             set.add(callback);
         }
         try {
@@ -210,11 +207,6 @@ public class RouterStub extends ReceiverAdapter implements Comparable<RouterStub
         }
     }
 
-    @Override
-    public void receive(Address sender, ByteBuffer buf) {
-        Util.bufferToArray(sender, buf, this);
-    }
-
     public void receive(Address sender, DataInput in) throws Exception {
         GossipData data=new GossipData();
         data.readFrom(in);
@@ -231,7 +223,7 @@ public class RouterStub extends ReceiverAdapter implements Comparable<RouterStub
     }
 
     @Override
-    public void connectionClosed(Connection conn, String reason) {
+    public void connectionClosed(Connection conn) {
         if(close_listener != null)
             close_listener.closed(this);
     }

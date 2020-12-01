@@ -123,7 +123,7 @@ public class TUNNEL_Test extends ChannelTestBase {
         channel.disconnect();
         channel.connect(GROUP);
 
-        channel.send(new Message(null, "payload"));
+        channel.send(new BytesMessage(null, "payload"));
 
         Message msg=msgPromise.getResult(20000);
         assert msg != null;
@@ -233,7 +233,7 @@ public class TUNNEL_Test extends ChannelTestBase {
         channel.disconnect();
         channel.connect(GROUP);
 
-        channel.send(new Message(null, "payload"));
+        channel.send(new BytesMessage(null, "payload"));
 
         Message msg=msgPromise.getResult(20000);
         assert msg != null;
@@ -246,22 +246,20 @@ public class TUNNEL_Test extends ChannelTestBase {
     }
 
     protected JChannel createTunnelChannel(String name, boolean include_failure_detection) throws Exception {
-        TUNNEL tunnel=new TUNNEL().setValue("bind_addr", gossip_router_bind_addr);
-        FD_ALL fd_all=new FD_ALL();
-        fd_all.setTimeout(2000);
-        fd_all.setInterval(500);
+        TUNNEL tunnel=new TUNNEL().setBindAddress(gossip_router_bind_addr);
+        FD_ALL3 fd_all=new FD_ALL3().setTimeout(2000).setInterval(500);
         tunnel.setGossipRouterHosts(gossip_router_hosts);
         List<Protocol> protocols=new ArrayList<>(Arrays.asList(tunnel, new PING(),
-                                                               new MERGE3().setValue("min_interval", 1000)
-                                                                 .setValue("max_interval", 3000)));
+                                                               new MERGE3().setMinInterval(1000)
+                                                                 .setMaxInterval(3000)));
         if(include_failure_detection) {
             List<Protocol> tmp=new ArrayList<>(2);
             tmp.add(fd_all);
             tmp.add(new VERIFY_SUSPECT());
             protocols.addAll(tmp);
         }
-        protocols.addAll(Arrays.asList(new NAKACK2().setValue("use_mcast_xmit", false), new UNICAST3(), new STABLE(),
-                                       new GMS().joinTimeout(1000)));
+        protocols.addAll(Arrays.asList(new NAKACK2().useMcastXmit(false),
+                                       new UNICAST3(), new STABLE(), new GMS().setJoinTimeout(1000)));
         JChannel ch=new JChannel(protocols);
         if(name != null)
             ch.setName(name);
@@ -270,7 +268,7 @@ public class TUNNEL_Test extends ChannelTestBase {
 
 
 
-    private static class PromisedMessageListener extends ReceiverAdapter {
+    private static class PromisedMessageListener implements Receiver {
         private final Promise<Message> promise;
 
         public PromisedMessageListener(Promise<Message> promise) {

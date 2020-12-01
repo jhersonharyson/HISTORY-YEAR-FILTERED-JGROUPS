@@ -1,11 +1,12 @@
 package org.jgroups.protocols;
 
+
 import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.PhysicalAddress;
-import org.jgroups.annotations.Experimental;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.GossipData;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.RouterStub;
@@ -36,7 +37,6 @@ import java.util.Objects;
  * @author Bela Ban
  * @author Vladimir Blagojevic
  */
-@Experimental
 public class TUNNEL extends TP implements RouterStub.StubReceiver {
 
     public interface TUNNELPolicy {
@@ -46,7 +46,8 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
 
     /* ----------------------------------------- Properties -------------------------------------------------- */
 
-    @Property(description = "Interval in msec to attempt connecting back to router in case of torn connection. Default is 5000 msec")
+    @Property(description = "Interval in msec to attempt connecting back to router in case of torn connection",
+      type=AttributeType.TIME)
     protected long    reconnect_interval=5000;
 
     @Property(description="Should TCP no delay flag be turned on")
@@ -71,6 +72,14 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
     public TUNNEL() {
     }
 
+
+    public long    getReconnectInterval()       {return reconnect_interval;}
+    public TUNNEL  setReconnectInterval(long r) {this.reconnect_interval=r; return this;}
+    public boolean isTcpNodelay()               {return tcp_nodelay;}
+    public TUNNEL  setTcpNodelay(boolean nd)    {this.tcp_nodelay=nd;return this;}
+    public boolean useNio()                     {return use_nio;}
+    public TUNNEL  useNio(boolean use_nio)      {this.use_nio=use_nio; return this;}
+
     /** We can simply send a message with dest == null and the GossipRouter will take care of routing it to all
      * members in the cluster */
     public boolean supportsMulticasting() {
@@ -78,12 +87,13 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
     }
 
 
-    public void setGossipRouterHosts(String hosts) throws UnknownHostException {
+    public TUNNEL setGossipRouterHosts(String hosts) throws UnknownHostException {
         gossip_routers.clear();
         // if we get passed value of List<SocketAddress>#toString() we have to strip []
         if(hosts.startsWith("[") && hosts.endsWith("]"))
             hosts=hosts.substring(1, hosts.length() - 1);
         gossip_router_hosts=hosts; //.addAll(Util.parseCommaDelimitedHosts2(hosts, port_range));
+        return this;
     }
 
     @ManagedOperation(description="Prints all stubs and the reconnect list")
@@ -110,20 +120,15 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
         return "TUNNEL";
     }
 
-    public long getReconnectInterval() {
-        return reconnect_interval;
-    }
 
-    public void setReconnectInterval(long reconnect_interval) {
-        this.reconnect_interval = reconnect_interval;
-    }
 
     /*------------------------------ Protocol interface ------------------------------ */
 
-    public synchronized void setTUNNELPolicy(TUNNELPolicy policy) {
+    public synchronized TUNNEL setTUNNELPolicy(TUNNELPolicy policy) {
         if (policy == null)
             throw new IllegalArgumentException("Tunnel policy has to be non null");
         tunnel_policy = policy;
+        return this;
     }
 
     public void init() throws Exception {
@@ -139,8 +144,9 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
         sock=getSocketFactory().createDatagramSocket("jgroups.tunnel.ucast_sock", bind_port, bind_addr);
     }
     
-    public void destroy() {        
-        stubManager.destroyStubs();
+    public void destroy() {
+        if(stubManager != null)
+            stubManager.destroyStubs();
         Util.close(sock);
         super.destroy();
     }
@@ -165,8 +171,13 @@ public class TUNNEL extends TP implements RouterStub.StubReceiver {
                 String logical_name=org.jgroups.util.NameCache.get(local);
                 stubManager = new RouterStubManager(this,group,local, logical_name, physical_addr, getReconnectInterval()).useNio(this.use_nio);
                 for(InetSocketAddress gr : gossip_routers) {
-                    stubManager.createAndRegisterStub(new IpAddress(bind_addr, bind_port), new IpAddress(gr.getAddress(), gr.getPort()))
-                      .receiver(this).set("tcp_nodelay", tcp_nodelay);
+                    try {
+                        stubManager.createAndRegisterStub(new IpAddress(bind_addr, bind_port), new IpAddress(gr.getAddress(), gr.getPort()))
+                          .receiver(this).set("tcp_nodelay", tcp_nodelay);
+                    }
+                    catch(Throwable t) {
+                        log.error("%s: failed creating stub to %s: %s", local, bind_addr + ":" + bind_port, t);
+                    }
                 }
                 stubManager.connectStubs();
                 break;

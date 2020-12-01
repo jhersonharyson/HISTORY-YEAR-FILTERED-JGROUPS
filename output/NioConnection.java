@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 
 /**
  * An NIO based impl of {@link Connection}
@@ -304,13 +305,15 @@ public class NioConnection extends Connection {
 
     protected void setSocketParameters(Socket client_sock) throws SocketException {
         try {
-            client_sock.setSendBufferSize(server.sendBufferSize());
+            if(server.sendBufferSize() > 0)
+                client_sock.setSendBufferSize(server.sendBufferSize());
         }
         catch(IllegalArgumentException ex) {
             server.log().error("%s: exception setting send buffer to %d bytes: %s", server.localAddress(), server.sendBufferSize(), ex);
         }
         try {
-            client_sock.setReceiveBufferSize(server.receiveBufferSize());
+            if(server.receiveBufferSize() > 0)
+                client_sock.setReceiveBufferSize(server.receiveBufferSize());
         }
         catch(IllegalArgumentException ex) {
             server.log().error("%s: exception setting receive buffer to %d bytes: %s", server.localAddress(), server.receiveBufferSize(), ex);
@@ -338,7 +341,7 @@ public class NioConnection extends Connection {
             out.writeShort(Version.version);
             out.writeShort(addr_size); // address size
             local_addr.writeTo(out);
-            ByteBuffer buf=out.getByteBuffer();
+            ByteBuffer buf=ByteBuffer.wrap(out.buffer(), 0, out.position());
             send(buf, false);
             updateLastAccessed();
         }
@@ -466,7 +469,7 @@ public class NioConnection extends Connection {
         }
 
         protected void _run() {
-            final Condition is_data_available=() -> data_available || !running;
+            final BooleanSupplier is_data_available=() -> data_available || !running;
             while(running) {
                 for(;;) { // try to receive as many msgs as possible, until no more msgs are ready or the conn is closed
                     try {
@@ -474,7 +477,7 @@ public class NioConnection extends Connection {
                             break;
                     }
                     catch(Exception ex) {
-                        server.closeConnection(NioConnection.this, ex);
+                        server.closeConnection(NioConnection.this);
                         state(State.done);
                         return;
                     }

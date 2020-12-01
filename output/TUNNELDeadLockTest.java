@@ -1,9 +1,6 @@
 package org.jgroups.tests;
 
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
-import org.jgroups.ReceiverAdapter;
+import org.jgroups.*;
 import org.jgroups.protocols.PING;
 import org.jgroups.protocols.TUNNEL;
 import org.jgroups.protocols.UNICAST3;
@@ -87,7 +84,7 @@ public class TUNNELDeadLockTest {
         receivedCnt=0;
         channel=createTunnelChannel("A");
         channel.connect(TUNNELDeadLockTest.class.getSimpleName());
-        channel.setReceiver(new ReceiverAdapter() {
+        channel.setReceiver(new Receiver() {
 
             @Override
             public void receive(Message msg) {
@@ -117,13 +114,12 @@ public class TUNNELDeadLockTest {
         }).start();
 
         Boolean result=promise.getResult(mainTimeout);
-        if(result == null)
-            assert false: String.format("failed to receive %d messages in %d ms (%d messages received so far)",
-                                        msgCount, mainTimeout, receivedCnt);
+        assert result != null : String.format("failed to receive %d messages in %d ms (%d messages received so far)",
+                                              msgCount, mainTimeout, receivedCnt);
     }
 
     protected JChannel createTunnelChannel(String name) throws Exception {
-        TUNNEL tunnel=(TUNNEL)new TUNNEL().setValue("bind_addr", InetAddress.getByName(bind_addr));
+        TUNNEL tunnel=new TUNNEL().setBindAddress(InetAddress.getByName(bind_addr));
         tunnel.setGossipRouterHosts(gossip_router_hosts);
 
         JChannel ch=new JChannel(tunnel,
@@ -131,7 +127,7 @@ public class TUNNELDeadLockTest {
                                  new NAKACK2(),
                                  new UNICAST3(),
                                  new STABLE(),
-                                 new GMS().joinTimeout(1000)).name(name);
+                                 new GMS().setJoinTimeout(1000)).name(name);
         if(name != null)
             ch.setName(name);
         return ch;

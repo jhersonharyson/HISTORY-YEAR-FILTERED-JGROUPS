@@ -1,9 +1,6 @@
 package org.jgroups.protocols.dns;
 
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Message;
-import org.jgroups.PhysicalAddress;
+import org.jgroups.*;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.protocols.Discovery;
@@ -13,6 +10,7 @@ import org.jgroups.stack.IpAddress;
 import org.jgroups.util.NameCache;
 import org.jgroups.util.Responses;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -31,7 +29,8 @@ public class DNS_PING extends Discovery {
     @Property(description = "DNS Record type")
     protected String  dns_record_type = DEFAULT_DNS_RECORD_TYPE;
 
-    @Property(description = "DNS query for fetching members")
+    @Property(description = "A comma-separated list of DNS queries for fetching members",
+      systemProperty="jgroups.dns.dns_query")
     protected String  dns_query;
 
     @Property(description="For SRV records returned by the DNS query, the non-0 ports returned by DNS are" +
@@ -77,12 +76,33 @@ public class DNS_PING extends Discovery {
         return true;
     }
 
+    /**
+     * Gets a list of IP addresses for the provided DNS query list and record type.
+     *
+     * @param dns_query A comma-separated list of DNS queries. Must not be {@code null}.
+     * @param dns_record_type The DNS record type.
+     *
+     * @return A list of IP addresses corresponding to the provided DNS query list and record type. An empty list is
+     * returned if the provided DNS query does not resolve to any IP addresses.
+     *
+     * @throws NullPointerException if dns_query is {@code null}.
+     */
+    List<Address> getMembers(final String dns_query, final DNSResolver.DNSRecordType dns_record_type) {
+        final List<Address> dns_discovery_members = new ArrayList<>();
+        for (final String query : dns_query.split(",")) {
+            final List<Address> addresses = dns_resolver.resolveIps(query.trim(), dns_record_type);
+            if (addresses != null) {
+                dns_discovery_members.addAll(addresses);
+            }
+        }
+        return dns_discovery_members;
+    }
+
     @ManagedOperation(description="Executes the DNS query and returns the result in string format")
     public String fetchFromDns() {
         long start=System.currentTimeMillis();
-        List<Address> dns_discovery_members = dns_resolver.resolveIps(dns_query,
-                                                                      DNSResolver.DNSRecordType.valueOf(dns_record_type));
-        String ret=dns_discovery_members != null? dns_discovery_members.toString() : null;
+        List<Address> dns_discovery_members = getMembers(dns_query, DNSResolver.DNSRecordType.valueOf(dns_record_type));
+        String ret=dns_discovery_members != null && !dns_discovery_members.isEmpty() ? dns_discovery_members.toString() : null;
         long time=System.currentTimeMillis()-start;
         return String.format("%s\n(took %d ms)\n", ret, time);
     }
@@ -95,16 +115,14 @@ public class DNS_PING extends Discovery {
         Set<PhysicalAddress>      cluster_members=new LinkedHashSet<>();
         DNSResolver.DNSRecordType record_type=DNSResolver.DNSRecordType.valueOf(dns_record_type);
 
-        if (!use_ip_addrs || !initial_discovery) {
-            physical_addr = (PhysicalAddress) down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
-            // https://issues.jboss.org/browse/JGRP-1670
-            data = new PingData(local_addr, false, NameCache.get(local_addr), physical_addr);
-            if (members != null && members.size() <= max_members_in_discovery_request)
-                data.mbrs(members);
-        }
+        physical_addr = (PhysicalAddress) down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
+        // https://issues.jboss.org/browse/JGRP-1670
+        data = new PingData(local_addr, false, NameCache.get(local_addr), physical_addr);
+        if (members != null && members.size() <= max_members_in_discovery_request)
+            data.mbrs(members);
 
         long start=System.currentTimeMillis();
-        List<Address> dns_discovery_members = dns_resolver.resolveIps(dns_query, record_type);
+        List<Address> dns_discovery_members = getMembers(dns_query, record_type);
         long time=System.currentTimeMillis()-start;
         if(log.isDebugEnabled()) {
             if(dns_discovery_members != null && !dns_discovery_members.isEmpty())
@@ -144,10 +162,10 @@ public class DNS_PING extends Discovery {
         for (Address addr : cluster_members) {
 
             // the message needs to be DONT_BUNDLE, see explanation above
-            Message msg = new Message(addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB)
+            final Message msg = new BytesMessage(addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB)
               .putHeader(this.id, hdr);
             if (data != null)
-                msg.setBuffer(marshal(data));
+                msg.setArray(marshal(data));
 
             if (async_discovery_use_separate_thread_per_request)
                 timer.execute(() -> sendDiscoveryRequest(msg), sends_can_block);

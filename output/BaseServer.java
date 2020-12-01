@@ -6,6 +6,7 @@ import org.jgroups.annotations.GuardedBy;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.stack.IpAddress;
@@ -44,12 +45,13 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
     protected InetAddress                     client_bind_addr;
     protected int                             client_bind_port;
     protected boolean                         defer_client_binding;
-    @ManagedAttribute(description="Time (ms) after which an idle connection is closed. 0 disables connection reaping",writable=true)
+    @ManagedAttribute(description="Time (ms) after which an idle connection is closed. 0 disables connection reaping",
+      writable=true,type=AttributeType.TIME)
     protected long                            conn_expire_time;  // ns
-    @ManagedAttribute(description="Size (bytes) of the receive channel/socket",writable=true)
-    protected int                             recv_buf_size=120000;
-    @ManagedAttribute(description="Size (bytes) of the send channel/socket",writable=true)
-    protected int                             send_buf_size=60000;
+    @ManagedAttribute(description="Size (bytes) of the receive channel/socket",writable=true,type=AttributeType.BYTES)
+    protected int                             recv_buf_size;
+    @ManagedAttribute(description="Size (bytes) of the send channel/socket",writable=true,type=AttributeType.BYTES)
+    protected int                             send_buf_size;
 
     @ManagedAttribute(description="When A connects to B, B reuses the same TCP connection to send data to A")
     protected boolean                         use_peer_connections;
@@ -59,8 +61,9 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
     protected TimeService                     time_service;
 
 
-    protected BaseServer(ThreadFactory f, SocketFactory sf) {
+    protected BaseServer(ThreadFactory f, SocketFactory sf, int recv_buf_size) {
         this.factory=f;
+        this.recv_buf_size=recv_buf_size;
         if(sf != null)
             this.socket_factory=sf;
     }
@@ -232,7 +235,7 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
 
 
     @Override
-    public void connectionClosed(Connection conn, String reason) {
+    public void connectionClosed(Connection conn) {
         removeConnectionIfPresent(conn.peerAddress(), conn);
     }
 
@@ -318,9 +321,9 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
         Util.close(previous); // closes previous connection (if present)
     }
 
-    public void closeConnection(Connection conn, Throwable ex) {
+    public void closeConnection(Connection conn) {
         Util.close(conn);
-        notifyConnectionClosed(conn, ex.toString());
+        notifyConnectionClosed(conn);
         removeConnectionIfPresent(conn != null? conn.peerAddress() : null, conn);
     }
 
@@ -401,10 +404,10 @@ public abstract class BaseServer implements Closeable, ConnectionListener {
         copy.clear();
     }
 
-    public void notifyConnectionClosed(Connection conn, String cause) {
+    public void notifyConnectionClosed(Connection conn) {
         for(ConnectionListener l: conn_listeners) {
             try {
-                l.connectionClosed(conn, cause);
+                l.connectionClosed(conn);
             }
             catch(Throwable t) {
                 log.warn("failed notifying listener %s of connection close: %s", l, t);

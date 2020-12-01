@@ -5,6 +5,7 @@ import org.jgroups.annotations.Experimental;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.util.*;
 
@@ -26,18 +27,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 @MBean(description="Simple TCP based transport")
 public class SimpleTCP extends TP {
 
-    @Property(description="size in bytes of TCP receiver window")
+    @Property(description="size in bytes of TCP receiver window",type=AttributeType.BYTES)
     protected int recv_buf_size=500000;
 
-    @Property(description="size in bytes of TCP send window")
+    @Property(description="size in bytes of TCP send window",type=AttributeType.BYTES)
     protected int send_buf_size=500000;
 
     @Property(description="Size of the buffer of the BufferedInputStream in TcpConnection. A read always tries to read " +
-      "ahead as much data as possible into the buffer. 0: default size")
+      "ahead as much data as possible into the buffer. 0: default size",type=AttributeType.BYTES)
     protected int buffered_input_stream_size=8192;
 
     @Property(description="Size of the buffer of the BufferedOutputStream in TcpConnection. Smaller messages are " +
-      " buffered until this size is exceeded or flush() is called. Bigger messages are sent immediately. 0: default size")
+      " buffered until this size is exceeded or flush() is called. Bigger messages are sent immediately. 0: default size",
+      type=AttributeType.BYTES)
     protected int buffered_output_stream_size=8192;
 
 
@@ -70,7 +72,8 @@ public class SimpleTCP extends TP {
 
     public void init() throws Exception {
         super.init();
-        srv_sock=Util.createServerSocket(new DefaultSocketFactory(), "srv-sock", bind_addr, bind_port, bind_port+50);
+        srv_sock=Util.createServerSocket(new DefaultSocketFactory(), "srv-sock", bind_addr,
+                                         bind_port, bind_port+50, recv_buf_size);
         acceptor=new Acceptor(bind_addr, bind_port);
     }
 
@@ -127,9 +130,9 @@ public class SimpleTCP extends TP {
     }
 
     protected Object _down(Message msg) throws Exception {
-        Address dest=msg.dest();
+        Address dest=msg.getDest();
         setSourceAddress(msg); // very important !! listToBuffer() will fail with a null src address !!
-        int size=(int)msg.size();
+        int size=msg.size();
         ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(size + Global.INT_SIZE);
         out.writeInt(size);
         msg.writeTo(out);
@@ -171,8 +174,10 @@ public class SimpleTCP extends TP {
         if(conn != null)
             return conn;
         Socket dest_sock=new Socket();
-        dest_sock.setSendBufferSize(send_buf_size);
-        dest_sock.setReceiveBufferSize(recv_buf_size);
+        if(send_buf_size > 0)
+            dest_sock.setSendBufferSize(send_buf_size);
+        if(recv_buf_size > 0)
+            dest_sock.setReceiveBufferSize(recv_buf_size);
         dest_sock.connect(dest);
 
         Connection c=connections.putIfAbsent(dest, conn=new Connection(dest_sock).start());
@@ -219,8 +224,10 @@ public class SimpleTCP extends TP {
         public void run() {
             try {
                 Socket client_sock=srv_sock.accept();
-                client_sock.setSendBufferSize(send_buf_size);
-                client_sock.setReceiveBufferSize(recv_buf_size);
+                if(send_buf_size > 0)
+                    client_sock.setSendBufferSize(send_buf_size);
+                if(recv_buf_size > 0)
+                    client_sock.setReceiveBufferSize(recv_buf_size);
                 Connection c;
                 Connection existing=connections.putIfAbsent(client_sock.getRemoteSocketAddress(),
                                                             c=new Connection(client_sock).start());
@@ -279,7 +286,7 @@ public class SimpleTCP extends TP {
                     buffer=new byte[len];
                 in.readFully(buffer, 0, len);
                 ByteArrayDataInputStream input=new ByteArrayDataInputStream(buffer, 0, len);
-                Message msg=new Message(false);
+                Message msg=new BytesMessage();
                 msg.readFrom(input);
                 thread_pool.execute(() -> up_prot.up(msg));
             }

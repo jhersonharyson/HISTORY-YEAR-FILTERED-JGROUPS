@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
  * @author Bela Ban
  */
 public class ReplicatedHashMap<K, V> extends
-        AbstractMap<K, V> implements ConcurrentMap<K, V>, MembershipListener, StateListener, ReplicatedMap<K, V>, Closeable {
+        AbstractMap<K, V> implements ConcurrentMap<K, V>, Receiver, ReplicatedMap<K, V>, Closeable {
 
     public interface Notification<K, V> {
         void entrySet(K key, V value);
@@ -121,8 +121,8 @@ public class ReplicatedHashMap<K, V> extends
     }
 
     protected final void init() {
-        disp = new RpcDispatcher(channel, this).setMethodLookup(id -> methods.get(id));
-        disp.setMembershipListener(this).setStateListener(this);
+        disp=new RpcDispatcher(channel, this).setMethodLookup(id -> methods.get(id));
+        disp.setReceiver(this);
     }
 
     public boolean isBlockingUpdates() {
@@ -290,7 +290,7 @@ public class ReplicatedHashMap<K, V> extends
      */
     public boolean remove(Object key, Object value) {
         Object val = get(key);
-        boolean removed = val != null && value != null && val.equals(value);
+        boolean removed =Objects.equals(val, value);
         try {
             MethodCall call = new MethodCall(REMOVE_IF_EQUALS, key, value);
             disp.callRemoteMethods(null, call, call_options);
@@ -305,7 +305,7 @@ public class ReplicatedHashMap<K, V> extends
      */
     public boolean replace(K key, V oldValue, V newValue) {
         Object val = get(key);
-        boolean replaced = val != null && oldValue != null && val.equals(oldValue);
+        boolean replaced=Objects.equals(val, oldValue);
         try {
             MethodCall call = new MethodCall(REPLACE_IF_EQUALS, key, oldValue, newValue);
             disp.callRemoteMethods(null, call, call_options);
@@ -451,19 +451,6 @@ public class ReplicatedHashMap<K, V> extends
         }
     }
 
-    /**
-     * Called when a member is suspected
-     */
-    public void suspect(Address suspected_mbr) {
-        ;
-    }
-
-    /**
-     * Block sending and receiving of messages until ViewAccepted is called
-     */
-    public void block() {
-    }
-
     void sendViewChangeNotifications(View view, List<Address> new_mbrs, List<Address> old_mbrs) {
         if ((notifs.isEmpty()) || (old_mbrs == null) || (new_mbrs == null)) {
             return;
@@ -475,8 +462,6 @@ public class ReplicatedHashMap<K, V> extends
         notifs.forEach(notif -> notif.viewChange(view, joined, left));
     }
 
-    public void unblock() {
-    }
 
     /**
      * Creates a synchronized facade for a ReplicatedMap. All methods which
@@ -691,33 +676,33 @@ public class ReplicatedHashMap<K, V> extends
 
     @Override
     public Set<Entry<K, V>> entrySet() {
-        return new AbstractSet<Entry<K, V>>() {
+        return new AbstractSet<>() {
             @Override
             public void clear() {
                 ReplicatedHashMap.this.clear();
             }
 
             @Override
-            public Iterator<Entry<K, V>> iterator() {
-                final Iterator<Entry<K, V>> it = map.entrySet().iterator();
-                return new Iterator<Entry<K, V>>() {
-                    Entry<K, V> cur = null;
+            public Iterator<Entry<K,V>> iterator() {
+                final Iterator<Entry<K,V>> it=map.entrySet().iterator();
+                return new Iterator<>() {
+                    Entry<K,V> cur=null;
 
                     public boolean hasNext() {
                         return it.hasNext();
                     }
 
-                    public Entry<K, V> next() {
-                        cur = it.next();
+                    public Entry<K,V> next() {
+                        cur=it.next();
                         return cur;
                     }
 
                     public void remove() {
-                        if (cur == null) {
+                        if(cur == null) {
                             throw new IllegalStateException();
                         }
                         ReplicatedHashMap.this.remove(cur.getKey());
-                        cur = null;
+                        cur=null;
                     }
 
                 };

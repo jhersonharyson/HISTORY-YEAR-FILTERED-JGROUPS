@@ -1,5 +1,6 @@
 package org.jgroups.tests;
 
+import org.jgroups.BytesMessage;
 import org.jgroups.Global;
 import org.jgroups.Message;
 import org.jgroups.util.*;
@@ -21,7 +22,7 @@ import java.util.stream.IntStream;
 @Test(groups=Global.FUNCTIONAL)
 public class TableTest {
 
-    protected static final Predicate<Message> dont_loopback_filter=msg -> msg != null && msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK);
+    protected static final Predicate<Message> dont_loopback_filter=msg -> msg != null && msg.isFlagSet(Message.TransientFlag.DONT_LOOPBACK);
 
 
     public static void testCreation() {
@@ -53,12 +54,12 @@ public class TableTest {
     public void testAddListWithConstValue() {
         Table<Integer> buf=new Table<>(3, 10, 0);
         List<LongTuple<Integer>> msgs=createList(1,2,3,4,5,6,7,8,9,10);
-        final Integer DUMMY=0;
+        final int DUMMY=0;
         boolean rc=buf.add(msgs, false, DUMMY);
         System.out.println("buf = " + buf);
         assert rc;
         assert buf.size() == 10;
-        List<Integer> list=buf.removeMany(true, 0, element -> element.hashCode() == DUMMY.hashCode());
+        List<Integer> list=buf.removeMany(true, 0, element -> element.hashCode() == Integer.hashCode(DUMMY));
         System.out.println("list = " + list);
         assert list.size() == 10;
         for(int num: list)
@@ -133,7 +134,7 @@ public class TableTest {
 
     public void testAdditionListWithOffset() {
         Table<Integer> table=new Table<>(3, 10, 100);
-        long seqnos[]={101,105,109,110,111,119,120,129};
+        long[] seqnos={101,105,109,110,111,119,120,129};
         List<LongTuple<Integer>> msgs=createList(seqnos);
         System.out.println("table: " + table.dump());
         assert table.add(msgs);
@@ -149,7 +150,7 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 5, 0);
         List<LongTuple<Integer>> msgs=new ArrayList<>();
         for(int i=1; i < 100; i++)
-            msgs.add(new LongTuple<>((long)i,i));
+            msgs.add(new LongTuple<>(i, i));
         table.add(msgs, false);
         System.out.println("table = " + table);
         int num_resizes=table.getNumResizes();
@@ -174,7 +175,7 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 500, 0);
         List<LongTuple<Integer>> msgs=new ArrayList<>();
         for(int i=1; i < 100; i++)
-            msgs.add(new LongTuple<>((long)i,i));
+            msgs.add(new LongTuple<>(i, i));
         table.add(msgs, false);
         System.out.println("table = " + table);
         int num_resizes=table.getNumResizes();
@@ -689,9 +690,13 @@ public class TableTest {
         Table<Integer> table=new Table<>(3, 10, 0);
         for(int i=1; i <= 10; i++)
             table.add(i, i);
-        List<Integer> list=table.removeMany(true, 3, new Predicate<Integer>() {
+        List<Integer> list=table.removeMany(true, 3, new Predicate<>() {
             int cnt=0;
-            public boolean test(Integer element) {return ++cnt <= 2;}});
+
+            public boolean test(Integer element) {
+                return ++cnt <= 2;
+            }
+        });
         System.out.println("list = " + list);
         System.out.println("table = " + table);
         assert list.size() == 2;
@@ -712,7 +717,7 @@ public class TableTest {
     public void testRemoveManyIntoMessageBatch() {
         Table<Message> table=new Table<>(3, 10, 0);
         for(int i=1; i <= 10; i++)
-            table.add(i, new Message(null, "hello"));
+            table.add(i, new BytesMessage(null, "hello"));
 
         MessageBatch batch=new MessageBatch(table.size());
         Supplier<MessageBatch> batch_creator=() -> batch;
@@ -724,7 +729,7 @@ public class TableTest {
         assert batch.size() == 10;
         assert result != null && result == batch;
 
-        IntStream.rangeClosed(11,15).forEach(seqno -> table.add(seqno, new Message(null, "test")));
+        IntStream.rangeClosed(11,15).forEach(seqno -> table.add(seqno, new BytesMessage(null, "test")));
 
         batch.reset();
         result=table.removeMany(true, 0, null, batch_creator, accumulator);
@@ -1473,12 +1478,12 @@ public class TableTest {
     }
 
 
-    protected void _testSeqnoOverflow(long seqno, final int delta) {
+    protected static void _testSeqnoOverflow(long seqno, final int delta) {
         long orig_seqno=seqno;
         Table<Message> win=new Table<>(3, 10, seqno);
 
         for(int i=1; i <= delta; i++) {
-            Message msg=new Message(null, "hello");
+            Message msg=new BytesMessage(null, "hello");
             win.add(++seqno, msg);
         }
         System.out.println("win = " + win);
@@ -1492,11 +1497,11 @@ public class TableTest {
     }
 
 
-    protected Message msg(int num) {return new Message(null, num);}
+    protected Message msg(int num) {return new BytesMessage(null, num);}
     protected Message msg(int num, boolean set_dont_loopback) {
         Message msg=msg(num);
         if(set_dont_loopback)
-            msg.setTransientFlag(Message.TransientFlag.DONT_LOOPBACK);
+            msg.setFlag(Message.TransientFlag.DONT_LOOPBACK);
         return msg;
     }
 
@@ -1510,7 +1515,7 @@ public class TableTest {
 
     protected static void addAndGet(Table<Integer> table, int ... seqnos) {
         for(int seqno: seqnos) {
-            boolean added=table.add((long)seqno, seqno);
+            boolean added=table.add(seqno, seqno);
             assert added;
             Integer val=table.get(seqno);
             assert val != null && val == seqno;

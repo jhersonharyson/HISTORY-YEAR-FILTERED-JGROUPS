@@ -4,6 +4,7 @@ package org.jgroups.protocols;
 
 import org.jgroups.*;
 import org.jgroups.annotations.*;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.BoundedList;
 import org.jgroups.util.MessageBatch;
@@ -41,13 +42,17 @@ import java.util.function.Supplier;
  * is reduced.
  *
  * @author Bela Ban
+ * @deprecated Use {@link FD_ALL2} or {@link FD_ALL3} instead
  */
+@Deprecated(forRemoval=true)
+@RecommendedForUpgrade
 @MBean(description="Failure detection based on simple heartbeat protocol")
 public class FD extends Protocol {
     
     /* -----------------------------------------    Properties     -------------------------------------------------- */
 
-    @Property(description="Timeout to suspect a node P if neither a heartbeat nor data were received from P.")
+    @Property(description="Timeout to suspect a node P if neither a heartbeat nor data were received from P.",
+      type=AttributeType.TIME)
     protected long                       timeout=3000;
 
     @Property(description="Number of times to send an are-you-alive message")
@@ -113,10 +118,16 @@ public class FD extends Protocol {
     @ManagedAttribute(description="Number of suspect events received")
     public int getNumSuspectEventsGenerated() {return num_suspect_events;}
     public long getTimeout() {return timeout;}
-    public void setTimeout(long timeout) {this.timeout=timeout;}
+    public FD setTimeout(long timeout) {this.timeout=timeout; return this;}
     public int getMaxTries() {return max_tries;}
-    public void setMaxTries(int max_tries) {this.max_tries=max_tries;}
+    public FD  setMaxTries(int max_tries) {this.max_tries=max_tries; return this;}
     public int getCurrentNumTries() {return num_tries.get();}
+
+    public boolean msgCountsAsHeartbeat() {return msg_counts_as_heartbeat;}
+    public FD msgCountsAsHeartbeat(boolean m) {this.msg_counts_as_heartbeat=m; return this;}
+
+
+
 
     @ManagedOperation(description="Print suspect history")
     public String printSuspectHistory() {
@@ -230,9 +241,9 @@ public class FD extends Protocol {
                 log.trace("%s: received suspect message: %s", local_addr, hdr);
 
                 for(Address mbr: hdr.mbrs) {
-                    if(local_addr != null && mbr.equals(local_addr)) {
+                    if(mbr.equals(local_addr)) {
                         log.warn("%s: I was suspected by %s; ignoring the SUSPECT message and sending back a HEARTBEAT_ACK",
-                                 local_addr, msg.src());
+                                 local_addr, msg.getSrc());
                         sendHeartbeatResponse(msg.getSrc());
                         continue;
                     }
@@ -308,7 +319,7 @@ public class FD extends Protocol {
                 hdr.mbrs=new ArrayList<>();
                 hdr.mbrs.add(evt.getArg());
                 hdr.from=local_addr;
-                Message unsuspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(id, hdr);
+                Message unsuspect_msg=new EmptyMessage().setFlag(Message.Flag.INTERNAL).putHeader(id, hdr);
                 log.trace("%s: broadcasting UNSUSPECT message (mbrs=%s)", local_addr, hdr.mbrs);
                 down_prot.down(unsuspect_msg);
                 break;
@@ -322,7 +333,7 @@ public class FD extends Protocol {
 
 
     protected void sendHeartbeatResponse(Address dest) {
-        Message hb_ack=new Message(dest).setFlag(Message.Flag.INTERNAL);
+        Message hb_ack=new EmptyMessage(dest).setFlag(Message.Flag.INTERNAL);
         FdHeader tmp_hdr=new FdHeader(FdHeader.HEARTBEAT_ACK);
         tmp_hdr.from=local_addr;
         hb_ack.putHeader(this.id, tmp_hdr);
@@ -457,7 +468,7 @@ public class FD extends Protocol {
             }
 
             // 1. send heartbeat request
-            Message hb_req=new Message(dest).setFlag(Message.Flag.INTERNAL).putHeader(id, new FdHeader(FdHeader.HEARTBEAT));
+            Message hb_req=new EmptyMessage(dest).setFlag(Message.Flag.INTERNAL).putHeader(id, new FdHeader(FdHeader.HEARTBEAT));
             log.trace("%s: sending are-you-alive msg to %s", local_addr, dest);
             down_prot.down(hb_req);
             num_heartbeats++;
@@ -612,7 +623,7 @@ public class FD extends Protocol {
                 hdr.mbrs=new ArrayList<>(suspected_members);
                 hdr.from=local_addr;
             }
-            Message suspect_msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(id, hdr);
+            Message suspect_msg=new EmptyMessage().setFlag(Message.Flag.INTERNAL).putHeader(id, hdr);
             log.trace("%s: broadcasting SUSPECT message (suspects=%s)", local_addr, suspected_members);
             down_prot.down(suspect_msg);
         }

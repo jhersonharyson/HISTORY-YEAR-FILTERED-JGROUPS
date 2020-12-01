@@ -9,6 +9,7 @@ import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.blocks.cs.*;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
@@ -18,6 +19,7 @@ import org.jgroups.util.*;
 import java.io.DataInput;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -60,13 +62,16 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     @ManagedAttribute(description="server port on which the GossipRouter accepts client connections", writable=true)
     protected int                  port=12001;
     
-    @ManagedAttribute(description="time (in msecs) until gossip entry expires. 0 disables expiration.", writable=true)
+    @ManagedAttribute(description="time (in msecs) until gossip entry expires. 0 disables expiration.",
+      writable=true,type=AttributeType.TIME)
     protected long                 expiry_time;
 
-    @Property(description="Time (in ms) for setting SO_LINGER on sockets returned from accept(). 0 means do not set SO_LINGER")
+    @Property(description="Time (in ms) for setting SO_LINGER on sockets returned from accept(). 0 means do not set SO_LINGER"
+      ,type=AttributeType.TIME)
     protected long                 linger_timeout=2000L;
 
-    @Property(description="Time (in ms) for SO_TIMEOUT on sockets returned from accept(). 0 means don't set SO_TIMEOUT")
+    @Property(description="Time (in ms) for SO_TIMEOUT on sockets returned from accept(). 0 means don't set SO_TIMEOUT"
+      ,type=AttributeType.TIME)
     protected long                 sock_read_timeout;
 
     protected ThreadFactory        thread_factory=new DefaultThreadFactory("gossip", false, true);
@@ -75,6 +80,9 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
     @Property(description="The max queue size of backlogged connections")
     protected int                  backlog=1000;
+
+    @Property(description="Initial size of the TCP/NIO receive buffer (in bytes)")
+    protected int                  recv_buf_size;
 
     @Property(description="Expose GossipRouter via JMX",writable=false)
     protected boolean              jmx=true;
@@ -88,7 +96,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     @Property(description="Dumps messages (dest/src/length/headers to stdout if enabled")
     protected boolean              dump_msgs;
 
-    protected BaseServer                                        server;
+    protected BaseServer           server;
     protected final AtomicBoolean  running=new AtomicBoolean(false);
     protected Timer                timer;
     protected final Log            log=LogFactory.getLog(this.getClass());
@@ -103,7 +111,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     public GossipRouter(String bind_addr, int local_port) {
         this.port=local_port;
         try {
-            this.bind_addr=InetAddress.getByName(bind_addr);
+            this.bind_addr=bind_addr != null? InetAddress.getByName(bind_addr) : null;
         }
         catch(UnknownHostException e) {
             log.error("failed setting bind address %s: %s", bind_addr, e);
@@ -126,6 +134,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     public GossipRouter  lingerTimeout(long t)              {this.linger_timeout=t; return this;}
     public long          socketReadTimeout()                {return sock_read_timeout;}
     public GossipRouter  socketReadTimeout(long t)          {this.sock_read_timeout=t; return this;}
+    public int           recvBufferSize()                   {return recv_buf_size;}
+    public GossipRouter  recvBufferSize(int s)              {recv_buf_size=s; return this;}
     public ThreadFactory threadPoolFactory()                {return thread_factory;}
     public GossipRouter  threadPoolFactory(ThreadFactory f) {this.thread_factory=f; return this;}
     public SocketFactory socketFactory()                    {return socket_factory;}
@@ -154,18 +164,19 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
      */
     @ManagedOperation(description="Lifecycle operation. Called after create(). When this method is called, "
             + "the managed attributes have already been set. Brings the Router into a fully functional state.")
-    public void start() throws Exception {
+    public GossipRouter start() throws Exception {
         if(!running.compareAndSet(false, true))
-            return;
+            return this;
         if(jmx)
             JmxConfigurator.register(this, Util.getMBeanServer(), "jgroups:name=GossipRouter");
 
-        server=use_nio? new NioServer(thread_factory, socket_factory, bind_addr, port, port, null, 0)
-          : new TcpServer(thread_factory, socket_factory, bind_addr, port, port, null, 0);
+        server=use_nio? new NioServer(thread_factory, socket_factory, bind_addr, port, port, null, 0, recv_buf_size)
+          : new TcpServer(thread_factory, socket_factory, bind_addr, port, port, null, 0, recv_buf_size);
         server.receiver(this);
         server.start();
         server.addConnectionListener(this);
         Runtime.getRuntime().addShutdownHook(new Thread(GossipRouter.this::stop));
+        return this;
     }
 
 
@@ -216,11 +227,15 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
 
     @Override public void receive(Address sender, byte[] buf, int offset, int length) {
-        ByteArrayDataInputStream in=new ByteArrayDataInputStream(buf, offset, length);
+        receive(sender, ByteBuffer.wrap(buf, offset, length));
+    }
+
+    @Override
+    public void receive(Address sender, ByteBuffer buf) {
+        int original_pos=buf.position();
         GossipType type;
         try {
-            type=GossipType.values()[in.readByte()];
-            in.position(Global.BYTE_SIZE);
+            type=GossipType.values()[buf.get()];
         }
         catch(Exception ex) {
             log.error("failed reading data from %s: %s", sender, ex);
@@ -229,6 +244,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
         switch(type) {
             case REGISTER:
+                DataInput in=new ByteArrayDataInputStream(buf);
                 handleRegister(sender, in);
                 break;
 
@@ -236,12 +252,13 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
                 // we already read the type, now read group and dest (minimal info required to route the message)
                 // this way, we don't need to copy the buffer
                 try {
+                    in=new ByteArrayDataInputStream(buf);
                     String group=Bits.readString(in);
                     Address dest=Util.readAddress(in);
-                    route(group, dest, buf, offset, length);
+                    route(group, dest, buf.position(original_pos));
 
                     if(dump_msgs) {
-                        ByteArrayDataInputStream input=new ByteArrayDataInputStream(buf, offset, length);
+                        ByteArrayDataInputStream input=new ByteArrayDataInputStream(buf);
                         GossipData data=new GossipData();
                         data.readFrom(input);
                         dump(data);
@@ -254,10 +271,12 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
                 break;
 
             case GET_MBRS:
+                in=new ByteArrayDataInputStream(buf);
                 handleGetMembersRequest(sender, in);
                 break;
 
             case UNREGISTER:
+                in=new ByteArrayDataInputStream(buf);
                 handleUnregister(in);
                 break;
         }
@@ -274,8 +293,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
             case MESSAGE:
                 try {
-                    // inefficient: we should transfer bytes from input stream to output stream, but Server currently
-                    // doesn't provide a way of reading from an input stream
+                    // inefficient: we should transfer bytes from input stream to output stream, but that is not
+                    // available natively
                     if((request=readRequest(in, type)) != null) {
                         ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.serializedSize());
                         request.writeTo(out);
@@ -364,7 +383,7 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
     }
 
     @Override
-    public void connectionClosed(Connection conn, String reason) {
+    public void connectionClosed(Connection conn) {
         removeFromAddressMappings(conn.peerAddress());
     }
 
@@ -477,6 +496,23 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
         }
     }
 
+    protected void route(String group, Address dest, ByteBuffer buf) {
+        ConcurrentMap<Address,Entry> map=address_mappings.get(group);
+        if(map == null)
+            return;
+        if(dest != null) { // unicast
+            Entry entry=map.get(dest);
+            if(entry != null)
+                sendToMember(entry.client_addr, buf);
+            else
+                log.warn("dest %s in cluster %s not found", dest, group);
+        }
+        else {             // multicast - send to all members in group
+            Set<Map.Entry<Address,Entry>> dests=map.entrySet();
+            sendToAllMembersInGroup(dests, buf);
+        }
+    }
+
 
 
     protected void sendToAllMembersInGroup(Set<Map.Entry<Address,Entry>> dests, GossipData request) {
@@ -519,12 +555,36 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
         }
     }
 
+    protected void sendToAllMembersInGroup(Set<Map.Entry<Address,Entry>> dests, ByteBuffer buf) {
+        for(Map.Entry<Address,Entry> entry: dests) {
+            Entry e=entry.getValue();
+            if(e == null /* || e.phys_addr == null */)
+                continue;
+
+            try {
+                server.send(e.client_addr, buf.duplicate());
+            }
+            catch(Exception ex) {
+                log.error("failed sending message to %s (%s): %s", e.logical_name, e.phys_addr, ex);
+            }
+        }
+    }
+
 
     protected void sendToMember(Address dest, GossipData request) {
         ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.serializedSize());
         try {
             request.writeTo(out);
             server.send(dest, out.buffer(), 0, out.position());
+        }
+        catch(Exception ex) {
+            log.error("failed sending unicast message to %s: %s", dest, ex);
+        }
+    }
+
+    protected void sendToMember(Address dest, ByteBuffer buf) {
+        try {
+            server.send(dest, buf);
         }
         catch(Exception ex) {
             log.error("failed sending unicast message to %s: %s", dest, ex);
@@ -576,14 +636,15 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
 
     public static void main(String[] args) throws Exception {
         int port=12001;
-        int backlog=0;
+        int backlog=0, recv_buf_size=0;
         long soLinger=-1;
         long soTimeout=-1;
         long expiry_time=60000;
 
+        long start=System.currentTimeMillis();
         GossipRouter router=null;
         String bind_addr=null;
-        boolean jmx=true, nio=true, suspects=true, dump_msgs=false;
+        boolean jmx=false, nio=true, suspects=true, dump_msgs=false;
 
         for(int i=0; i < args.length; i++) {
             String arg=args[i];
@@ -597,6 +658,10 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
             }
             if("-backlog".equals(arg)) {
                 backlog=Integer.parseInt(args[++i]);
+                continue;
+            }
+            if("-recv_buf_size".equals(args[i])) {
+                recv_buf_size=Integer.parseInt(args[++i]);
                 continue;
             }
             if("-expiry".equals(arg)) {
@@ -635,13 +700,16 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
           .jmx(jmx).expiryTime(expiry_time)
           .useNio(nio)
           .backlog(backlog)
+          .recvBufferSize(recv_buf_size)
           .socketReadTimeout(soTimeout)
           .lingerTimeout(soLinger)
           .emitSuspectEvents(suspects)
           .dumpMessages(dump_msgs);
         router.start();
+        long time=System.currentTimeMillis()-start;
         IpAddress local=(IpAddress)router.localAddress();
-        System.out.printf("\nGossipRouter listening on %s:%s\n", bind_addr != null? bind_addr : "0.0.0.0",  local.getPort());
+        System.out.printf("\nGossipRouter started in %d ms listening on %s:%s\n",
+                          time, bind_addr != null? bind_addr : "0.0.0.0",  local.getPort());
     }
 
 
@@ -655,7 +723,8 @@ public class GossipRouter extends ReceiverAdapter implements ConnectionListener 
         System.out.println("                              greater than zero or the default of 1000 will be");
         System.out.println("                              used.");
         System.out.println();
-        System.out.println("    -jmx <true|false>       - Expose attributes and operations via JMX.");
+        System.out.println("    -jmx <true|false>       - Expose attributes and operations via JMX.\n");
+        System.out.println("    -recv_buf_size <bytes>  - Sets the receive buffer");
         System.out.println();
         System.out.println("    -solinger <msecs>       - Time for setting SO_LINGER on connections. 0");
         System.out.println("                              means do not set SO_LINGER. Must be greater than");

@@ -81,12 +81,12 @@ public class UNICAST_RetransmitTest {
             UNICAST3 ucast=ch.getProtocolStack().findProtocol(UNICAST3.class);
             if(ucast == null)
                 throw new IllegalStateException("UNICAST3 not present in the stack");
-            ucast.setValue("max_xmit_req_size", 5000);
+            ucast.setMaxXmitReqSize(5000);
         }
     }
 
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected final List<Integer> list=new ArrayList<>();
 
         public void receive(Message msg) {
@@ -98,14 +98,14 @@ public class UNICAST_RetransmitTest {
     }
 
 
-    protected void stopRetransmission(JChannel ... channels) {
+    protected static void stopRetransmission(JChannel... channels) {
         for(JChannel ch: channels) {
             UNICAST3 ucast=ch.getProtocolStack().findProtocol(UNICAST3.class);
             ucast.stopRetransmitTask();
         }
     }
 
-    protected void startRetransmission(JChannel ... channels) {
+    protected static void startRetransmission(JChannel... channels) {
         for(JChannel ch: channels) {
             UNICAST3 ucast=ch.getProtocolStack().findProtocol(UNICAST3.class);
             ucast.startRetransmitTask();
@@ -133,7 +133,7 @@ public class UNICAST_RetransmitTest {
         protected boolean discard=false;
 
         public Object down(Message msg) {
-            if(msg.dest() != null) {
+            if(msg.getDest() != null) {
                 discard=!discard;
                 if(discard)
                     return null;

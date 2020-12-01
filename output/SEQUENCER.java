@@ -70,6 +70,8 @@ public class SEQUENCER extends Protocol {
     /** Used for each resent message to wait until the message has been received */
     protected final Promise<Long>               ack_promise=new Promise<>();
 
+    protected MessageFactory                    msg_factory;
+
 
 
     @Property(description="Size of the set to store received seqnos (for duplicate checking)")
@@ -98,15 +100,19 @@ public class SEQUENCER extends Protocol {
     @ManagedAttribute(description="Number of messages in the forward-table")
     public int getForwardTableSize() {return forward_table.size();}
 
-    public void setThreshold(int new_threshold) {this.threshold=new_threshold;}
+    public SEQUENCER setThreshold(int new_threshold) {this.threshold=new_threshold; return this;}
 
-    public void setDeliveryTableMaxSize(int size) {delivery_table_max_size=size;}
+    public SEQUENCER setDeliveryTableMaxSize(int size) {delivery_table_max_size=size; return this;}
 
     @ManagedOperation
     public void resetStats() {
         forwarded_msgs=bcast_msgs=received_forwards=received_bcasts=delivered_bcasts=0L;
     }
 
+    public void init() throws Exception {
+        super.init();
+        msg_factory=getTransport().getMessageFactory();
+    }
 
     public void start() throws Exception {
         super.start();
@@ -227,10 +233,12 @@ public class SEQUENCER extends Protocol {
     }
 
     public void up(MessageBatch batch) {
-        for(Message msg: batch) {
+        MessageIterator it=batch.iterator();
+        while(it.hasNext()) {
+            Message msg=it.next();
             if(msg.isFlagSet(Message.Flag.NO_TOTAL_ORDER) || msg.isFlagSet(Message.Flag.OOB) || msg.getHeader(id) == null)
                 continue;
-            batch.remove(msg);
+            it.remove();
 
             // simplistic implementation
             try {
@@ -319,9 +327,9 @@ public class SEQUENCER extends Protocol {
             for(Map.Entry<Long,Message> entry: forward_table.entrySet()) {
                 Long key=entry.getKey();
                 Message msg=entry.getValue();
-                Buffer buf;
+                ByteArray buf;
                 try {
-                    buf=Util.streamableToBuffer(msg);
+                    buf=Util.messageToBuffer(msg);
                 }
                 catch(Exception e) {
                     log.error(Util.getMessage("FlushingBroadcastingFailed"), e);
@@ -329,7 +337,7 @@ public class SEQUENCER extends Protocol {
                 }
 
                 SequencerHeader hdr=new SequencerHeader(SequencerHeader.WRAPPED_BCAST, key);
-                Message forward_msg=new Message(null, buf).putHeader(this.id, hdr);
+                Message forward_msg=new BytesMessage(null, buf).putHeader(this.id, hdr);
                 if(log.isTraceEnabled())
                     log.trace(local_addr + ": flushing (broadcasting) " + local_addr + "::" + key);
                 down_prot.down(forward_msg);
@@ -351,11 +359,11 @@ public class SEQUENCER extends Protocol {
         while(flushing && running && !forward_table.isEmpty()) {
             Map.Entry<Long,Message> entry=forward_table.firstEntry();
             final Long key=entry.getKey();
-            Message    msg=entry.getValue();
-            Buffer     buf;
+            Message msg=entry.getValue();
+            ByteArray buf;
 
             try {
-                buf=Util.streamableToBuffer(msg);
+                buf=Util.messageToBuffer(msg);
             }
             catch(Exception e) {
                 log.error(Util.getMessage("FlushingBroadcastingFailed"), e);
@@ -364,7 +372,7 @@ public class SEQUENCER extends Protocol {
 
             while(flushing && running && !forward_table.isEmpty()) {
                 SequencerHeader hdr=new SequencerHeader(SequencerHeader.FLUSH, key);
-                Message forward_msg=new Message(coord, buf).putHeader(this.id,hdr).setFlag(Message.Flag.DONT_BUNDLE);
+                Message forward_msg=new BytesMessage(coord, buf).putHeader(this.id, hdr).setFlag(Message.Flag.DONT_BUNDLE);
                 if(log.isTraceEnabled())
                     log.trace(local_addr + ": flushing (forwarding) " + local_addr + "::" + key + " to coord " + coord);
                 ack_promise.reset();
@@ -419,7 +427,7 @@ public class SEQUENCER extends Protocol {
         byte type=flush? SequencerHeader.FLUSH : SequencerHeader.FORWARD;
         try {
             SequencerHeader hdr=new SequencerHeader(type, seqno);
-            Message forward_msg=new Message(target, Util.streamableToBuffer(msg)).putHeader(this.id,hdr);
+            Message forward_msg=new BytesMessage(target, Util.messageToBuffer(msg)).putHeader(this.id, hdr);
             down_prot.down(forward_msg);
             forwarded_msgs++;
         }
@@ -436,7 +444,7 @@ public class SEQUENCER extends Protocol {
         }
         else {
             SequencerHeader new_hdr=new SequencerHeader(SequencerHeader.WRAPPED_BCAST, seqno);
-            bcast_msg=new Message(null, msg.getRawBuffer(), msg.getOffset(), msg.getLength()).putHeader(this.id, new_hdr);
+            bcast_msg=new BytesMessage(null, msg.getArray(), msg.getOffset(), msg.getLength()).putHeader(this.id, new_hdr);
             if(resend) {
                 new_hdr.flush_ack=true;
                 bcast_msg.setFlag(Message.Flag.DONT_BUNDLE);
@@ -454,11 +462,11 @@ public class SEQUENCER extends Protocol {
 
     /**
      * Unmarshal the original message (in the payload) and then pass it up (unless already delivered)
-     * @param msg
      */
     protected void unwrapAndDeliver(final Message msg, boolean flush_ack) {
         try {
-            Message msg_to_deliver=Util.streamableFromBuffer(Message::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+            // Message msg_to_deliver=Util.streamableFromBuffer(BytesMessage::new, msg.getArray(), msg.getOffset(), msg.getLength());
+            Message msg_to_deliver=Util.messageFromBuffer(msg.getArray(), msg.getOffset(), msg.getLength(), msg_factory);
             SequencerHeader hdr=msg_to_deliver.getHeader(this.id);
             if(flush_ack)
                 hdr.flush_ack=true;

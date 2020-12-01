@@ -82,7 +82,7 @@ public class SequencerFailoverTest extends BMNGRunner {
 
         // Now send message 1 (it'll end up in the forward-queue)
         System.out.println("-- sending message 1");
-        Message msg=new Message(null, 1);
+        Message msg=new BytesMessage(null, 1);
         c.send(msg);
 
         // Now wait for the view change, the sending of new messages 2-5 and the resending of 1, and make sure
@@ -142,7 +142,7 @@ public class SequencerFailoverTest extends BMNGRunner {
         // insert DISCARD into A
         DISCARD discard=new DISCARD();
         discard.setLocalAddress(a.getAddress());
-        discard.setDiscardAll(true);
+        discard.discardAll(true);
         ProtocolStack stack=a.getProtocolStack();
         TP transport=stack.getTransport();
         stack.insertProtocol(discard,  ProtocolStack.Position.ABOVE, transport.getClass());
@@ -226,7 +226,7 @@ public class SequencerFailoverTest extends BMNGRunner {
         final Address sender=channel.getAddress();
         for(int i=1; i <= NUM_MSGS; i++) {
             Util.sleep(300);
-            channel.send(new Message(null, i));
+            channel.send(new BytesMessage(null, i));
             System.out.print("[" + sender + "] -- messages sent: " + i + "/" + NUM_MSGS + "\r");
         }
         System.out.println("");
@@ -263,16 +263,16 @@ public class SequencerFailoverTest extends BMNGRunner {
     }
 
     /** Removes FD, FD_ALL, MERGEX protocols, sets SEQUENCER.threshold=0 */
-    protected void adjustConfiguration(JChannel ... channels) {
+    protected static void adjustConfiguration(JChannel... channels) {
         for(JChannel ch: channels) {
-            ch.getProtocolStack().removeProtocol(FD_ALL.class,FD.class,MERGE3.class, VERIFY_SUSPECT.class);
+            ch.getProtocolStack().removeProtocol(FailureDetection.class,MERGE3.class, VERIFY_SUSPECT.class);
             SEQUENCER seq=ch.getProtocolStack().findProtocol(SEQUENCER.class);
             seq.setThreshold(0); // permanent ack-mode
         }
     }
 
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected final List<Integer> list=new LinkedList<>();
         protected final String name;
 
@@ -303,7 +303,7 @@ public class SequencerFailoverTest extends BMNGRunner {
 
         public void run() {
             for(int i=1; i <=2; i++) {
-                Message msg=new Message(null, (rank + i));
+                Message msg=new BytesMessage(null, (rank + i));
                 try {
                     System.out.println("[" + rank + "]: sending msg " + (rank + i));
                     ch.send(msg);
@@ -316,7 +316,7 @@ public class SequencerFailoverTest extends BMNGRunner {
     }
 
 
-    protected JChannel createChannel(final String props, final String name, final String cluster_name) throws Exception {
+    protected static JChannel createChannel(final String props, final String name, final String cluster_name) throws Exception {
         JChannel retval=new JChannel(props);
         retval.setName(name);
         retval.connect(cluster_name);

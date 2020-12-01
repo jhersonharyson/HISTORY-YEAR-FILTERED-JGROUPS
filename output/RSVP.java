@@ -4,6 +4,7 @@ import org.jgroups.*;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.AckCollector;
 import org.jgroups.util.MessageBatch;
@@ -28,7 +29,8 @@ import java.util.function.Supplier;
 public class RSVP extends Protocol {
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
-    @Property(description="Max time in milliseconds to block for an RSVP'ed message (0 blocks forever).")
+    @Property(description="Max time in milliseconds to block for an RSVP'ed message (0 blocks forever).",
+      type=AttributeType.TIME)
     protected long    timeout=10000;
 
     @Property(description="Whether an exception should be thrown when the timeout kicks in, and we haven't yet received " +
@@ -39,7 +41,8 @@ public class RSVP extends Protocol {
       "we send an ack first and only then pass the message up to the application.")
     protected boolean ack_on_delivery=true;
 
-    @Property(description="Interval (in milliseconds) at which we resend the RSVP request. Needs to be < timeout. 0 disables it.")
+    @Property(description="Interval (in milliseconds) at which we resend the RSVP request. " +
+      "Needs to be < timeout. 0 disables it.",type=AttributeType.TIME)
     protected long    resend_interval=2000;
     /* --------------------------------------------- Fields ------------------------------------------------------ */
     /** ID to be used to identify messages. Short.MAX_VALUE (ca 32K plus 32K negative) should be enough, and wrap-around
@@ -63,7 +66,16 @@ public class RSVP extends Protocol {
 
 
     @ManagedAttribute(description="Number of pending RSVP requests")
-    public int getPendingRsvpRequests() {return ids.size();}
+    public int     getPendingRsvpRequests()           {return ids.size();}
+    public long    getTimeout()                       {return timeout;}
+    public RSVP    setTimeout(long t)                 {this.timeout=t; return this;}
+    public boolean throwExceptionOnTimeout()          {return throw_exception_on_timeout;}
+    public RSVP    throwExceptionOnTimeout(boolean b) {throw_exception_on_timeout=b; return this;}
+    public boolean ackOnDelivery()                    {return ack_on_delivery;}
+    public RSVP    ackOnDelivery(boolean b)           {ack_on_delivery=b; return this;}
+    public long    getResendInterval()                {return resend_interval;}
+    public RSVP    setResendInterval(long i)          {resend_interval=i; return this;}
+
 
 
     public void init() throws Exception {
@@ -127,7 +139,7 @@ public class RSVP extends Protocol {
                 log.trace(local_addr + ": " + hdr.typeToString() + " --> " + (target == null? "cluster" : target));
             retval=down_prot.down(msg);
 
-            if(msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK))
+            if(msg.isFlagSet(Message.TransientFlag.DONT_LOOPBACK))
                 entry.ack(local_addr);
 
             // Block on AckCollector (if we need to block)
@@ -266,7 +278,7 @@ public class RSVP extends Protocol {
     protected void sendResponse(Address dest, short id) {
         try {
             RsvpHeader hdr=new RsvpHeader(RsvpHeader.RSP,id);
-            Message msg=new Message(dest) .putHeader(this.id, hdr)
+            Message msg=new EmptyMessage(dest) .putHeader(this.id, hdr)
               .setFlag(Message.Flag.RSVP, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB);
 
             if(log.isTraceEnabled())
@@ -357,7 +369,7 @@ public class RSVP extends Protocol {
                     continue;
 
                 RsvpHeader hdr=new RsvpHeader(RsvpHeader.REQ_ONLY, rsvp_id);
-                Message msg=new Message(dest).setFlag(Message.Flag.RSVP).putHeader(id,hdr);
+                Message msg=new EmptyMessage(dest).setFlag(Message.Flag.RSVP).putHeader(id, hdr);
                 if(log.isTraceEnabled())
                     log.trace(local_addr + ": " + hdr.typeToString() + " --> " + (val.target == null? "cluster" : val.target));
                 down_prot.down(msg);

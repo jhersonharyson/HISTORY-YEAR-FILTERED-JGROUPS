@@ -1,21 +1,18 @@
 
 package org.jgroups.protocols;
 
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Message;
-import org.jgroups.View;
-import org.jgroups.annotations.MBean;
+import org.jgroups.*;
 import org.jgroups.annotations.ManagedAttribute;
-import org.jgroups.annotations.Property;
-import org.jgroups.stack.Protocol;
-import org.jgroups.util.*;
+import org.jgroups.conf.AttributeType;
+import org.jgroups.util.ByteArray;
+import org.jgroups.util.MessageBatch;
+import org.jgroups.util.MessageIterator;
+import org.jgroups.util.Util;
 
-import java.io.DataInput;
 import java.util.*;
 import java.util.Map.Entry;
 import java.util.concurrent.atomic.AtomicInteger;
-
+import java.util.function.Predicate;
 
 
 /**
@@ -24,8 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * number is added to the messages as a header (and removed at the receiving side).
  * <p>
  * Contrary to {@link org.jgroups.protocols.FRAG2}, FRAG marshals the entire message (including the headers) into
- * a byte[] buffer and the fragments that buffer. Because {@link org.jgroups.Message#size()} is called rather than
- * {@link org.jgroups.Message#getLength()}, and because of the overhead of marshalling, this will be slower than
+ * a byte[] buffer and the fragments that buffer. Because {@link BaseMessage#size()} is called rather than
+ * {@link BaseMessage#getLength()}, and because of the overhead of marshalling, this will be slower than
  * FRAG2.
  * <p>
  * Each fragment is identified by (a) the sender (part of the message to which
@@ -39,46 +36,29 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author Bela Ban
  * @author Filip Hanik
  */
-@MBean(description="Fragments messages larger than fragmentation size into smaller packets")
-public class FRAG extends Protocol {
-    
-    /* -----------------------------------------    Properties     -------------------------------------------------- */
-
-    @Property(description="The max number of bytes in a message. Larger messages will be fragmented. Default is 8192 bytes")
-    private int frag_size=8192; // conservative value
-
-
-    /* --------------------------------------------- Fields ------------------------------------------------------ */
-
+public class FRAG extends Fragmentation {
     
     /** Contains a frag table per sender, this way it becomes easier to clean up if a sender leaves or crashes */
-    private final FragmentationList  fragment_list=new FragmentationList();
-    private final AtomicInteger      curr_id=new AtomicInteger(1);
-    private final List<Address>      members=new ArrayList<>(11);
-    
-    
+    protected final FragmentationList  fragment_list=new FragmentationList();
+    protected final AtomicInteger      curr_id=new AtomicInteger(1);
+    protected final List<Address>      members=new ArrayList<>(11);
+    protected MessageFactory           msg_factory;
+    protected final Predicate<Message> HAS_FRAG_HEADER=msg -> msg.getHeader(id) != null;
  
 
-    @ManagedAttribute(description="Number of sent messages")
-    long num_sent_msgs=0;
-    @ManagedAttribute(description="Number of sent fragments")
-    long num_sent_frags=0;
-    @ManagedAttribute(description="Number of received messages")
-    long num_received_msgs=0;
-    @ManagedAttribute(description="Number of received fragments")
-    long num_received_frags=0;
+    @ManagedAttribute(description="Number of sent messages",type=AttributeType.SCALAR)
+    long num_sent_msgs;
+    @ManagedAttribute(description="Number of received messages",type=AttributeType.SCALAR)
+    long num_received_msgs;
 
 
-    public int getFragSize() {return frag_size;}
-    public void setFragSize(int s) {frag_size=s;}
     public long getNumberOfSentMessages() {return num_sent_msgs;}
-    public long getNumberOfSentFragments() {return num_sent_frags;}
     public long getNumberOfReceivedMessages() {return num_received_msgs;}
-    public long getNumberOfReceivedFragments() {return num_received_frags;}
-  
+
 
     public void init() throws Exception {
         super.init();
+        msg_factory=getTransport().getMessageFactory();
         Map<String,Object> info=new HashMap<>(1);
         info.put("frag_size", frag_size);
         down_prot.down(new Event(Event.CONFIG, info));
@@ -86,7 +66,7 @@ public class FRAG extends Protocol {
 
     public void resetStats() {
         super.resetStats();
-        num_sent_msgs=num_sent_frags=num_received_msgs=num_received_frags=0;
+        num_sent_msgs=num_received_msgs=0;
     }
 
 
@@ -100,11 +80,11 @@ public class FRAG extends Protocol {
                 handleViewChange(evt.getArg());
                 break;
         }
-        return down_prot.down(evt);  // Pass on to the layer below us
+        return super.down(evt);  // Pass on to the layer below us
     }
 
     public Object down(Message msg) {
-        long size=msg.size();
+        int size=msg.size();
         num_sent_msgs++;
         if(size > frag_size) {
             if(log.isTraceEnabled()) {
@@ -112,7 +92,7 @@ public class FRAG extends Protocol {
                 sb.append(size).append(", will fragment (frag_size=").append(frag_size).append(')');
                 log.trace(sb.toString());
             }
-            fragment(msg, size);  // Fragment and pass down
+            fragment(msg);  // Fragment and pass down
             return null;
         }
         return down_prot.down(msg);
@@ -145,17 +125,17 @@ public class FRAG extends Protocol {
     }
 
     public void up(MessageBatch batch) {
-        for(Message msg: batch) {
+        MessageIterator it=batch.iteratorWithFilter(HAS_FRAG_HEADER);
+        while(it.hasNext()) {
+            Message msg=it.next();
             FragHeader hdr=msg.getHeader(this.id);
-            if(hdr != null) { // needs to be defragmented
-                Message assembled_msg=unfragment(msg,hdr);
-                if(assembled_msg != null)
-                    // the reassembled msg has to be add in the right place (https://issues.jboss.org/browse/JGRP-1648),
-                    // and canot be added to the tail of the batch !
-                    batch.replace(msg, assembled_msg);
-                else
-                    batch.remove(msg);
-            }
+            Message assembled_msg=unfragment(msg, hdr);
+            if(assembled_msg != null)
+                // the reassembled msg has to be add in the right place (https://issues.jboss.org/browse/JGRP-1648),
+                // and cannot be added at the tail of the batch!
+                it.replace(assembled_msg);
+            else
+                it.remove();
         }
         if(!batch.isEmpty())
             up_prot.up(batch);
@@ -189,19 +169,18 @@ public class FRAG extends Protocol {
      * [2344,3,2]{dst,src,buf3}
      * </pre>
      */
-    private void fragment(Message msg, long size) {
+    private void fragment(Message msg) {
         Address            dest=msg.getDest(), src=msg.getSrc();
         long               frag_id=curr_id.getAndIncrement(); // used as seqnos
         int                num_frags;
 
         try {
             // write message into a byte buffer and fragment it
-            ByteArrayDataOutputStream dos=new ByteArrayDataOutputStream((int)(size + 50));
-            msg.writeTo(dos);
-            byte[] buffer=dos.buffer();
-            byte[][] fragments=Util.fragmentBuffer(buffer, frag_size, dos.position());
+            ByteArray tmp=Util.messageToBuffer(msg);
+            byte[] buffer=tmp.getArray();
+            byte[][] fragments=Util.fragmentBuffer(buffer, frag_size, tmp.getLength());
             num_frags=fragments.length;
-            num_sent_frags+=num_frags;
+            num_frags_sent.add(num_frags);
 
             if(log.isTraceEnabled()) {
                 StringBuilder sb=new StringBuilder();
@@ -212,9 +191,8 @@ public class FRAG extends Protocol {
             }
 
             for(int i=0; i < num_frags; i++) {
-                Message frag_msg=new Message(dest, fragments[i]).src(src);
-                FragHeader hdr=new FragHeader(frag_id, i, num_frags);
-                frag_msg.putHeader(this.id, hdr);
+                Message frag_msg=new BytesMessage(dest, fragments[i]).setSrc(src)
+                  .putHeader(this.id, new FragHeader(frag_id, i, num_frags));
                 down_prot.down(frag_msg);
             }
         }
@@ -243,15 +221,13 @@ public class FRAG extends Protocol {
                 frag_table=fragment_list.get(sender);
             }
         }
-        num_received_frags++;
-        byte[] buf=frag_table.add(hdr.id, hdr.frag_id, hdr.num_frags, msg.getBuffer());
+        num_frags_received.add(1);
+        byte[] buf=frag_table.add(hdr.id, hdr.frag_id, hdr.num_frags, msg.getArray());
         if(buf == null)
             return null;
 
         try {
-            DataInput in=new ByteArrayDataInputStream(buf);
-            Message assembled_msg=new Message(false);
-            assembled_msg.readFrom(in);
+            Message assembled_msg=Util.messageFromBuffer(buf, 0, buf.length, msg_factory);
             assembled_msg.setSrc(sender); // needed ? YES, because fragments have a null src !!
             if(log.isTraceEnabled()) log.trace("assembled_msg is " + assembled_msg);
             num_received_msgs++;
@@ -400,7 +376,7 @@ public class FRAG extends Protocol {
             //the total number of fragment in this message
             int tot_frags=0;
             // each fragment is a byte buffer
-            byte[] fragments[]=null;
+            byte[][] fragments=null;
             //the number of fragments we have received
             int number_of_frags_recvd=0;
             // the message ID

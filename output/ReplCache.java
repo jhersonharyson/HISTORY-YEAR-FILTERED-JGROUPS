@@ -1,9 +1,6 @@
 package org.jgroups.blocks;
 
-import org.jgroups.Address;
-import org.jgroups.JChannel;
-import org.jgroups.MembershipListener;
-import org.jgroups.View;
+import org.jgroups.*;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.logging.Log;
@@ -22,7 +19,7 @@ import java.util.concurrent.TimeUnit;
  * See doc/design/ReplCache.txt for details.
  * @author Bela Ban
  */
-public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener {
+public class ReplCache<K,V> implements Receiver, Cache.ChangeListener {
 
     /** The cache in which all entries are located. The value is a tuple, consisting of the replication count and the
      * actual value */
@@ -33,9 +30,9 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
     private static final Log log=LogFactory.getLog(ReplCache.class);
     private JChannel ch=null;
-    private Address local_addr=null;
+    private Address local_addr;
     private View    view;
-    private RpcDispatcher disp=null;
+    private RpcDispatcher disp;
     @ManagedAttribute(writable=true)
     private String props="udp.xml";
     @ManagedAttribute(writable=true)
@@ -52,7 +49,7 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
     private HashFunctionFactory<K> hash_function_factory=ConsistentHashFunction::new;
 
-    private final Set<MembershipListener> membership_listeners=new HashSet<>();
+    private final Set<Receiver> receivers=new HashSet<>();
 
     private final Set<ChangeListener> change_listeners=new HashSet<>();
 
@@ -214,12 +211,12 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
         this.hash_function_factory=hash_function_factory;
     }
 
-    public void addMembershipListener(MembershipListener l) {
-        membership_listeners.add(l);
+    public void addReceiver(Receiver r) {
+        receivers.add(r);
     }
 
-    public void removeMembershipListener(MembershipListener l) {
-        membership_listeners.remove(l);
+    public void removeMembershipListener(Receiver r) {
+        receivers.remove(r);
     }
 
     public void addChangeListener(ChangeListener l) {
@@ -261,10 +258,7 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
             hash_function=new ConsistentHashFunction<>();
 
         ch=new JChannel(props);
-        disp=new RpcDispatcher(ch, this).setMethodLookup(methods::get).setMembershipListener(this);
-        Marshaller marshaller=new CustomMarshaller();
-        disp.setMarshaller(marshaller);
-
+        disp=new RpcDispatcher(ch, this).setMethodLookup(methods::get).setReceiver(this);
         ch.connect(cluster_name);
         local_addr=ch.getAddress();
         view=ch.getView();
@@ -568,24 +562,14 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
         if(hash_function != null)
             hash_function.installNodes(new_view.getMembers());
 
-        for(MembershipListener l: membership_listeners)
-            l.viewAccepted(new_view);
+        for(Receiver r: receivers)
+            r.viewAccepted(new_view);
 
         if(old_nodes != null) {
             timer.schedule(() -> rebalance(old_nodes, new ArrayList<>(new_view.getMembers())), 100, TimeUnit.MILLISECONDS);
         }
     }
 
-
-
-    public void suspect(Address suspected_mbr) {
-    }
-
-    public void block() {
-    }
-
-    public void unblock() {
-    }
 
     public void changed() {
         notifyChangeListeners();
@@ -678,7 +662,7 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
 
                 if(log.isTraceEnabled())
                     log.trace("old nodes: " + tmp_old + "\nnew nodes: " + tmp_new);
-                if(tmp_old != null && tmp_new != null && tmp_old.equals(tmp_new))
+                if(Objects.equals(tmp_old, tmp_new))
                     continue;
                 mcastPut(key, real_value, repl_count, val.getTimeout(), false);
                 if(tmp_new != null && !tmp_new.contains(local_addr)) {
@@ -766,7 +750,6 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
             int index=Math.abs(key.hashCode() & (HASH_SPACE - 1));
             
             Set<Address> results=new LinkedHashSet<>();
-            List<Address> retval=new ArrayList<>();
 
             SortedMap<Short, Address> tailmap=nodes.tailMap((short)index);
             int count=0;
@@ -786,9 +769,7 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
                         break;
                 }
             }
-
-            retval.addAll(results);
-            return retval;
+            return new ArrayList<>(results);
         }
 
         public void installNodes(List<Address> new_nodes) {
@@ -843,43 +824,4 @@ public class ReplCache<K,V> implements MembershipListener, Cache.ChangeListener 
         }
     }
 
-
-    private static class CustomMarshaller implements Marshaller {
-        static final byte NULL        = 1;
-        static final byte OBJ         = 2;
-        static final byte VALUE       = 3;
-
-        @Override
-        public void objectToStream(Object obj, DataOutput out) throws IOException {
-            if(obj == null) {
-                out.write(NULL);
-                return;
-            }
-            if(obj instanceof Cache.Value) {
-                Cache.Value value=(Cache.Value)obj;
-                out.writeByte(VALUE);
-                out.writeLong(value.getTimeout());
-                Util.objectToStream(value.getValue(), out);
-            }
-            else {
-                out.writeByte(OBJ);
-                Util.objectToStream(obj, out);
-            }
-        }
-
-        @Override
-        public Object objectFromStream(DataInput in) throws IOException, ClassNotFoundException {
-            byte type=in.readByte();
-            if(type == NULL)
-                return null;
-            if(type == VALUE) {
-                long expiration_time=in.readLong();
-                Object obj=Util.objectFromStream(in);
-                return new Cache.Value(obj, expiration_time);
-            }
-            else
-                return Util.objectFromStream(in);
-        }
-
-    }
 }

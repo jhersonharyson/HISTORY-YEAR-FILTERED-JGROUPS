@@ -3,6 +3,7 @@ package org.jgroups.protocols;
 
 import org.jgroups.*;
 import org.jgroups.annotations.*;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.Util;
@@ -30,7 +31,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
     /* ------------------------------------------ Properties  ------------------------------------------ */
     
-    @Property(description="Number of millisecs to wait for a response from a suspected member")
+    @Property(description="Number of millisecs to wait for a response from a suspected member",type=AttributeType.TIME)
     protected long                    timeout=2000;
     
     @Property(description="Number of verify heartbeats sent to a suspected member")
@@ -59,7 +60,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     // a list of suspects, ordered by time when a SUSPECT event needs to be sent up
     protected final DelayQueue<Entry> suspects=new DelayQueue<>();
 
-    protected volatile Thread         timer;
+    protected Thread                  timer;
     protected volatile boolean        running;
 
 
@@ -88,6 +89,8 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
     public long getTimeout() {
         return timeout;
     }
+
+    public VERIFY_SUSPECT setBindAddress(InetAddress ba) {this.bind_addr=ba; return this;}
 
     public Object down(Event evt) {
         switch(evt.getType()) {
@@ -138,7 +141,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
                 }
                 Address target=use_mcast_rsps? null : hdr.from;
                 for(int i=0; i < num_msgs; i++) {
-                    Message rsp=new Message(target).setFlag(Message.Flag.INTERNAL)
+                    Message rsp=new EmptyMessage(target).setFlag(Message.Flag.INTERNAL)
                       .putHeader(this.id, new VerifyHeader(VerifyHeader.I_AM_NOT_DEAD, local_addr));
                     down_prot.down(rsp);
                 }
@@ -214,7 +217,7 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
         }
         for(Address mbr: mbrs) {
             for(int i=0; i < num_msgs; i++) {
-                Message msg=new Message(mbr).setFlag(Message.Flag.INTERNAL)
+                Message msg=new EmptyMessage(mbr).setFlag(Message.Flag.INTERNAL)
                   .putHeader(this.id, new VerifyHeader(VerifyHeader.ARE_YOU_DEAD, local_addr));
                 down_prot.down(msg);
             }
@@ -291,28 +294,36 @@ public class VERIFY_SUSPECT extends Protocol implements Runnable {
 
 
     protected synchronized void startTimer() {
-        timer=getThreadFactory().newThread(this,"VERIFY_SUSPECT.TimerThread");
-        timer.setDaemon(true);
-        timer.start();
+        if(timer == null || !timer.isAlive()) {
+            timer=getThreadFactory().newThread(this, "VERIFY_SUSPECT.TimerThread");
+            timer.setDaemon(true);
+            timer.start();
+        }
     }
 
-    public void init() throws Exception {
-        super.init();
-        if(bind_addr != null)
-            intf=NetworkInterface.getByInetAddress(bind_addr);
-    }
-
-
-
-    public synchronized void stop() {
-        clearSuspects();
-        running=false;
+    @GuardedBy("lock")
+    protected void stopTimer() {
         if(timer != null && timer.isAlive()) {
             Thread tmp=timer;
             timer=null;
             tmp.interrupt();
         }
         timer=null;
+    }
+
+
+    public void start() throws Exception {
+        super.start();
+        if(bind_addr == null)
+            bind_addr=getTransport().getBindAddr();
+        if(bind_addr != null)
+            intf=NetworkInterface.getByInetAddress(bind_addr);
+    }
+
+    public synchronized void stop() {
+        clearSuspects();
+        running=false;
+        stopTimer();
     }
 
     private static long getCurrentTimeMillis() {

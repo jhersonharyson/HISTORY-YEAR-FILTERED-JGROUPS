@@ -1,10 +1,7 @@
 package org.jgroups.protocols.pbcast;
 
 
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Message;
-import org.jgroups.View;
+import org.jgroups.*;
 import org.jgroups.protocols.PingData;
 import org.jgroups.util.Digest;
 import org.jgroups.util.Promise;
@@ -46,77 +43,85 @@ public class ClientGmsImpl extends GmsImpl {
     }
     
     /**
-     * Joins this process to a group. Determines the coordinator and sends a
-     * unicast handleJoin() message to it. The coordinator returns a JoinRsp and
-     * then broadcasts the new view, which contains a message digest and the
-     * current membership (including the joiner). The joiner is then supposed to
-     * install the new view and the digest and starts accepting mcast messages.
-     * Previous mcast messages were discarded (this is done in PBCAST).
-     * <p>
-     * If successful, impl is changed to an instance of ParticipantGmsImpl.
-     * Otherwise, we continue trying to send join() messages to the coordinator,
-     * until we succeed (or there is no member in the group. In this case, we
+     * Makes this process join a group. Determines the coordinator and sends a JOIN request to it. The coordinator
+     * returns a JOIN response, then broadcasts the new view, which contains a message digest and the current membership
+     * (including the joiner). The joiner then installs the new view and the digest and starts accepting messages.
+     * <br/>
+     * If successful, impl is changed to an instance of ParticipantGmsImpl. Otherwise, we continue trying to send JOIN
+     * requests to the coordinator, until we succeed (or there is no member in the group. In this case, we
      * create our own singleton group).
      *
-     * @param mbr Our own address (assigned through SET_LOCAL_ADDRESS)
+     * @param mbr Our own address
      */
     protected void joinInternal(Address mbr, boolean joinWithStateTransfer, boolean useFlushIfPresent) {
         int  join_attempts=0;
         join_promise.reset();
 
-        while(!gms.isLeaving()) {
-            if(installViewIfValidJoinRsp(join_promise, false))
-                return;
-
-            long start=System.currentTimeMillis();
-            Responses responses=(Responses)gms.getDownProtocol().down(new Event(Event.FIND_INITIAL_MBRS, gms.getJoinTimeout()));
-
-            // Sept 2008 (bela): return if we got a belated JoinRsp (https://jira.jboss.org/jira/browse/JGRP-687)
-            if(installViewIfValidJoinRsp(join_promise, false))
-                return;
-
-            responses.waitFor(gms.join_timeout);
-            responses.done();
-            long diff=System.currentTimeMillis() - start;
-            boolean empty;
-            if((empty=responses.isEmpty()) || responses.isCoord(gms.local_addr)) {
-                String m=String.format("%s: %s: creating cluster as coordinator", gms.local_addr,
-                                       empty? String.format("no members discovered after %d ms", diff)
-                                         : "I'm the first member");
-                log.info(m);
-                becomeSingletonMember(mbr);
-                return;
-            }
-            log.trace("%s: discovery took %d ms, members: %s", gms.local_addr, diff, responses);
-
-            List<Address> coords=getCoords(responses);
-
-            // We didn't get any coord responses; all responses were clients. If I'm the first of the sorted clients
-            // I'll become coordinator. The others will wait and then retry the discovery and join process
-            if(coords == null) { // e.g. because we have all clients only
-                if(firstOfAllClients(mbr, responses))
+        Responses responses=null; // caches responses from all discovery runs (usually there's only 1 run)
+        try {
+            while(!gms.isLeaving()) {
+                if(installViewIfValidJoinRsp(join_promise, false))
                     return;
-            }
-            else {
-                if(coords.size() > 1) {
-                    log.debug("%s: found multiple coords: %s", gms.local_addr, coords);
-                    Collections.shuffle(coords); // so the code below doesn't always pick the same coord
-                }
-                for(Address coord : coords) {
-                    log.debug("%s: sending JOIN(%s) to %s", gms.local_addr, mbr, coord);
-                    sendJoinMessage(coord, mbr, joinWithStateTransfer, useFlushIfPresent);
-                    if(installViewIfValidJoinRsp(join_promise, true))
-                        return;
-                    log.warn("%s: JOIN(%s) sent to %s timed out (after %d ms), on try %d",
-                             gms.local_addr, mbr, coord, gms.join_timeout, join_attempts);
-                }
-            }
 
-            if(gms.max_join_attempts > 0 && ++join_attempts >= gms.max_join_attempts) {
-                log.warn("%s: too many JOIN attempts (%d): becoming singleton", gms.local_addr, join_attempts);
-                becomeSingletonMember(mbr);
-                return;
+                long start=System.currentTimeMillis();
+                if(responses == null)
+                    responses=(Responses)gms.getDownProtocol().down(new Event(Event.FIND_INITIAL_MBRS, gms.getJoinTimeout()));
+                else {
+                    Responses tmp=(Responses)gms.getDownProtocol().down(new Event(Event.FIND_INITIAL_MBRS, gms.getJoinTimeout()));
+                    if(tmp != null) {
+                        responses.add(tmp, gms.local_addr);
+                        tmp.done();
+                    }
+                }
+
+                // Sept 2008 (bela): return if we got a belated JoinRsp (https://jira.jboss.org/jira/browse/JGRP-687)
+                if(installViewIfValidJoinRsp(join_promise, false))
+                    return;
+
+                responses.waitFor(gms.join_timeout);
+                long diff=System.currentTimeMillis() - start;
+                boolean empty;
+                if((empty=responses.isEmpty()) || responses.isCoord(gms.local_addr)) {
+                    log.info("%s: %s: creating cluster as coordinator", gms.local_addr,
+                             empty? String.format("no members discovered after %d ms", diff) : "I'm the first member");
+                    becomeSingletonMember(mbr);
+                    return;
+                }
+                log.trace("%s: discovery took %d ms, members: %s", gms.local_addr, diff, responses);
+
+                List<Address> coords=getCoords(responses);
+
+                // We didn't get any coord responses; all responses were clients. If I'm the first of the sorted clients
+                // I'll become coordinator. The others will wait and then retry the discovery and join process
+                if(coords == null) { // e.g. because we have all clients only
+                    if(firstOfAllClients(mbr, responses))
+                        return;
+                }
+                else {
+                    if(coords.size() > 1) {
+                        log.debug("%s: found multiple coords: %s", gms.local_addr, coords);
+                        Collections.shuffle(coords); // so the code below doesn't always pick the same coord
+                    }
+                    for(Address coord : coords) {
+                        log.debug("%s: sending JOIN(%s) to %s", gms.local_addr, mbr, coord);
+                        sendJoinMessage(coord, mbr, joinWithStateTransfer, useFlushIfPresent);
+                        if(installViewIfValidJoinRsp(join_promise, true))
+                            return;
+                        log.warn("%s: JOIN(%s) sent to %s timed out (after %d ms), on try %d",
+                                 gms.local_addr, mbr, coord, gms.join_timeout, join_attempts);
+                    }
+                }
+
+                if(gms.max_join_attempts > 0 && ++join_attempts >= gms.max_join_attempts) {
+                    log.warn("%s: too many JOIN attempts (%d): becoming singleton", gms.local_addr, join_attempts);
+                    becomeSingletonMember(mbr);
+                    return;
+                }
             }
+        }
+        finally {
+            if(responses != null)
+                responses.done();
         }
     }
 
@@ -202,18 +207,12 @@ public class ClientGmsImpl extends GmsImpl {
     }
 
 
-
-    /**
-     * Called by join(). Installs the view returned by calling Coord.handleJoin() and becomes coordinator.
-     */
     private boolean installView(View new_view, Digest digest) {
         if(!new_view.containsMember(gms.local_addr)) {
             log.error("%s: I'm not member of %s, will not install view", gms.local_addr, new_view);
             return false;
         }
-        gms.installView(new_view, digest);
-        if(gms.impl == null || gms.impl instanceof ClientGmsImpl) // installView() should have set the role (impl)
-            gms.becomeParticipant();
+        gms.installView(new_view, digest); // impl will be particant (or coord if singleton)
         gms.getUpProtocol().up(new Event(Event.BECOME_SERVER));
         gms.getDownProtocol().down(new Event(Event.BECOME_SERVER));
         return true;
@@ -223,12 +222,12 @@ public class ClientGmsImpl extends GmsImpl {
     void sendJoinMessage(Address coord, Address mbr,boolean joinWithTransfer, boolean useFlushIfPresent) {
         byte type=joinWithTransfer? GMS.GmsHeader.JOIN_REQ_WITH_STATE_TRANSFER : GMS.GmsHeader.JOIN_REQ;
         GMS.GmsHeader hdr=new GMS.GmsHeader(type, mbr, useFlushIfPresent);
-        Message msg=new Message(coord).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL).putHeader(gms.getId(), hdr);
+        Message msg=new BytesMessage(coord).setFlag(Message.Flag.OOB, Message.Flag.INTERNAL).putHeader(gms.getId(), hdr);
         gms.getDownProtocol().down(msg);
     }
 
 
-    /** Returns all members whose PingData is flagged as coordinator */
+    /** Returns all members who are flagged as coordinator */
     private static List<Address> getCoords(Iterable<PingData> mbrs) {
         if(mbrs == null)
             return null;
@@ -252,9 +251,7 @@ public class ClientGmsImpl extends GmsImpl {
 
         // set the initial digest (since I'm the first member)
         Digest initial_digest=new Digest(mbr, 0, 0);
-        gms.installView(new_view, initial_digest);
-        gms.becomeCoordinator(); // not really necessary - installView() should do it
-
+        gms.installView(new_view, initial_digest); // impl will be coordinator
         gms.getUpProtocol().up(new Event(Event.BECOME_SERVER));
         gms.getDownProtocol().down(new Event(Event.BECOME_SERVER));
         log.debug("%s: created cluster (first member). My view is %s, impl is %s",

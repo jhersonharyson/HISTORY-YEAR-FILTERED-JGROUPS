@@ -5,11 +5,14 @@ import org.jgroups.JChannel;
 import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
+import org.jgroups.stack.Protocol;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.security.SecureRandom;
+import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Tests use cases for {@link SYM_ENCRYPT} described in https://issues.jboss.org/browse/JGRP-2021.
@@ -34,7 +37,7 @@ public class SYM_ENCRYPT_Test extends EncryptTest {
     public void dummy() {}
 
 
-    protected JChannel create(String name) throws Exception {
+    @Override protected JChannel create(String name, Consumer<List<Protocol>> c) throws Exception {
         // Verify that the SecureRandom instance can be customized
         SecureRandom secureRandom = SecureRandom.getInstance("SHA1PRNG");
         SYM_ENCRYPT encr;
@@ -52,10 +55,10 @@ public class SYM_ENCRYPT_Test extends EncryptTest {
           new SHARED_LOOPBACK_PING(),
           // omit MERGE3 from the stack -- nodes are leaving gracefully
           encr,
-          new NAKACK2().setUseMcastXmit(false),
+          new NAKACK2().useMcastXmit(false),
           new UNICAST3(),
           new STABLE(),
-          new GMS().joinTimeout(2000))
+          new GMS().setJoinTimeout(2000))
           .name(name);
     }
 

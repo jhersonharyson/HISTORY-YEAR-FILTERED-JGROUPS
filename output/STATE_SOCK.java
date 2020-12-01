@@ -7,6 +7,7 @@ import org.jgroups.View;
 import org.jgroups.annotations.LocalAddress;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.conf.PropertyConverters;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.util.StateTransferResult;
@@ -26,12 +27,12 @@ import java.util.concurrent.RejectedExecutionException;
  * {@code STATE_SOCK} has the state provider create a server socket to which the state
  * requester connects and from which the latter reads the state.
  * <p/>
- * When implementing {@link org.jgroups.MessageListener#getState(java.io.OutputStream)}, the state should be written in
+ * When implementing {@link org.jgroups.Receiver#getState(java.io.OutputStream)}, the state should be written in
  * sizeable chunks, because the underlying output stream sends 1 message / write over the socket. So if there are 1000
  * writes of 1 byte each, this would generate 1000 messages ! We suggest using a {@link java.io.BufferedOutputStream}
  * over the output stream handed to the application as argument of the callback.
  * <p/>
- * When implementing the {@link org.jgroups.MessageListener#setState(java.io.InputStream)} callback, there is no need to use a
+ * When implementing the {@link org.jgroups.Receiver#setState(java.io.InputStream)} callback, there is no need to use a
  * {@link java.io.BufferedOutputStream}, as the input stream handed to the application already buffers incoming data
  * internally.
  * @author Vladimir Blagojevic
@@ -56,19 +57,21 @@ public class STATE_SOCK extends StreamingStateTransfer {
       "the local IP (e.g. 192.168.1.100) of the host then on each host, set \"external_addr\" TCP transport " +
       "parameter to the external (public IP) address of the firewall.",
               systemProperty=Global.EXTERNAL_ADDR,writable=false)
-    protected InetAddress external_addr=null ;
+    protected InetAddress external_addr;
 
     @Property(description="Used to map the internal port (bind_port) to an external port. Only used if > 0",
               systemProperty=Global.EXTERNAL_PORT,writable=false)
-    protected int external_port=0;
+    protected int external_port;
     
     @Property(name="bind_interface", converter=PropertyConverters.BindInterface.class,
               description="The interface (NIC) which should be used by this transport", dependsUpon="bind_addr")
-    protected String bind_interface_str=null;
+    protected String bind_interface_str;
 
     @Property(description="The port listening for state requests. Default value of 0 binds to any (ephemeral) port")
-    protected int bind_port=0;
+    protected int bind_port;
 
+    @Property(description="The size (in bytes) of the receive buffer of the socket",type=AttributeType.BYTES)
+    protected int recv_buf_size;
 
     /*
     * --------------------------------------------- Fields ---------------------------------------
@@ -100,7 +103,7 @@ public class STATE_SOCK extends StreamingStateTransfer {
         StateProviderAcceptor retval=new StateProviderAcceptor(thread_pool,
                                                                Util.createServerSocket(getSocketFactory(),
                                                                                        "jgroups.streaming_state_transfer.srv_sock",
-                                                                                       bind_addr, bind_port));
+                                                                                       bind_addr, bind_port, bind_port, recv_buf_size));
         Thread t=getThreadFactory().newThread(retval, "STATE server socket acceptor");
         t.start();
         return retval;

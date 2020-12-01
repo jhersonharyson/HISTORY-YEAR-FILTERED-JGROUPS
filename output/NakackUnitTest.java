@@ -14,7 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Tests NAKACK2 functionality, especially flag {@link org.jgroups.Message.TransientFlag#DONT_LOOPBACK}.
+ * Tests NAKACK2 functionality, especially flag {@link Message.TransientFlag#DONT_LOOPBACK}.
  * @author Bela Ban
  * @since  3.5
  */
@@ -46,14 +46,14 @@ public class NakackUnitTest {
           msg(),
           msg().setFlag(Message.Flag.OOB),
           msg().setFlag(Message.Flag.OOB),
-          msg().setFlag(Message.Flag.OOB).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK),
-          msg().setTransientFlag(Message.TransientFlag.DONT_LOOPBACK),
+          msg().setFlag(Message.Flag.OOB).setFlag(Message.TransientFlag.DONT_LOOPBACK),
+          msg().setFlag(Message.TransientFlag.DONT_LOOPBACK),
           msg().setFlag(Message.Flag.OOB),
           msg().setFlag(Message.Flag.OOB),
-          msg().setFlag(Message.Flag.OOB).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK),
-          msg().setFlag(Message.Flag.OOB).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK),
-          msg().setFlag(Message.Flag.OOB).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK),
-          msg().setFlag(Message.Flag.OOB).setTransientFlag(Message.TransientFlag.DONT_LOOPBACK),
+          msg().setFlag(Message.Flag.OOB).setFlag(Message.TransientFlag.DONT_LOOPBACK),
+          msg().setFlag(Message.Flag.OOB).setFlag(Message.TransientFlag.DONT_LOOPBACK),
+          msg().setFlag(Message.Flag.OOB).setFlag(Message.TransientFlag.DONT_LOOPBACK),
+          msg().setFlag(Message.Flag.OOB).setFlag(Message.TransientFlag.DONT_LOOPBACK),
           msg().setFlag(Message.Flag.OOB)
         };
 
@@ -63,7 +63,7 @@ public class NakackUnitTest {
     }
 
 
-    protected void send(JChannel ch, Message ... msgs) throws Exception {
+    protected static void send(JChannel ch, Message... msgs) throws Exception {
         int cnt=1;
         for(Message msg: msgs) {
             msg.setObject(cnt++);
@@ -71,7 +71,7 @@ public class NakackUnitTest {
         }
     }
 
-    protected void checkReception(MyReceiver r, int ... num) {
+    protected static void checkReception(MyReceiver r, int... num) {
         List<Integer> received=r.list();
         for(int i=0; i < 10; i++) {
             if(received.size() == num.length)
@@ -90,9 +90,9 @@ public class NakackUnitTest {
         b.setReceiver(rb=new MyReceiver());
     }
 
-    protected Message msg() {return new Message(null);}
+    protected static Message msg() {return new BytesMessage(null);}
 
-    protected JChannel create(String name, boolean use_batching) throws Exception {
+    protected static JChannel create(String name, boolean use_batching) throws Exception {
         Protocol[] protocols={
           new SHARED_LOOPBACK(),
           new SHARED_LOOPBACK_PING(),
@@ -101,7 +101,7 @@ public class NakackUnitTest {
           new UNICAST3(),
           new STABLE(),
           new GMS(),
-          new FRAG2().fragSize(8000),
+          new FRAG2().setFragSize(8000),
         };
         return new JChannel(protocols).name(name);
     }
@@ -113,13 +113,13 @@ public class NakackUnitTest {
     }
 
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected final List<Integer> list=new ArrayList<>();
 
         public List<Integer> list()       {return list;}
 
         public void receive(Message msg) {
-            Integer num=(Integer)msg.getObject();
+            Integer num=msg.getObject();
             synchronized(list) {
                 list.add(num);
             }

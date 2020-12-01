@@ -14,8 +14,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
-import java.util.*;
 import java.util.List;
+import java.util.*;
 
 
 /**
@@ -23,7 +23,7 @@ import java.util.List;
  * mouse moves are broadcast to all group members, which then apply them to their canvas<p>
  * @author Bela Ban, Oct 17 2001
  */
-public class Draw extends ReceiverAdapter implements ActionListener, ChannelListener {
+public class Draw implements Receiver, ActionListener, ChannelListener {
     protected String               cluster_name="draw";
     private JChannel               channel=null;
     private int                    member_size=1;
@@ -140,7 +140,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
                 continue;
             }
             if("-uuid".equals(args[i])) {
-                generator=new OneTimeAddressGenerator(Long.valueOf(args[++i]));
+                generator=new OneTimeAddressGenerator(Long.parseLong(args[++i]));
                 continue;
             }
 
@@ -184,7 +184,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
 
     private void sendToAll(byte[] buf) throws Exception {
         for(Address mbr: members)
-            channel.send(new Message(mbr, buf));
+            channel.send(new BytesMessage(mbr, buf));
     }
 
 
@@ -245,9 +245,9 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
     }
 
     public void receive(Message msg) {
-        byte[] buf=msg.getRawBuffer();
+        byte[] buf=msg.getArray();
         if(buf == null) {
-            System.err.printf("%s: received null buffer from %s, headers: %s\n", channel.getAddress(), msg.src(), msg.printHeaders());
+            System.err.printf("%s: received null buffer from %s, headers: %s\n", channel.getAddress(), msg.getSrc(), msg.printHeaders());
             return;
         }
 
@@ -336,7 +336,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
             if(use_unicasts)
                 sendToAll(buf);
             else
-                channel.send(new Message(null, buf));
+                channel.send(new BytesMessage(null, buf));
         }
         catch(Exception ex) {
             System.err.println(ex);
@@ -388,7 +388,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
                 if(use_unicasts)
                     sendToAll(buf);
                 else
-                    channel.send(new Message(null, buf));
+                    channel.send(new BytesMessage(null, buf));
             }
             catch(Exception ex) {
                 System.err.println(ex);
@@ -400,9 +400,8 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
     /* ------------------------------ ChannelListener interface -------------------------- */
 
     public void channelConnected(JChannel channel) {
-        if(jmx) {
+        if(jmx)
             Util.registerChannel(channel, "jgroups");
-        }
     }
 
     public void channelDisconnected(JChannel channel) {
@@ -417,10 +416,6 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
                 }
             }
         }
-    }
-
-    public void channelClosed(JChannel channel) {
-
     }
 
 
@@ -529,7 +524,7 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
                 if(use_unicasts)
                     sendToAll(buf);
                 else
-                    channel.send(new Message(null, buf));
+                    channel.send(new BytesMessage(null, buf));
             }
             catch(Exception ex) {
                 System.err.println(ex);
@@ -574,18 +569,13 @@ public class Draw extends ReceiverAdapter implements ActionListener, ChannelList
 
         /** Draw the entire panel from the state */
         public void drawState() {
-            // clear();
-            Map.Entry entry;
-            Point pt;
-            Color col;
             synchronized(state) {
-                for(Iterator it=state.entrySet().iterator(); it.hasNext();) {
-                    entry=(Map.Entry)it.next();
-                    pt=(Point)entry.getKey();
-                    col=(Color)entry.getValue();
+                for(Iterator<?> it=state.entrySet().iterator(); it.hasNext();) {
+                    Map.Entry<Point,Color> entry=(Map.Entry<Point,Color>)it.next();
+                    Point pt=entry.getKey();
+                    Color col=entry.getValue();
                     gr.setColor(col);
                     gr.fillOval(pt.x, pt.y, 10, 10);
-
                 }
             }
             repaint();

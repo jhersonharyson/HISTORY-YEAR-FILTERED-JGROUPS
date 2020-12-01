@@ -47,7 +47,7 @@ public class FalseSuspicionTest {
 
     public void testFalseSuspicion() throws Exception {
         JChannel e=channels[channels.length-1];
-        FD_SOCK fd_sock=(FD_SOCK)e.getProtocolStack().findProtocol(FD_SOCK.class);
+        FD_SOCK fd_sock=e.getProtocolStack().findProtocol(FD_SOCK.class);
 
         System.out.println("*** suspecting " + channels[1].getAddress());
         suspect_method.invoke(fd_sock, channels[1].getAddress());
@@ -64,7 +64,7 @@ public class FalseSuspicionTest {
     protected int getTotalSuspectedMembers() {
         int total=0;
         for(JChannel ch: channels) {
-            FD_SOCK fd_sock=(FD_SOCK)ch.getProtocolStack().findProtocol(FD_SOCK.class);
+            FD_SOCK fd_sock=ch.getProtocolStack().findProtocol(FD_SOCK.class);
             total+=fd_sock.getNumSuspectedMembers();
         }
         return total;
@@ -72,15 +72,15 @@ public class FalseSuspicionTest {
 
 
 
-    protected JChannel create(String name) throws Exception {
+    protected static JChannel create(String name) throws Exception {
         return new JChannel(
           new SHARED_LOOPBACK(),
           new SHARED_LOOPBACK_PING(),
-          new FD_SOCK().setValue("bind_addr", InetAddress.getByName("127.0.0.1")),
+          new FD_SOCK().setBindAddress(InetAddress.getByName("127.0.0.1")),
           new VERIFY_SUSPECT(),
           new NAKACK2(),
           new UNICAST3(),
           new STABLE(),
-          new GMS().joinTimeout(1000)).name(name);
+          new GMS().setJoinTimeout(1000)).name(name);
     }
 }

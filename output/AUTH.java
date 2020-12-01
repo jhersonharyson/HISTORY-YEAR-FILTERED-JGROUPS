@@ -12,9 +12,9 @@ import org.jgroups.protocols.pbcast.GMS;
 import org.jgroups.protocols.pbcast.JoinRsp;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.MessageBatch;
+import org.jgroups.util.MessageIterator;
 import org.jgroups.util.Util;
 
-import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -32,28 +32,21 @@ import java.util.List;
   "auth_value",                                                         // SimpleToken, MD5Token, X509Token
   "fixed_members_value", "fixed_members_seperator",                     // FixedMembershipToken
   "client_principal_name", "client_password", "service_principal_name", // Krb5Token
-  "token_hash",                                                         // MD5Token
   "match_string", "match_ip_address", "match_logical_name",             // RegexMembership
   "keystore_type", "cert_alias", "keystore_path", "cipher_type",
   "cert_password", "keystore_password"                                  // X509Token
 })
 @MBean(description="Provides authentication of joiners, to prevent un-authorized joining of a cluster")
 public class AUTH extends Protocol {
+    protected static final short    GMS_ID=ClassConfigurator.getProtocolId(GMS.class);
 
     /** Used on the coordinator to authentication joining member requests against */
     protected AuthToken             auth_token;
-
-    protected static final short    GMS_ID=ClassConfigurator.getProtocolId(GMS.class);
-
-    /** List of UpHandler which are called when an up event has been received. Usually used by AuthToken impls */
-    protected final List<UpHandler> up_handlers=new ArrayList<>();
-
     protected Address               local_addr;
-
+    protected volatile boolean      authenticate_coord=true;
 
     public AUTH() {}
 
-    protected volatile boolean      authenticate_coord=true;
     
     @Property(description="Do join or merge responses from the coordinator also need to be authenticated")
     public AUTH setAuthCoord( boolean authenticateCoord) {
@@ -70,10 +63,6 @@ public class AUTH extends Protocol {
     public String    getAuthClass()                {return auth_token != null? auth_token.getClass().getName() : null;}
     public AuthToken getAuthToken()                {return auth_token;}
     public AUTH      setAuthToken(AuthToken token) {this.auth_token=token; return this;}
-    @Deprecated
-    public AUTH      register(UpHandler handler)   {up_handlers.add(handler); return this;}
-    @Deprecated
-    public AUTH      unregister(UpHandler handler) {up_handlers.remove(handler);return this;}
     public Address   getAddress()                  {return local_addr;}
     public PhysicalAddress getPhysicalAddress()    {return getTransport().getPhysicalAddress();}
 
@@ -127,8 +116,8 @@ public class AUTH extends Protocol {
         if(gms_hdr != null && needsAuthentication(msg, gms_hdr)) {
             AuthHeader auth_hdr=msg.getHeader(id);
             if(auth_hdr == null) {
-                sendRejectionMessage(gms_hdr.getType(), msg.src(), "no AUTH header found in message");
-                throw new IllegalStateException(String.format("found %s from %s but no AUTH header", gms_hdr, msg.src()));
+                sendRejectionMessage(gms_hdr.getType(), msg.getSrc(), "no AUTH header found in message");
+                throw new IllegalStateException(String.format("found %s from %s but no AUTH header", gms_hdr, msg.getSrc()));
             }
             if(!handleAuthHeader(gms_hdr, auth_hdr, msg)) // authentication failed
                 return null;    // don't pass up
@@ -137,7 +126,9 @@ public class AUTH extends Protocol {
     }
 
     public void up(MessageBatch batch) {
-        for(Message msg: batch) {
+        MessageIterator it=batch.iterator();
+        while(it.hasNext()) {
+            Message msg=it.next();
             // If we have a join or merge request --> authenticate, else pass up
             GMS.GmsHeader gms_hdr=getGMSHeader(msg);
             if(gms_hdr != null && needsAuthentication(msg, gms_hdr)) {
@@ -145,10 +136,10 @@ public class AUTH extends Protocol {
                 if(auth_hdr == null) {
                     log.warn("%s: found GMS join or merge request from %s but no AUTH header", local_addr, batch.sender());
                     sendRejectionMessage(gms_hdr.getType(), batch.sender(), "join or merge without an AUTH header");
-                    batch.remove(msg);
+                    it.remove();
                 }
                 else if(!handleAuthHeader(gms_hdr, auth_hdr, msg)) // authentication failed
-                    batch.remove(msg);    // don't pass up
+                    it.remove();    // don't pass up
             }
         }
 
@@ -232,14 +223,14 @@ public class AUTH extends Protocol {
             return;
 
         JoinRsp joinRes=new JoinRsp(error_msg); // specify the error message on the JoinRsp
-        Message msg = new Message(dest).putHeader(GMS_ID, new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP))
-          .setBuffer(GMS.marshal(joinRes));
+        Message msg=new BytesMessage(dest).putHeader(GMS_ID, new GMS.GmsHeader(GMS.GmsHeader.JOIN_RSP))
+          .setArray(GMS.marshal(joinRes));
         down_prot.down(msg);
     }
 
     protected void sendMergeRejectionMessage(Address dest) {
         GMS.GmsHeader hdr=new GMS.GmsHeader(GMS.GmsHeader.MERGE_RSP).setMergeRejected(true);
-        Message msg=new Message(dest).setFlag(Message.Flag.OOB).putHeader(GMS_ID, hdr);
+        Message msg=new EmptyMessage(dest).setFlag(Message.Flag.OOB).putHeader(GMS_ID, hdr);
         if(this.authenticate_coord)
             msg.putHeader(this.id, new AuthHeader(this.auth_token));
         log.debug("merge response=%s", hdr);
@@ -255,7 +246,7 @@ public class AUTH extends Protocol {
     }
 
     protected static JoinRsp getJoinResponse(Message msg) {
-        byte[] buf=msg.getRawBuffer();
+        byte[] buf=msg.getArray();
         try {
             return buf != null? Util.streamableFromBuffer(JoinRsp::new, buf, msg.getOffset(), msg.getLength()) : null;
         }

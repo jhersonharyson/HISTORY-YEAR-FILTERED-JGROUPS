@@ -143,17 +143,12 @@ public class TCPPING extends Discovery {
 
     @Override
     public void findMembers(List<Address> members, boolean initial_discovery, Responses responses) {
-        PingData        data=null;
-        PhysicalAddress physical_addr=null;
+        PhysicalAddress physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
 
-        if(!use_ip_addrs || !initial_discovery) {
-            physical_addr=(PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr));
-
-            // https://issues.jboss.org/browse/JGRP-1670
-            data=new PingData(local_addr, false, NameCache.get(local_addr), physical_addr);
-            if(members != null && members.size() <= max_members_in_discovery_request)
-                data.mbrs(members);
-        }
+        // https://issues.jboss.org/browse/JGRP-1670
+        PingData data=new PingData(local_addr, false, NameCache.get(local_addr), physical_addr);
+        if(members != null && members.size() <= max_members_in_discovery_request)
+            data.mbrs(members);
 
         List<PhysicalAddress> cluster_members=new ArrayList<>(initial_hosts.size() + (dynamic_hosts != null? dynamic_hosts.size() : 0) + 5);
         initial_hosts.stream().filter(phys_addr -> !cluster_members.contains(phys_addr)).forEach(cluster_members::add);
@@ -174,10 +169,10 @@ public class TCPPING extends Discovery {
                 continue;
 
             // the message needs to be DONT_BUNDLE, see explanation above
-            final Message msg=new Message(addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB)
+            final Message msg=new BytesMessage(addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB)
               .putHeader(this.id,hdr);
             if(data != null)
-                msg.setBuffer(marshal(data));
+                msg.setArray(marshal(data));
 
             if(async_discovery_use_separate_thread_per_request)
                 timer.execute(() -> sendDiscoveryRequest(msg), sends_can_block);
@@ -192,7 +187,7 @@ public class TCPPING extends Discovery {
             down_prot.down(req);
         }
         catch(Throwable t) {
-            log.trace("sending discovery request to %s failed: %s", req.dest(), t);
+            log.trace("sending discovery request to %s failed: %s", req.getDest(), t);
         }
     }
 }

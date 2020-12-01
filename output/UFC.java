@@ -6,9 +6,11 @@ import org.jgroups.Message;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.util.Credit;
 import org.jgroups.util.Util;
 
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -68,7 +70,7 @@ public class UFC extends FlowControl {
         sent.values().forEach(cred -> cred.increment(max_credits, max_credits));
     }
 
-    @ManagedAttribute(description="Number of times flow control blocks sender")
+    @ManagedAttribute(description="Number of times flow control blocks sender",type=AttributeType.SCALAR)
     public int getNumberOfBlockings() {
         int retval=0;
         for(Credit cred: sent.values())
@@ -76,7 +78,8 @@ public class UFC extends FlowControl {
         return retval;
     }
 
-    @ManagedAttribute(description="Average time blocked (in ms) in flow control when trying to send a message")
+    @ManagedAttribute(description="Average time blocked (in ms) in flow control when trying to send a message",
+      type=AttributeType.TIME)
     public double getAverageTimeBlocked() {
         return sent.values().stream().mapToDouble(c -> c.getAverageBlockTime() / 1_000_000).average().orElse(0.0);
     }
@@ -85,16 +88,17 @@ public class UFC extends FlowControl {
     public void stop() {
         super.stop();
         unblock();
+        sent.values().forEach(Credit::reset);
     }
 
     public void resetStats() {
         super.resetStats();
-        sent.values().forEach(Credit::reset);
+        sent.values().forEach(Credit::resetStats);
     }
 
     @Override
     protected Object handleDownMessage(final Message msg) {
-        Address dest=msg.dest();
+        Address dest=msg.getDest();
         if(dest == null) { // 2nd line of defense, not really needed
             log.error("%s doesn't handle multicast messages; passing message down", getClass().getSimpleName());
             return down_prot.down(msg);
@@ -104,7 +108,7 @@ public class UFC extends FlowControl {
         if(cred == null)
             return down_prot.down(msg);
 
-        int length=msg.length();
+        int length=msg.getLength();
         long block_time=max_block_times != null? getMaxBlockTime(length) : max_block_time;
         
         while(running && sent.containsKey(dest)) {
@@ -129,7 +133,17 @@ public class UFC extends FlowControl {
         mbrs.stream().filter(addr -> !sent.containsKey(addr)).forEach(addr -> sent.put(addr, createCredit((int)max_credits)));
 
         // remove members that left
-        sent.keySet().retainAll(mbrs);
+        Iterator<? extends Map.Entry<Address,? extends Credit>> it=sent.entrySet().iterator();
+        while(it.hasNext()) {
+            Map.Entry<Address,? extends Credit> entry=it.next();
+            Address addr=entry.getKey();
+            if(!mbrs.contains(addr)) {
+                Credit cred=entry.getValue();
+                cred.reset();
+                it.remove();
+            }
+        }
+        // sent.keySet().retainAll(mbrs);
     }
 
 

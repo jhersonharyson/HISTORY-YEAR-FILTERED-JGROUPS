@@ -13,15 +13,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * STATE streams the state (written to an OutputStream) to the state requester in chunks (defined by
  * chunk_size). Every chunk is sent via a unicast message. The state requester writes the chunks into a blocking
- * input stream ({@link BlockingInputStream}) from which the {@link MessageListener#setState(java.io.InputStream)}
+ * input stream ({@link BlockingInputStream}) from which the {@link Receiver#setState(java.io.InputStream)}
  * reads it. The size of the BlockingInputStream is buffer_size bytes.
  * <p/>
- * When implementing {@link MessageListener#getState(java.io.OutputStream)}, the state should be written in sizeable
+ * When implementing {@link Receiver#getState(java.io.OutputStream)}, the state should be written in sizeable
  * chunks, because the underlying output stream generates 1 message / write. So if there are 1000 writes of 1 byte
  * each, this would generate 1000 messages ! We suggest using a {@link java.io.BufferedOutputStream} over the output
  * stream handed to the application as argument of the callback.
  * <p/>
- * When implementing the {@link MessageListener#setState(java.io.InputStream)} callback, there is no need to use a
+ * When implementing the {@link Receiver#setState(java.io.InputStream)} callback, there is no need to use a
  * {@link java.io.BufferedOutputStream}, as the input stream handed to the application already buffers incoming data
  * internally.
  * @author Bela Ban
@@ -131,13 +131,13 @@ public class STATE extends StreamingStateTransfer {
         public void write(int b) throws IOException {
             if(closed.get())
                 throw new IOException("The output stream is closed");
-            byte buf[]={(byte)b};
+            byte[] buf={(byte)b};
             write(buf);
         }
 
 
         protected void sendMessage(byte[] b, int off, int len) throws IOException {
-            Message m=new Message(stateRequester).putHeader(id, new StateHeader(StateHeader.STATE_PART));
+            Message m=new BytesMessage(stateRequester).putHeader(id, new StateHeader(StateHeader.STATE_PART));
 
             // we're copying the buffer passed from the state provider here: if a BufferedOutputStream is used, the
             // buffer (b) will always be the same and can be modified after it has been set in the message !
@@ -146,7 +146,7 @@ public class STATE extends StreamingStateTransfer {
             byte[] data=new byte[len];
             System.arraycopy(b, off, data, 0, len);
             // m.setBuffer(b, off, len);
-            m.setBuffer(data);
+            m.setArray(data, 0, data.length);
 
             bytesWrittenCounter+=len;
             if(Thread.interrupted())

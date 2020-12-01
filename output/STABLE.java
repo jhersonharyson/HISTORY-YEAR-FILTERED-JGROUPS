@@ -3,6 +3,7 @@ package org.jgroups.protocols.pbcast;
 
 import org.jgroups.*;
 import org.jgroups.annotations.*;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.protocols.TCP;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
@@ -45,14 +46,14 @@ public class STABLE extends Protocol {
     /**
      * Sends a STABLE gossip every 20 seconds on average. 0 disables gossiping of STABLE messages
      */
-    @Property(description="Average time to send a STABLE message")
+    @Property(description="Average time to send a STABLE message",type=AttributeType.TIME)
     protected long   desired_avg_gossip=20000;
 
     /**
      * delay before we send STABILITY msg (give others a change to send first).
      * This should be set to a very small number (> 0 !) if {@code max_bytes} is used
      */
-    @Property(description="Delay before stability message is sent")
+    @Property(description="Delay before stability message is sent",type=AttributeType.TIME)
     protected long   stability_delay=6000;
 
     /**
@@ -62,7 +63,8 @@ public class STABLE extends Protocol {
      * ideally {@code stability_delay} should be set to a low number as
      * well
      */
-    @Property(description="Maximum number of bytes received in all messages before sending a STABLE message is triggered")
+    @Property(description="Maximum number of bytes received in all messages before sending a STABLE message is triggered",
+      type=AttributeType.BYTES)
     protected long   max_bytes=2000000;
 
 
@@ -110,8 +112,8 @@ public class STABLE extends Protocol {
 
     /** The total number of bytes received from unicast and multicast messages */
     @GuardedBy("received")
-    @ManagedAttribute(description="Bytes accumulated so far")
-    protected long                num_bytes_received=0;
+    @ManagedAttribute(description="Bytes accumulated so far",type=AttributeType.BYTES)
+    protected long                num_bytes_received;
 
     protected final Lock          received=new ReentrantLock();
 
@@ -133,33 +135,22 @@ public class STABLE extends Protocol {
     public STABLE() {             
     }
 
-    public long getDesiredAverageGossip() {
-        return desired_avg_gossip;
-    }
-
-    public void setDesiredAverageGossip(long gossip_interval) {
-        desired_avg_gossip=gossip_interval;
-    }
-
-    public STABLE desiredAverageGossip(long g) {this.desired_avg_gossip=g; return this;}
-
-    public long getMaxBytes() {
-        return max_bytes;
-    }
-
-    public void setMaxBytes(long max_bytes) {
-        this.max_bytes=max_bytes;
-    }
+    public long   getDesiredAverageGossip()       {return desired_avg_gossip;}
+    public STABLE setDesiredAverageGossip(long g) {desired_avg_gossip=g; return this;}
+    public long   getMaxBytes()                   {return max_bytes;}
+    public STABLE setMaxBytes(long m)             {this.max_bytes=m; return this;}
+    public long   getStabilityDelay()             {return stability_delay;}
+    public STABLE setStabilityDelay(long d)       {stability_delay=d; return this;}
 
     // @ManagedAttribute(name="bytes_received")
     public long getBytes() {return num_bytes_received;}
-    @ManagedAttribute
+    @ManagedAttribute(type=AttributeType.SCALAR)
     public int getStableSent() {return num_stable_msgs_sent;}
-    @ManagedAttribute
+    @ManagedAttribute(type=AttributeType.SCALAR)
     public int getStableReceived() {return num_stable_msgs_received;}
-    @ManagedAttribute
+    @ManagedAttribute(type=AttributeType.SCALAR)
     public int getStabilitySent() {return num_stability_msgs_sent;}
-    @ManagedAttribute
+    @ManagedAttribute(type=AttributeType.SCALAR)
     public int getStabilityReceived() {return num_stability_msgs_received;}
 
     @ManagedAttribute
@@ -243,7 +234,7 @@ public class STABLE extends Protocol {
             return up_prot.up(msg);
         }
 
-        handleUpEvent(hdr, msg.getSrc(), readDigest(msg.getRawBuffer(), msg.getOffset(), msg.getLength()));
+        handleUpEvent(hdr, msg.getSrc(), msg.getObject());
         return null;  // don't pass STABLE or STABILITY messages up the stack
     }
 
@@ -263,11 +254,12 @@ public class STABLE extends Protocol {
 
     public void up(MessageBatch batch) {
         StableHeader hdr;
-
-        for(Message msg: batch) { // remove and handle messages with flow control headers (STABLE_GOSSIP, STABILITY)
+        MessageIterator it=batch.iterator();
+        while(it.hasNext()) { // remove and handle messages with flow control headers (STABLE_GOSSIP, STABILITY)
+            Message msg=it.next();
             if((hdr=msg.getHeader(id)) != null) {
-                batch.remove(msg);
-                handleUpEvent(hdr, batch.sender(), readDigest(msg.getRawBuffer(), msg.getOffset(), msg.getLength()));
+                it.remove();
+                handleUpEvent(hdr, batch.sender(), msg.getObject());
             }
         }
 
@@ -662,12 +654,12 @@ public class STABLE extends Protocol {
             return;
         }
 
-        final Message msg=new Message(dest)
-          .setFlag(Message.Flag.OOB,Message.Flag.INTERNAL,Message.Flag.NO_RELIABILITY)
-          .putHeader(this.id, new StableHeader(StableHeader.STABLE_GOSSIP, current_view.getViewId()))
-          .setBuffer(marshal(d));
+        final Message msg=new ObjectMessage(dest, d)
+          .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.NO_RELIABILITY)
+          .putHeader(this.id, new StableHeader(StableHeader.STABLE_GOSSIP, current_view.getViewId()));
         try {
             if(!send_in_background) {
+                num_stable_msgs_sent++;
                 down_prot.down(msg);
                 return;
             }
@@ -688,8 +680,13 @@ public class STABLE extends Protocol {
     }
 
 
-    public static Buffer marshal(Digest digest) {
-        return Util.streamableToBuffer(digest);
+   /* public static ByteArray marshal(Digest digest) {
+        try {
+            return Util.streamableToBuffer(digest);
+        }
+        catch(Exception e) {
+            return null;
+        }
     }
 
     protected Digest readDigest(byte[] buffer, int offset, int length) {
@@ -700,7 +697,7 @@ public class STABLE extends Protocol {
             log.error("%s: failed reading Digest from message: %s", local_addr, ex);
             return null;
         }
-    }
+    }*/
 
 
     /**
@@ -731,9 +728,9 @@ public class STABLE extends Protocol {
         // https://issues.jboss.org/browse/JGRP-1638: we reverted to sending the STABILITY message *unreliably*,
         // but clear votes *before* sending it
         try {
-            Message msg=new Message().setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.NO_RELIABILITY)
-              .putHeader(id, new StableHeader(StableHeader.STABILITY, view_id))
-              .setBuffer(marshal(stability_digest));
+            Message msg=new ObjectMessage(null, stability_digest)
+              .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.NO_RELIABILITY)
+              .putHeader(id, new StableHeader(StableHeader.STABILITY, view_id));
             log.trace("%s: sending stability msg %s", local_addr, printDigest(stability_digest));
             num_stability_msgs_sent++;
             down_prot.down(msg);

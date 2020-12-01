@@ -1,9 +1,6 @@
 package org.jgroups.tests;
 
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
-import org.jgroups.View;
+import org.jgroups.*;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.protocols.FRAG2;
 import org.jgroups.protocols.FRAG3;
@@ -22,6 +19,8 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -31,7 +30,7 @@ import java.util.List;
  */
 @Test(groups=Global.FUNCTIONAL,singleThreaded=true)
 public class DeltaViewTest {
-    protected JChannel                        j, k, l;
+    protected JChannel                        j, k, l, m, n;
     protected static final String             CLUSTER=DeltaViewTest.class.getSimpleName();
     protected static final short              GMS_ID=ClassConfigurator.getProtocolId(GMS.class);
 
@@ -43,7 +42,7 @@ public class DeltaViewTest {
         l=create("L");
     }
 
-    @AfterMethod protected void destroy() {Util.close(l, k, j);}
+    @AfterMethod protected void destroy() {Util.closeReverse(j,k,l,m,n);}
 
 
     public void testDeltaViews() throws Exception {
@@ -61,18 +60,64 @@ public class DeltaViewTest {
         System.out.printf("\nJ: %s\nK: %s\nL: %s\n", j.getView(), k.getView(), l.getView());
     }
 
+    /**
+     * Tests https://issues.redhat.com/browse/JGRP-2421:
+     * <pre>
+     * - View is V0={J,K,L,M,N}
+     * - N is excluded and gets view V1={J,K,L,M}
+     * - N drops V1 as it is not a member
+     * - Delta-view V2={J,K,L} is installed
+     * - N cannot construct V2, as it refers to V1 which N discarded -> error message
+     * </pre>
+     */
+    public void testViewCannotBeCreatedFromDeltaView() throws Exception {
+        m=create("M");
+        n=create("N");
+        connect(CLUSTER, j,k,l,m,n);
+
+        // Remove N by injecting SUSPECT event in the coordinator:
+        GMS gms=j.getProtocolStack().findProtocol(GMS.class);
+        gms.up(new Event(Event.SUSPECT, Collections.singletonList(n.getAddress())));
+        Util.waitUntilAllChannelsHaveSameView(5000, 500, j,k,l,m);
+        for(JChannel ch: Arrays.asList(j,k,l,m,n)) {
+            System.out.printf("%s: %s\n", ch.getAddress(), ch.getView());
+        }
+        View vn=n.getView();
+        assert vn.size() == 5;
+
+        // Now make M leave. The new delta view {J,K,L} will cause the warning message (failed creating delta view) in N
+        Util.close(m);
+        Util.waitUntilAllChannelsHaveSameView(5000, 500, j,k,l);
+        for(JChannel ch: Arrays.asList(j,k,l,n)) {
+            System.out.printf("%s: %s\n", ch.getAddress(), ch.getView());
+        }
+
+        Util.shutdown(n);
+    }
 
 
-    protected JChannel create(String name) throws Exception {
+    protected static JChannel create(String name) throws Exception {
         JChannel ch=new JChannel(Util.getTestStack()).name(name);
         ch.getProtocolStack().removeProtocol(STABLE.class, FRAG2.class, FRAG3.class);
         GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
         gms.setViewAckCollectionTimeout(1000);
-        gms.setValue("join_timeout", 1500);
+        gms.setJoinTimeout(1500);
           //.setValue("install_view_locally_first", false); // setting this to true should fix the issue!
         return ch;
     }
 
+    protected static void connect(String cluster_name, JChannel ... channels) throws Exception {
+        for(JChannel ch: channels)
+            ch.connect(cluster_name);
+        Util.waitUntilAllChannelsHaveSameView(10000, 500, channels);
+    }
+
+    protected static void injectView(View v, JChannel ... channels) {
+        for(JChannel ch: channels) {
+            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            gms.installView(v);
+        }
+    }
 
 
     // up first view: queue
@@ -134,8 +179,8 @@ public class DeltaViewTest {
             int count=1;
             for(Message msg: join_rsps) {
                 try {
-                    JoinRsp join_rsp=Util.streamableFromBuffer(JoinRsp::new, msg.getRawBuffer(), msg.getOffset(), msg.getLength());
-                    System.out.printf("join-rsp #%d to %s: %s\n", count++, msg.dest(), join_rsp.getView());
+                    JoinRsp join_rsp=Util.streamableFromBuffer(JoinRsp::new, msg.getArray(), msg.getOffset(), msg.getLength());
+                    System.out.printf("join-rsp #%d to %s: %s\n", count++, msg.getDest(), join_rsp.getView());
                 }
                 catch(Throwable t) {
                     log.error("failed unmarshalling JOIN-RSP", t);
@@ -146,7 +191,7 @@ public class DeltaViewTest {
             count=1;
             for(Message msg: views) {
                 try {
-                    Tuple<View,Digest> tuple=GMS._readViewAndDigest(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                    Tuple<View,Digest> tuple=GMS._readViewAndDigest(msg.getArray(), msg.getOffset(), msg.getLength());
                     System.out.printf("view #%d: %s\n", count++, tuple.getVal1());
                 }
                 catch(Throwable t) {
@@ -164,7 +209,7 @@ public class DeltaViewTest {
             join_rsp_msg=join_rsps.remove(0);
             JoinRsp join_rsp=null;
             try {
-                join_rsp=Util.streamableFromBuffer(JoinRsp::new, join_rsp_msg.getRawBuffer(), join_rsp_msg.getOffset(), join_rsp_msg.getLength());
+                join_rsp=Util.streamableFromBuffer(JoinRsp::new, join_rsp_msg.getArray(), join_rsp_msg.getOffset(), join_rsp_msg.getLength());
             }
             catch(Exception e) {
                 throw new RuntimeException(e);

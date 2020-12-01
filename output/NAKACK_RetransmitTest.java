@@ -3,7 +3,7 @@ package org.jgroups.protocols;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.Message;
-import org.jgroups.ReceiverAdapter;
+import org.jgroups.Receiver;
 import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.Protocol;
@@ -118,17 +118,19 @@ public class NAKACK_RetransmitTest {
             NAKACK2 nak=ch.getProtocolStack().findProtocol(NAKACK2.class);
             if(nak == null)
                 throw new IllegalStateException("NAKACK2 not present in the stack");
-            nak.setValue("max_xmit_req_size", 5000);
+            nak.setMaxXmitReqSize(5000);
         }
     }
 
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected final Queue<Integer> list=new ConcurrentLinkedQueue<>();
 
         public void receive(Message msg) {
             Integer num=msg.getObject();
-            list.add(num);
+            synchronized(list) {
+                list.add(num);
+            }
         }
 
         public Queue<Integer> getList() {return list;}
@@ -173,7 +175,7 @@ public class NAKACK_RetransmitTest {
         protected boolean discard=false;
 
         public Object down(Message msg) {
-            if(msg.dest() == null) {
+            if(msg.getDest() == null) {
                 discard=!discard;
                 if(discard)
                     return null;

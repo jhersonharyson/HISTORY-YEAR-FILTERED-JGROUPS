@@ -1,9 +1,6 @@
 package org.jgroups.tests;
 
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
-import org.jgroups.ReceiverAdapter;
+import org.jgroups.*;
 import org.jgroups.protocols.FRAG2;
 import org.jgroups.protocols.MPING;
 import org.jgroups.protocols.TCP_NIO2;
@@ -46,7 +43,7 @@ public class NioServerTest2 {
 
     public void testMulticasting() throws Exception {
         for(int i=1; i<= NUM_MSGS; i++) {
-            Message msg=new Message(null, new byte[MSG_SIZE], 0, MSG_SIZE);
+            Message msg=new BytesMessage(null, new byte[MSG_SIZE], 0, MSG_SIZE);
             a.send(msg);
         }
 
@@ -81,19 +78,17 @@ public class NioServerTest2 {
 
     protected static JChannel create(String name) throws Exception {
         return new JChannel(
-          new TCP_NIO2()
-            .setValue("bind_addr", Util.getLoopback())
-            .setValue("recv_buf_size", recv_buf_size).setValue("send_buf_size", send_buf_size),
+          new TCP_NIO2().setRecvBufSize(recv_buf_size).setSendBufSize(send_buf_size).setBindAddress(Util.getLoopback()),
           new MPING(),
-          new NAKACK2().setValue("use_mcast_xmit", false),
+          new NAKACK2().useMcastXmit(false),
           new UNICAST3(),
           new STABLE(),
-          new GMS().joinTimeout(1000),
+          new GMS().setJoinTimeout(1000),
           new FRAG2()).name(name);
     }
 
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected int good, bad;
         protected List<byte[]> bad_msgs=new ArrayList<>(1000);
 
@@ -107,7 +102,7 @@ public class NioServerTest2 {
                 bad++;
                 byte[] copy=new byte[msg.getLength()];
                 byte[] buf=null;
-                buf=msg.getRawBuffer();
+                buf=msg.getArray();
                 System.arraycopy(buf, msg.getOffset(), copy, 0, copy.length);
                 bad_msgs.add(copy);
             }

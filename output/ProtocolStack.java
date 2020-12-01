@@ -1,9 +1,6 @@
 package org.jgroups.stack;
 
-import org.jgroups.Event;
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
+import org.jgroups.*;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.conf.PropertyConverter;
@@ -274,7 +271,19 @@ public class ProtocolStack extends Protocol {
 
 
     public Map<String,Map<String,Object>> dumpStats(final String protocol_name, List<String> attrs) {
-        List<Protocol> prots=findProtocols(protocol_name);
+        List<Protocol> prots=null;
+
+        try {
+            Class<? extends Protocol> cl=Util.loadProtocolClass(protocol_name, this.getClass());
+            Protocol prot=findProtocol(cl);
+            if(prot != null)
+                prots=Collections.singletonList(prot);
+        }
+        catch(Exception e) {
+        }
+
+        if(prots ==null)
+            prots=findProtocols(protocol_name);
         if(prots == null || prots.isEmpty())
             return null;
         Map<String,Map<String,Object>> retval=new HashMap<>();
@@ -296,10 +305,11 @@ public class ProtocolStack extends Protocol {
                         it.remove();
                 }
             }
-            if(retval.containsKey(protocol_name))
-                retval.put(protocol_name + "-" + prot.getId(), tmp);
+            String pname=prot.getName();
+            if(retval.containsKey(pname))
+                retval.put(pname + "-" + prot.getId(), tmp);
             else
-                retval.put(protocol_name, tmp);
+                retval.put(pname, tmp);
         }
         return retval;
     }
@@ -825,7 +835,7 @@ public class ProtocolStack extends Protocol {
             ip_version=resolved_addr instanceof Inet6Address? StackType.IPv6 : StackType.IPv4;
         else if(ip_version == StackType.Dual)
             ip_version=StackType.IPv4; // prefer IPv4 addresses
-        Configurator.setDefaultValues(protocols, ip_version);
+        Configurator.setDefaultAddressValues(protocols, ip_version);
         initProtocolStack();
     }
 
@@ -920,7 +930,7 @@ public class ProtocolStack extends Protocol {
     protected static void callAfterCreationHook(Protocol prot, String classname) throws Exception {
         if(classname == null || prot == null)
             return;
-        Class<ProtocolHook> clazz=Util.loadClass(classname, prot.getClass());
+        Class<ProtocolHook> clazz=(Class<ProtocolHook>)Util.loadClass(classname, prot.getClass());
         ProtocolHook hook=clazz.getDeclaredConstructor().newInstance();
         hook.afterCreation(prot);
     }

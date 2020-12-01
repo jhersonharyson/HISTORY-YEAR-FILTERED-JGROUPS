@@ -1,6 +1,7 @@
 package org.jgroups.tests;
 
 import org.jgroups.Address;
+import org.jgroups.BytesMessage;
 import org.jgroups.Message;
 import org.jgroups.PhysicalAddress;
 import org.jgroups.protocols.*;
@@ -170,7 +171,7 @@ public class BundlerStressTest {
         if(bundler.startsWith("no-bundler") || bundler.equals("nb"))
             return new NoBundler();
         try {
-            Class<Bundler> clazz=Util.loadClass(bundler, getClass());
+            Class<Bundler> clazz=(Class<Bundler>)Util.loadClass(bundler, getClass());
             return clazz.getDeclaredConstructor().newInstance();
         }
         catch(Throwable t) {
@@ -181,7 +182,7 @@ public class BundlerStressTest {
     protected Message[] generateMessages(int num) {
         Message[] msgs=new Message[num];
         for(int i=0; i < msgs.length; i++)
-            msgs[i]=new Message(pickAddress(), new byte[msg_size]);
+            msgs[i]=new BytesMessage(pickAddress(), new byte[msg_size]);
         return msgs;
     }
 
@@ -196,7 +197,7 @@ public class BundlerStressTest {
                 bundler=args[++i];
                 continue;
             }
-            System.out.printf("BundlerStressTest [-bundler bundler-type]\n");
+            System.out.print("BundlerStressTest [-bundler bundler-type]\n");
             return;
         }
         new BundlerStressTest(bundler).start();

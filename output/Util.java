@@ -14,18 +14,24 @@ import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.protocols.relay.SiteMaster;
 import org.jgroups.protocols.relay.SiteUUID;
 import org.jgroups.stack.IpAddress;
-import org.jgroups.stack.IpAddressUUID;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
 import javax.management.MBeanServer;
 import javax.management.MBeanServerFactory;
 import java.io.*;
 import java.lang.annotation.Annotation;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.lang.reflect.*;
+import java.math.BigInteger;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
@@ -35,10 +41,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
-import java.util.function.IntFunction;
-import java.util.function.Predicate;
-import java.util.function.Supplier;
+import java.util.function.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -48,27 +51,38 @@ import static java.lang.System.nanoTime;
 import static org.jgroups.protocols.TP.LIST;
 import static org.jgroups.protocols.TP.MULTICAST;
 
-
 /**
  * Collection of various utility routines that can not be assigned to other classes.
  * @author Bela Ban
  */
 public class Util {
-    private static final Map<Class<? extends Object>,Byte> PRIMITIVE_TYPES=new HashMap<>(15);
+    private static final Map<Class<?>,Byte>   TYPES=new IdentityHashMap<>(30);
+    private static final IntHashMap<Class<?>> CLASS_TYPES=new IntHashMap<>(20);
+
     private static final byte    TYPE_NULL         =  0;
-    private static final byte    TYPE_STREAMABLE   =  1;
-    private static final byte    TYPE_SERIALIZABLE =  2;
-    private static final byte    TYPE_BOOLEAN      = 10;
-    private static final byte    TYPE_BYTE         = 11;
-    private static final byte    TYPE_CHAR         = 12;
-    private static final byte    TYPE_DOUBLE       = 13;
-    private static final byte    TYPE_FLOAT        = 14;
-    private static final byte    TYPE_INT          = 15;
-    private static final byte    TYPE_LONG         = 16;
-    private static final byte    TYPE_SHORT        = 17;
-    private static final byte    TYPE_STRING       = 18; // ascii
-    private static final byte    TYPE_BYTEARRAY    = 19;
-    private static final byte    TYPE_UTF_STRING   = 21; // multibyte charset
+    private static final byte    TYPE_BOOLEAN      =  1; // boolean
+    private static final byte    TYPE_BOOLEAN_OBJ  =  2; // Boolean
+    private static final byte    TYPE_BYTE         =  3; // byte
+    private static final byte    TYPE_BYTE_OBJ     =  4; // Byte
+    private static final byte    TYPE_CHAR         =  5; // char
+    private static final byte    TYPE_CHAR_OBJ     =  6; // Character
+    private static final byte    TYPE_DOUBLE       =  7; // double
+    private static final byte    TYPE_DOUBLE_OBJ   =  8; // Double
+    private static final byte    TYPE_FLOAT        =  9; // float
+    private static final byte    TYPE_FLOAT_OBJ    = 10; // Float
+    private static final byte    TYPE_INT          = 11; // int
+    private static final byte    TYPE_INT_OBJ      = 12; // Integer
+    private static final byte    TYPE_LONG         = 13; // long
+    private static final byte    TYPE_LONG_OBJ     = 14; // Long
+    private static final byte    TYPE_SHORT        = 15; // short
+    private static final byte    TYPE_SHORT_OBJ    = 16; // Short
+    private static final byte    TYPE_STRING       = 17; // ascii
+    private static final byte    TYPE_BYTEARRAY    = 18;
+    private static final byte    TYPE_CLASS        = 19; // a class
+
+    private static final byte    TYPE_STREAMABLE   = 50;
+    private static final byte    TYPE_SERIALIZABLE = 51;
+
 
     public static final int      MAX_PORT=65535; // highest port allocatable
 
@@ -100,65 +114,144 @@ public class Util {
     public static final boolean     can_bind_to_mcast_addr;
     protected static ResourceBundle resource_bundle;
 
+    // Fibers (project Loom - Java 15)
+    private static final MethodHandles.Lookup LOOKUP=MethodHandles.publicLookup();
+    private static final int                  VIRTUAL=getVirtual();
+    private static final MethodHandle         THREAD_NEW_THREAD=getThreadNewThread();
+    private static final MethodHandle         EXECUTORS_NEW_VIRTUAL_THREAD_FACTORY=getNewVirtualThreadFactory();
+
 
     static {
         String tmp;
         resource_bundle=ResourceBundle.getBundle("jg-messages",Locale.getDefault(),Util.class.getClassLoader());
-        PRIMITIVE_TYPES.put(Boolean.class,TYPE_BOOLEAN);
-        PRIMITIVE_TYPES.put(Byte.class,TYPE_BYTE);
-        PRIMITIVE_TYPES.put(Character.class,TYPE_CHAR);
-        PRIMITIVE_TYPES.put(Double.class,TYPE_DOUBLE);
-        PRIMITIVE_TYPES.put(Float.class,TYPE_FLOAT);
-        PRIMITIVE_TYPES.put(Integer.class,TYPE_INT);
-        PRIMITIVE_TYPES.put(Long.class,TYPE_LONG);
-        PRIMITIVE_TYPES.put(Short.class,TYPE_SHORT);
-        PRIMITIVE_TYPES.put(String.class,TYPE_STRING);
-        PRIMITIVE_TYPES.put(byte[].class,TYPE_BYTEARRAY);
+
+        add(TYPE_NULL, Void.class);
+        add(TYPE_BOOLEAN,      boolean.class);
+        add(TYPE_BOOLEAN_OBJ,  Boolean.class);
+        add(TYPE_BYTE,         byte.class);
+        add(TYPE_BYTE_OBJ,     Byte.class);
+        add(TYPE_CHAR,         char.class);
+        add(TYPE_CHAR_OBJ,     Character.class);
+        add(TYPE_DOUBLE,       double.class);
+        add(TYPE_DOUBLE_OBJ,   Double.class);
+        add(TYPE_FLOAT,        float.class);
+        add(TYPE_FLOAT_OBJ,    Float.class);
+        add(TYPE_INT,          int.class);
+        add(TYPE_INT_OBJ,      Integer.class);
+        add(TYPE_LONG,         long.class);
+        add(TYPE_LONG_OBJ,     Long.class);
+        add(TYPE_SHORT,        short.class);
+        add(TYPE_SHORT_OBJ,    Short.class);
+        add(TYPE_STRING,       String.class);
+        add(TYPE_BYTEARRAY,    byte[].class);
+        add(TYPE_CLASS,        Class.class);
 
         can_bind_to_mcast_addr=(Util.checkForLinux() && !Util.checkForAndroid())
           || Util.checkForSolaris() || Util.checkForHp() || Util.checkForMac();
 
         try {
-            String cchm_initial_capacity=System.getProperty(Global.CCHM_INITIAL_CAPACITY);
+            String cchm_initial_capacity=SecurityActions.getProperty(Global.CCHM_INITIAL_CAPACITY);
             if(cchm_initial_capacity != null)
-                CCHM_INITIAL_CAPACITY=Integer.valueOf(cchm_initial_capacity);
+                CCHM_INITIAL_CAPACITY=Integer.parseInt(cchm_initial_capacity);
         }
         catch(SecurityException ignored) {
         }
 
         try {
-            String cchm_load_factor=System.getProperty(Global.CCHM_LOAD_FACTOR);
+            String cchm_load_factor=SecurityActions.getProperty(Global.CCHM_LOAD_FACTOR);
             if(cchm_load_factor != null)
-                CCHM_LOAD_FACTOR=Float.valueOf(cchm_load_factor);
+                CCHM_LOAD_FACTOR=Float.parseFloat(cchm_load_factor);
         }
         catch(SecurityException ignored) {
         }
 
         try {
-            String cchm_concurrency_level=System.getProperty(Global.CCHM_CONCURRENCY_LEVEL);
+            String cchm_concurrency_level=SecurityActions.getProperty(Global.CCHM_CONCURRENCY_LEVEL);
             if(cchm_concurrency_level != null)
-                CCHM_CONCURRENCY_LEVEL=Integer.valueOf(cchm_concurrency_level);
+                CCHM_CONCURRENCY_LEVEL=Integer.parseInt(cchm_concurrency_level);
         }
         catch(SecurityException ignored) {
         }
 
         try {
-            tmp=System.getProperty(Global.MAX_LIST_PRINT_SIZE);
+            tmp=SecurityActions.getProperty(Global.MAX_LIST_PRINT_SIZE);
             if(tmp != null)
-                MAX_LIST_PRINT_SIZE=Integer.valueOf(tmp);
+                MAX_LIST_PRINT_SIZE=Integer.parseInt(tmp);
         }
         catch(SecurityException ignored) {
         }
 
         try {
-            tmp=System.getProperty(Global.DEFAULT_HEADERS);
-            DEFAULT_HEADERS=tmp != null? Integer.valueOf(tmp) : 4;
+            tmp=SecurityActions.getProperty(Global.DEFAULT_HEADERS);
+            DEFAULT_HEADERS=tmp != null? Integer.parseInt(tmp) : 4;
         }
         catch(Throwable t) {
             throw new IllegalArgumentException(String.format("property %s has an incorrect value", Global.DEFAULT_HEADERS), t);
         }
     }
 
+
+    public static boolean fibersAvailable() {
+        return THREAD_NEW_THREAD != null;
+    }
+
+    protected static int getVirtual() {
+        MethodHandle tmp_handle=null;
+        try {
+            tmp_handle=LOOKUP.findStaticGetter(Thread.class, "VIRTUAL", int.class);
+            return (int)tmp_handle.invokeExact();
+        }
+        catch(Throwable t) {
+            return 1;
+        }
+    }
+
+    protected static MethodHandle getThreadNewThread() {
+        MethodType type=MethodType.methodType(Thread.class, String.class, int.class, Runnable.class);
+        try {
+            return LOOKUP.findStatic(Thread.class, "newThread", type);
+        }
+        catch(Exception e) {
+            return null;
+        }
+    }
+
+    protected static MethodHandle getNewVirtualThreadFactory() {
+        MethodType type=MethodType.methodType(ExecutorService.class);
+        try {
+            return LOOKUP.findStatic(Executors.class, "newVirtualThreadExecutor", type);
+        }
+        catch(Exception e) {
+            return null;
+        }
+    }
+
+
+    public static ExecutorService createFiberThreadPool() {
+        if(EXECUTORS_NEW_VIRTUAL_THREAD_FACTORY == null)
+            throw new IllegalStateException("failed to create fiber thread pool (factory is null)");
+        try {
+            return (ExecutorService)EXECUTORS_NEW_VIRTUAL_THREAD_FACTORY.invokeExact();
+        }
+        catch(Throwable t) {
+            throw new IllegalStateException(String.format("failed to create fiber thread pool: %s", t));
+        }
+    }
+
+    /**
+     * Use of reflection to create fibers. If a JDK < 15/Loom is found, we'll create regular threads.
+     */
+    public static Thread createFiber(Runnable r, String name) {
+        if(THREAD_NEW_THREAD == null) {
+            return new Thread(r, name);
+        }
+        try {
+            return (Thread)THREAD_NEW_THREAD.invokeExact(name, VIRTUAL, r);
+        }
+        catch(Throwable ex) {
+            return new Thread(r, name);
+        }
+    }
 
     public static void assertTrue(boolean condition) {
         assert condition;
@@ -190,10 +283,6 @@ public class Util {
         else {
             assert val1.equals(val2);
         }
-    }
-
-    public static void assertEquals(Object val1,Object val2) {
-        assertEquals(null,val1,val2);
     }
 
     public static void assertNotNull(String message,Object val) {
@@ -247,8 +336,8 @@ public class Util {
           new NAKACK2(),
           new UNICAST3(),
           new STABLE(),
-          new GMS().joinTimeout(1000),
-          new FRAG2().fragSize(8000)
+          new GMS().setJoinTimeout(1000),
+          new FRAG2().setFragSize(8000)
         };
 
         if(additional_protocols == null)
@@ -309,15 +398,15 @@ public class Util {
         waitUntilAllChannelsHaveSameView(timeout, interval, tmp);
     }
 
-    public static void waitUntil(long timeout, long interval, Condition condition) throws TimeoutException {
+    public static void waitUntil(long timeout, long interval, BooleanSupplier condition) throws TimeoutException {
         waitUntil(timeout, interval, condition, null);
     }
 
 
-    public static void waitUntil(long timeout, long interval, Condition condition, Supplier<String> msg) throws TimeoutException {
+    public static void waitUntil(long timeout, long interval, BooleanSupplier condition, Supplier<String> msg) throws TimeoutException {
         long target_time=System.currentTimeMillis() + timeout;
         while(System.currentTimeMillis() <= target_time) {
-            if(condition.isMet())
+            if(condition.getAsBoolean())
                 return;
             Util.sleep(interval);
         }
@@ -368,6 +457,24 @@ public class Util {
         assert list.size() == expected_size : "list doesn't have the expected (" + expected_size + ") elements: " + list;
     }
 
+    public static void removeFromViews(Address mbr, JChannel ... channels) {
+        if(mbr == null || channels == null)
+            return;
+        for(JChannel ch: channels) {
+            if(ch == null)
+                continue;
+            GMS gms=ch.getProtocolStack().findProtocol(GMS.class);
+            if(gms == null) continue;
+            View v=gms.view();
+            if(v != null && v.containsMember(mbr)) {
+                List<Address> mbrs=new ArrayList<>(v.getMembers());
+                mbrs.remove(mbr);
+                long id=v.getViewId().getId() + 1;
+                View next=View.create(mbrs.get(0), id, mbrs);
+                gms.installView(next);
+            }
+        }
+    }
 
     public static byte[] createAuthenticationDigest(String passcode,long t1,double q1) throws IOException,
                                                                                               NoSuchAlgorithmException {
@@ -475,7 +582,7 @@ public class Util {
     public static void shutdown(JChannel ch) throws Exception {
         DISCARD discard=new DISCARD();
         discard.setLocalAddress(ch.getAddress());
-        discard.setDiscardAll(true);
+        discard.discardAll(true);
         ProtocolStack stack=ch.getProtocolStack();
         TP transport=stack.getTransport();
         stack.insertProtocol(discard,ProtocolStack.Position.ABOVE,transport.getClass());
@@ -515,6 +622,65 @@ public class Util {
         return bits&=~flag;
     }
 
+    public static String flagsToString(short flags) {
+        StringBuilder sb=new StringBuilder();
+        boolean first=true;
+
+        Message.Flag[] all_flags=Message.Flag.values();
+        for(Message.Flag flag: all_flags) {
+            if(isFlagSet(flags, flag)) {
+                if(first)
+                    first=false;
+                else
+                    sb.append("|");
+                sb.append(flag);
+            }
+        }
+        return sb.toString();
+    }
+
+    public static String transientFlagsToString(short flags) {
+        StringBuilder sb=new StringBuilder();
+        boolean first=true;
+
+        Message.TransientFlag[] all_flags=Message.TransientFlag.values();
+        for(Message.TransientFlag flag: all_flags) {
+            if(isTransientFlagSet(flags, flag)) {
+                if(first)
+                    first=false;
+                else
+                    sb.append("|");
+                sb.append(flag);
+            }
+        }
+        return sb.toString();
+    }
+
+    public static boolean isFlagSet(short flags, Message.Flag flag) {
+        return flag != null && ((flags & flag.value()) == flag.value());
+    }
+
+    public static boolean isTransientFlagSet(short flags, Message.TransientFlag flag) {
+        return flag != null && (flags & flag.value()) == flag.value();
+    }
+
+    /**
+     * Copies a message. Copies only headers with IDs >= starting_id or IDs which are in the copy_only_ids list
+     * @param copy_buffer
+     * @param starting_id
+     * @param copy_only_ids
+     * @return
+     */
+    public static Message copy(Message msg, boolean copy_buffer, short starting_id, short... copy_only_ids) {
+        Message retval=msg.copy(copy_buffer, false);
+        for(Map.Entry<Short,Header> entry: msg.getHeaders().entrySet()) {
+            short id=entry.getKey();
+            if(id >= starting_id || Util.containsId(id, copy_only_ids))
+                retval.putHeader(id, entry.getValue());
+        }
+        return retval;
+    }
+
 
     /**
      * Creates an object from a byte buffer
@@ -528,6 +694,9 @@ public class Util {
         return objectFromByteBuffer(buffer, offset, length, null);
     }
 
+    public static <T extends Object> T objectFromBuffer(ByteArray b, ClassLoader loader) throws IOException, ClassNotFoundException {
+        return objectFromByteBuffer(b.getArray(), b.getOffset(), b.getLength(), loader);
+    }
 
     public static <T extends Object> T objectFromByteBuffer(byte[] buffer,int offset,int length, ClassLoader loader) throws IOException, ClassNotFoundException {
         if(buffer == null) return null;
@@ -543,224 +712,289 @@ public class Util {
                 try(ObjectInputStream oin=new ObjectInputStreamWithClassloader(in_stream, loader)) {
                     return (T)oin.readObject();
                 }
-            case TYPE_BOOLEAN: return (T)(Boolean)(buffer[offset] == 1);
-            case TYPE_BYTE:    return (T)(Byte)buffer[offset];
-            case TYPE_CHAR:    return (T)(Character)Bits.readChar(buffer, offset);
-            case TYPE_DOUBLE:  return (T)(Double)Bits.readDouble(buffer, offset);
-            case TYPE_FLOAT:   return (T)(Float)Bits.readFloat(buffer, offset);
-            case TYPE_INT:     return (T)(Integer)Bits.readInt(buffer, offset);
-            case TYPE_LONG:    return (T)(Long)Bits.readLong(buffer, offset);
-            case TYPE_SHORT:   return (T)(Short)Bits.readShort(buffer, offset);
-            case TYPE_STRING:  return (T)new String(buffer, offset, length);
-            case TYPE_UTF_STRING:
+            case TYPE_BOOLEAN: case TYPE_BOOLEAN_OBJ: return (T)(Boolean)(buffer[offset] == 1);
+            case TYPE_BYTE:    case TYPE_BYTE_OBJ:    return (T)(Byte)buffer[offset];
+            case TYPE_CHAR:    case TYPE_CHAR_OBJ:    return (T)(Character)Bits.readChar(buffer, offset);
+            case TYPE_DOUBLE:  case TYPE_DOUBLE_OBJ:  return (T)(Double)Bits.readDouble(buffer, offset);
+            case TYPE_FLOAT:   case TYPE_FLOAT_OBJ:   return (T)(Float)Bits.readFloat(buffer, offset);
+            case TYPE_INT:     case TYPE_INT_OBJ:     return (T)(Integer)Bits.readInt(buffer, offset);
+            case TYPE_LONG:    case TYPE_LONG_OBJ:    return (T)(Long)Bits.readLong(buffer, offset);
+            case TYPE_SHORT:   case TYPE_SHORT_OBJ:   return (T)(Short)Bits.readShort(buffer, offset);
+            case TYPE_STRING:
                 in=new ByteArrayDataInputStream(buffer, offset, length);
-                return (T)in.readUTF();
+                return (T)readString(in);
             case TYPE_BYTEARRAY:
                 byte[] tmp=new byte[length];
                 System.arraycopy(buffer,offset,tmp,0,length);
                 return (T)tmp;
+            case TYPE_CLASS:
+                return (T)CLASS_TYPES.get(buffer[offset]);
             default:
                 throw new IllegalArgumentException("type " + type + " is invalid");
         }
     }
 
+    /**
+     * Parses an object from a {@link ByteBuffer}. Note that this changes the position of the buffer, so it this is
+     * not desired, use {@link ByteBuffer#duplicate()} to create a copy and pass the copy to this method.
+     */
+    public static <T extends Object> T objectFromByteBuffer(ByteBuffer buffer, ClassLoader loader) throws Exception {
+        if(buffer == null) return null;
+        byte type=buffer.get();
+        switch(type) {
+            case TYPE_NULL:
+                return null;
+            case TYPE_STREAMABLE:
+                DataInput in=new ByteBufferInputStream(buffer);
+                return readGenericStreamable(in, loader);
+            case TYPE_SERIALIZABLE: // the object is Externalizable or Serializable
+                InputStream in_stream=new ByteBufferInputStream(buffer);
+                try(ObjectInputStream oin=new ObjectInputStreamWithClassloader(in_stream, loader)) {
+                    return (T)oin.readObject();
+                }
+            case TYPE_BOOLEAN: case TYPE_BOOLEAN_OBJ: return (T)(Boolean)(buffer.get() == 1);
+            case TYPE_BYTE:    case TYPE_BYTE_OBJ:    return (T)(Byte)buffer.get();
+            case TYPE_CHAR:    case TYPE_CHAR_OBJ:    return (T)(Character)Bits.readChar(buffer);
+            case TYPE_DOUBLE:  case TYPE_DOUBLE_OBJ:  return (T)(Double)Bits.readDouble(buffer);
+            case TYPE_FLOAT:   case TYPE_FLOAT_OBJ:   return (T)(Float)Bits.readFloat(buffer);
+            case TYPE_INT:     case TYPE_INT_OBJ:     return (T)(Integer)Bits.readInt(buffer);
+            case TYPE_LONG:    case TYPE_LONG_OBJ:    return (T)(Long)Bits.readLong(buffer);
+            case TYPE_SHORT:   case TYPE_SHORT_OBJ:   return (T)(Short)Bits.readShort(buffer);
+            case TYPE_BYTEARRAY:
+                byte[] tmp=new byte[buffer.remaining()];
+                buffer.get(tmp);
+                return (T)tmp;
+            case TYPE_STRING:
+                in=new ByteBufferInputStream(buffer);
+                return (T)readString(in);
+            case TYPE_CLASS:
+                return (T)CLASS_TYPES.get(buffer.get());
+            default:
+                throw new IllegalArgumentException("type " + type + " is invalid");
+        }
+    }
+
+    public static byte[] objectToByteBuffer(Object obj) throws IOException {
+        return objectToBuffer(obj).getBytes();
+    }
 
     /**
      * Serializes/Streams an object into a byte buffer.
      * The object has to implement interface Serializable or Externalizable or Streamable.
      */
-    public static byte[] objectToByteBuffer(Object obj) throws IOException {
+    public static ByteArray objectToBuffer(Object obj) throws IOException {
         if(obj == null)
-            return TYPE_NULL_ARRAY;
+            return new ByteArray(TYPE_NULL_ARRAY);
+        if(obj instanceof Streamable)
+            return writeStreamable((Streamable)obj);
+        Byte type=obj instanceof Class<?>? TYPES.get(obj) : TYPES.get(obj.getClass());
+        return type == null? writeSerializable(obj) : new ByteArray(marshalPrimitiveType(type, obj));
+    }
 
-        if(obj instanceof Streamable) {
-            int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 512;
-            final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size, true);
-            out.write(TYPE_STREAMABLE);
-            writeGenericStreamable((Streamable)obj,out);
-            return Arrays.copyOf(out.buf,out.position());
+    protected static ByteArray writeStreamable(Streamable obj) throws IOException {
+        int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 512;
+        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size, true);
+        out.write(TYPE_STREAMABLE);
+        writeGenericStreamable(obj, out);
+        return out.getBuffer();
+    }
+
+    protected static ByteArray writeSerializable(Object obj) throws IOException {
+        final ByteArrayDataOutputStream out_stream=new ByteArrayDataOutputStream(512, true);
+        out_stream.write(TYPE_SERIALIZABLE);
+        try(ObjectOutputStream out=new ObjectOutputStream(new OutputStreamAdapter(out_stream))) {
+            out.writeObject(obj);
+            out.flush();
+            return out_stream.getBuffer();
         }
-
-        Byte type=PRIMITIVE_TYPES.get(obj.getClass());
-        if(type == null) { // will throw an exception if object is not serializable
-            final ByteArrayDataOutputStream out_stream=new ByteArrayDataOutputStream(512, true);
-            out_stream.write(TYPE_SERIALIZABLE);
-            try(ObjectOutputStream out=new ObjectOutputStream(new OutputStreamAdapter(out_stream))) {
-                out.writeObject(obj);
-                out.flush();
-                return Arrays.copyOf(out_stream.buffer(), out_stream.position());
-            }
-        }
-
-        return marshalPrimitiveType(type, obj);
     }
 
 
-    public static Buffer objectToBuffer(Object obj) throws IOException {
-        if(obj == null)
-            return new Buffer(TYPE_NULL_ARRAY);
-
-        if(obj instanceof Streamable) {
-            int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() : 512;
-            final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size, true);
-            out.write(TYPE_STREAMABLE);
-            writeGenericStreamable((Streamable)obj,out);
-            return out.getBuffer();
+    protected static byte[] marshalPrimitiveType(Byte type, Object obj) {
+        if(obj instanceof Class<?>)
+            return new byte[]{TYPE_CLASS, type};
+        switch(type) {
+            case TYPE_BOOLEAN: case TYPE_BOOLEAN_OBJ:
+                return ((Boolean)obj)? TYPE_BOOLEAN_TRUE : TYPE_BOOLEAN_FALSE;
+            case TYPE_BYTE: case TYPE_BYTE_OBJ:
+                return new byte[]{type, (byte)obj};
+            case TYPE_CHAR: case TYPE_CHAR_OBJ:
+                byte[] buf=new byte[Global.BYTE_SIZE *3];
+                buf[0]=type;
+                Bits.writeChar((char)obj, buf, 1);
+                return buf;
+            case TYPE_DOUBLE: case TYPE_DOUBLE_OBJ:
+                buf=new byte[Global.BYTE_SIZE + Global.DOUBLE_SIZE];
+                buf[0]=type;
+                Bits.writeDouble((double)obj, buf, 1);
+                return buf;
+            case TYPE_FLOAT: case TYPE_FLOAT_OBJ:
+                buf=new byte[Global.BYTE_SIZE + Global.FLOAT_SIZE];
+                buf[0]=type;
+                Bits.writeFloat((float)obj, buf, 1);
+                return buf;
+            case TYPE_INT: case TYPE_INT_OBJ:
+                buf=new byte[Global.BYTE_SIZE + Global.INT_SIZE];
+                buf[0]=type;
+                Bits.writeInt((int)obj, buf, 1);
+                return buf;
+            case TYPE_LONG: case TYPE_LONG_OBJ:
+                buf=new byte[Global.BYTE_SIZE + Global.LONG_SIZE];
+                buf[0]=type;
+                Bits.writeLong((long)obj, buf, 1);
+                return buf;
+            case TYPE_SHORT: case TYPE_SHORT_OBJ:
+                buf=new byte[Global.BYTE_SIZE + Global.SHORT_SIZE];
+                buf[0]=type;
+                Bits.writeShort((short)obj, buf, 1);
+                return buf;
+            case TYPE_STRING:
+                String str=(String)obj;
+                ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(str.length()*2 +3);
+                try {
+                    out.writeByte(TYPE_STRING);
+                    writeString(str, out);
+                    byte[] ret=new byte[out.position()];
+                    System.arraycopy(out.buffer(), 0, ret, 0, ret.length);
+                    return ret;
+                }
+                catch(IOException ex) {
+                    throw new RuntimeException(ex);
+                }
+            case TYPE_BYTEARRAY:
+                buf=(byte[])obj;
+                byte[] buffer=new byte[Global.BYTE_SIZE + buf.length];
+                buffer[0]=TYPE_BYTEARRAY;
+                System.arraycopy(buf, 0, buffer, 1, buf.length);
+                return buffer;
+            default:
+                throw new IllegalArgumentException("type " + type + " is invalid");
         }
-
-        Byte type=PRIMITIVE_TYPES.get(obj.getClass());
-        if(type == null) { // will throw an exception if object is not serializable
-            final ByteArrayDataOutputStream out_stream=new ByteArrayDataOutputStream(512, true);
-            out_stream.write(TYPE_SERIALIZABLE);
-            try(ObjectOutputStream out=new ObjectOutputStream(new OutputStreamAdapter(out_stream))) {
-                out.writeObject(obj);
-                out.flush();
-                return out_stream.getBuffer();
-            }
-        }
-        return new Buffer(marshalPrimitiveType(type, obj));
     }
 
+    public static void writeString(String str, DataOutput out) throws IOException {
+        boolean is_ascii=isAsciiString(str);
+        out.writeBoolean(is_ascii);
+        if(is_ascii) {
+            int len=str.length();
+            out.writeInt(len);
+            for(int i=0; i < len; i++)
+                out.write((byte)str.charAt(i));
+        }
+        else
+            out.writeUTF(str);
+    }
 
-    protected static byte[] marshalPrimitiveType(byte type, Object obj) {
-          switch(type) {
-              case TYPE_BOOLEAN:
-                  return ((Boolean)obj)? TYPE_BOOLEAN_TRUE : TYPE_BOOLEAN_FALSE;
-              case TYPE_BYTE:
-                  return new byte[]{TYPE_BYTE, (byte)obj};
-              case TYPE_CHAR:
-                  byte[] buf=new byte[Global.BYTE_SIZE *3];
-                  buf[0]=TYPE_CHAR;
-                  Bits.writeChar((char)obj, buf, 1);
-                  return buf;
-              case TYPE_DOUBLE:
-                  buf=new byte[Global.BYTE_SIZE + Global.DOUBLE_SIZE];
-                  buf[0]=TYPE_DOUBLE;
-                  Bits.writeDouble((double)obj, buf, 1);
-                  return buf;
-              case TYPE_FLOAT:
-                  buf=new byte[Global.BYTE_SIZE + Global.FLOAT_SIZE];
-                  buf[0]=TYPE_FLOAT;
-                  Bits.writeFloat((float)obj, buf, 1);
-                  return buf;
-              case TYPE_INT:
-                  buf=new byte[Global.BYTE_SIZE + Global.INT_SIZE];
-                  buf[0]=TYPE_INT;
-                  Bits.writeInt((int)obj, buf, 1);
-                  return buf;
-              case TYPE_LONG:
-                  buf=new byte[Global.BYTE_SIZE + Global.LONG_SIZE];
-                  buf[0]=TYPE_LONG;
-                  Bits.writeLong((long)obj, buf, 1);
-                  return buf;
-              case TYPE_SHORT:
-                  buf=new byte[Global.BYTE_SIZE + Global.SHORT_SIZE];
-                  buf[0]=TYPE_SHORT;
-                  Bits.writeShort((short)obj, buf, 1);
-                  return buf;
-              case TYPE_STRING:
-                  String str=(String)obj;
-                  if(Util.isAsciiString(str)) {
-                      int len=str.length();
-                      ByteBuffer retval=ByteBuffer.allocate(Global.BYTE_SIZE + len).put(TYPE_STRING);
-                      for(int i=0; i < len; i++)
-                          retval.put((byte)str.charAt(i));
-                      return retval.array();
-                  }
-                  else {
-                      ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(str.length()*2 +3);
-                      out.write(TYPE_UTF_STRING);
-                      out.writeUTF(str);
-                      byte[] ret=new byte[out.position()];
-                      System.arraycopy(out.buffer(), 0, ret, 0, ret.length);
-                      return ret;
-                  }
-              case TYPE_BYTEARRAY:
-                  buf=(byte[])obj;
-                  byte[] buffer=new byte[Global.BYTE_SIZE + buf.length];
-                  buffer[0]=TYPE_BYTEARRAY;
-                  System.arraycopy(buf, 0, buffer, 1, buf.length);
-                  return buffer;
-              default:
-                  throw new IllegalArgumentException("type " + type + " is invalid");
-          }
-      }
+    public static String readString(DataInput in) throws IOException {
+        if(in.readBoolean() == false)
+            return in.readUTF();
+        byte[] tmp=new byte[in.readInt()];
+        in.readFully(tmp);
+        return new String(tmp);
+    }
 
-
+    public static int size(Object obj) {
+        if(obj == null)
+            return Global.BYTE_SIZE;
+        if(obj instanceof SizeStreamable)
+            return Global.BYTE_SIZE + Util.size((SizeStreamable)obj);
+        Byte type=obj instanceof Class<?>? TYPES.get(obj) : TYPES.get(obj.getClass());
+        if(obj instanceof Class<?>) {
+            if(type != null)
+                return Global.BYTE_SIZE *2;
+        }
+        int retval=Global.BYTE_SIZE;
+        switch(type) {
+            case TYPE_BOOLEAN: case TYPE_BOOLEAN_OBJ:
+            case TYPE_BYTE: case TYPE_BYTE_OBJ:
+                return retval+Global.BYTE_SIZE;
+            case TYPE_SHORT: case TYPE_SHORT_OBJ:
+            case TYPE_CHAR: case TYPE_CHAR_OBJ:
+                return retval+Character.BYTES;
+            case TYPE_LONG: case TYPE_LONG_OBJ:
+            case TYPE_DOUBLE: case TYPE_DOUBLE_OBJ:
+                return retval+Double.BYTES;
+            case TYPE_INT: case TYPE_INT_OBJ:
+            case TYPE_FLOAT: case TYPE_FLOAT_OBJ:
+                return retval+Float.BYTES;
+            case TYPE_STRING:
+                String s=(String)obj;
+                retval+=Global.BYTE_SIZE; // is_ascii
+                if(isAsciiString(s))
+                    return retval+Global.INT_SIZE + s.length();
+                else
+                    return retval+Bits.sizeUTF(s);
+            case TYPE_BYTEARRAY:
+                byte[] buf=(byte[])obj;
+                return retval+Global.INT_SIZE + buf.length;
+            default:
+                throw new IllegalArgumentException("type " + type + " is invalid");
+        }
+    }
 
     public static void objectToStream(Object obj, DataOutput out) throws IOException {
         if(obj == null) {
             out.write(TYPE_NULL);
             return;
         }
-
-        Byte type;
-        if(obj instanceof Streamable) {  // use Streamable if we can
-            out.write(TYPE_STREAMABLE);
+        if(obj instanceof Streamable) {
+            out.writeByte(TYPE_STREAMABLE);
             writeGenericStreamable((Streamable)obj,out);
+            return;
         }
-        else if((type=PRIMITIVE_TYPES.get(obj.getClass())) != null) {
-            if(type != TYPE_STRING)
-                out.write(type);
-            switch(type) {
-                case TYPE_BOOLEAN:
-                    out.writeBoolean((Boolean)obj);
-                    break;
-                case TYPE_BYTE:
-                    out.writeByte((Byte)obj);
-                    break;
-                case TYPE_CHAR:
-                    out.writeChar((Character)obj);
-                    break;
-                case TYPE_DOUBLE:
-                    out.writeDouble((Double)obj);
-                    break;
-                case TYPE_FLOAT:
-                    out.writeFloat((Float)obj);
-                    break;
-                case TYPE_INT:
-                    out.writeInt((Integer)obj);
-                    break;
-                case TYPE_LONG:
-                    out.writeLong((Long)obj);
-                    break;
-                case TYPE_SHORT:
-                    out.writeShort((Short)obj);
-                    break;
-                case TYPE_STRING:
-                    String str=(String)obj;
-                    if(Util.isAsciiString(str)) {
-                        int len=str.length();
-                        out.write(TYPE_STRING);
-                        out.writeInt(len);
-                        for(int i=0; i < len; i++)
-                            out.write((byte)str.charAt(i));
-                    }
-                    else {
-                        out.write(TYPE_UTF_STRING);
-                        out.writeUTF(str);
-                    }
-                    break;
-                case TYPE_BYTEARRAY:
-                    byte[] buf=(byte[])obj;
-                    out.writeInt(buf.length);
-                    out.write(buf,0,buf.length);
-                    break;
-                default:
-                    throw new IllegalArgumentException("type " + type + " is invalid");
-            }
-        }
-        else { // will throw an exception if object is not serializable
+        Byte type=obj instanceof Class<?>? TYPES.get(obj) : TYPES.get(obj.getClass());
+        if(type == null) {
             out.write(TYPE_SERIALIZABLE);
-            ObjectOutputStream tmp=new ObjectOutputStream(out instanceof ByteArrayDataOutputStream?
-                                                            new OutputStreamAdapter((ByteArrayDataOutputStream)out) :
-                                                            (OutputStream)out);
-            try {
+            try(ObjectOutputStream tmp=new ObjectOutputStream(out instanceof ByteArrayDataOutputStream?
+                                                                new OutputStreamAdapter((ByteArrayDataOutputStream)out) :
+                                                                (OutputStream)out)) {
                 tmp.writeObject(obj);
+                return;
             }
-            finally {
-                Util.close(tmp);
+        }
+        if(obj instanceof Class<?>) {
+            if(type != null) {
+                out.writeByte(TYPE_CLASS);
+                out.writeByte(type);
+                return;
             }
+        }
+        out.writeByte(type);
+        switch(type) {
+            case TYPE_BOOLEAN: case TYPE_BOOLEAN_OBJ:
+                out.writeBoolean((Boolean)obj);
+                break;
+            case TYPE_BYTE: case TYPE_BYTE_OBJ:
+                out.writeByte((Byte)obj);
+                break;
+            case TYPE_CHAR: case TYPE_CHAR_OBJ:
+                out.writeChar((Character)obj);
+                break;
+            case TYPE_DOUBLE: case TYPE_DOUBLE_OBJ:
+                out.writeDouble((Double)obj);
+                break;
+            case TYPE_FLOAT: case TYPE_FLOAT_OBJ:
+                out.writeFloat((Float)obj);
+                break;
+            case TYPE_INT: case TYPE_INT_OBJ:
+                out.writeInt((Integer)obj);
+                break;
+            case TYPE_LONG: case TYPE_LONG_OBJ:
+                out.writeLong((Long)obj);
+                break;
+            case TYPE_SHORT: case TYPE_SHORT_OBJ:
+                out.writeShort((Short)obj);
+                break;
+            case TYPE_STRING:
+                writeString((String)obj, out);
+                break;
+            case TYPE_BYTEARRAY:
+                byte[] buf=(byte[])obj;
+                out.writeInt(buf.length);
+                out.write(buf, 0, buf.length);
+                break;
+            default:
+                throw new IllegalArgumentException("type " + type + " is invalid");
         }
     }
 
@@ -781,29 +1015,21 @@ public class Util {
                 try(ObjectInputStream tmp=new ObjectInputStreamWithClassloader(is, loader)) {
                     return (T)tmp.readObject();
                 }
-            case TYPE_BOOLEAN:    return (T)(Boolean)in.readBoolean();
-            case TYPE_BYTE:       return (T)(Byte)in.readByte();
-            case TYPE_CHAR:       return (T)(Character)in.readChar();
-            case TYPE_DOUBLE:     return (T)(Double)in.readDouble();
-            case TYPE_FLOAT:      return (T)(Float)in.readFloat();
-            case TYPE_INT:        return (T)(Integer)in.readInt();
-            case TYPE_LONG:       return (T)(Long)in.readLong();
-            case TYPE_SHORT:      return (T)(Short)in.readShort();
-            case TYPE_STRING:
-                int str_len=in.readInt();
-                if(str_len == 0) return (T)"";
-                byte[] tmp=new byte[str_len];
-                for(int i=0; i < str_len; i++) {
-                    tmp[i]=in.readByte();
-                }
-                return (T)new String(tmp);
-            case TYPE_UTF_STRING:
-                return (T)in.readUTF();
+            case TYPE_BOOLEAN: case TYPE_BOOLEAN_OBJ: return (T)(Boolean)in.readBoolean();
+            case TYPE_BYTE:    case TYPE_BYTE_OBJ:    return (T)(Byte)in.readByte();
+            case TYPE_CHAR:    case TYPE_CHAR_OBJ:    return (T)(Character)in.readChar();
+            case TYPE_DOUBLE:  case TYPE_DOUBLE_OBJ:  return (T)(Double)in.readDouble();
+            case TYPE_FLOAT:   case TYPE_FLOAT_OBJ:   return (T)(Float)in.readFloat();
+            case TYPE_INT:     case TYPE_INT_OBJ:     return (T)(Integer)in.readInt();
+            case TYPE_LONG:    case TYPE_LONG_OBJ:    return (T)(Long)in.readLong();
+            case TYPE_SHORT:   case TYPE_SHORT_OBJ:   return (T)(Short)in.readShort();
+            case TYPE_STRING:                         return (T)readString(in);
             case TYPE_BYTEARRAY:
-                int len=in.readInt();
-                byte[] tmpbuf=new byte[len];
-                in.readFully(tmpbuf,0,tmpbuf.length);
+                byte[] tmpbuf=new byte[in.readInt()];
+                in.readFully(tmpbuf);
                 return (T)tmpbuf;
+            case TYPE_CLASS:
+                return (T)CLASS_TYPES.get(in.readByte());
             default:
                 throw new IllegalArgumentException("type " + b + " is invalid");
         }
@@ -817,6 +1043,8 @@ public class Util {
     public static <T extends Streamable> T streamableFromByteBuffer(Supplier<T> factory, byte[] buffer) throws Exception {
         return streamableFromByteBuffer(factory, buffer, 0, buffer.length);
     }
+
+
 
     /**
      * Poor man's serialization of an exception. Serializes only the message, stack trace and cause (not suppressed exceptions)
@@ -845,7 +1073,7 @@ public class Util {
         writeException(causes, t, out);
     }
 
-    public static Buffer exceptionToBuffer(Throwable t) throws IOException {
+    public static ByteArray exceptionToBuffer(Throwable t) throws IOException {
         ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(512, true);
         exceptionToStream(t, out);
         return out.getBuffer();
@@ -867,6 +1095,15 @@ public class Util {
             return new InvocationTargetException(readException(in, recursion_count));
         return readException(in, recursion_count);
     }
+
+
+    protected static void add(byte type, Class<?> cl) {
+        if(TYPES.putIfAbsent(cl, type) != null)
+            throw new IllegalStateException(String.format("type %d (class=%s) is already present in types map", type, cl));
+        CLASS_TYPES.put(type, cl);
+    }
+
+
 
     protected static void writeException(Set<Throwable> causes, Throwable t, DataOutput out) throws IOException {
         // 3. classname
@@ -967,6 +1204,16 @@ public class Util {
         return exceptionFromStream(in);
     }
 
+    /** Returns a copy of the byte array between position and limit; requires a non-null buffer */
+    public static byte[] bufferToArray(final ByteBuffer buf) {
+        if(buf == null)
+            return null;
+        ByteBuffer tmp=buf.duplicate();
+        int length=tmp.remaining();
+        byte[] retval=new byte[length];
+        tmp.get(retval, 0, retval.length);
+        return retval;
+    }
 
     public static void bufferToArray(final Address sender, final ByteBuffer buf, org.jgroups.blocks.cs.Receiver target) {
         if(buf == null)
@@ -986,6 +1233,14 @@ public class Util {
         if(buffer == null) return null;
         DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
         T retval=(T)cl.getDeclaredConstructor().newInstance();
+        retval.readFrom(in);
+        return retval;
+    }
+
+    public static <T extends Streamable> T streamableFromByteBuffer(Class<? extends Streamable> cl, ByteBuffer buffer) throws Exception {
+        if(buffer == null) return null;
+        DataInput in=new ByteBufferInputStream(buffer);
+        T retval=(T)cl.newInstance();
         retval.readFrom(in);
         return retval;
     }
@@ -1011,18 +1266,60 @@ public class Util {
         return Arrays.copyOf(out.buffer(), out.position());
     }
 
-    public static Buffer streamableToBuffer(Streamable obj) {
+    public static ByteArray streamableToBuffer(Streamable obj) throws Exception {
         int expected_size=obj instanceof SizeStreamable? ((SizeStreamable)obj).serializedSize() +1 : 512;
         final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size);
-        try {
-            Util.writeStreamable(obj,out);
-            return out.getBuffer();
-        }
-        catch(Exception ex) {
-            return null;
-        }
+        Util.writeStreamable(obj,out);
+        return out.getBuffer();
     }
 
+    public static ByteArray messageToBuffer(Message msg) throws Exception {
+        int expected_size=msg.size() + Global.SHORT_SIZE; // type
+        final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(expected_size);
+        out.writeShort(msg.getType());
+        msg.writeTo(out);
+        return out.getBuffer();
+    }
+
+
+    public static Message messageFromBuffer(byte[] buf, int offset, int length, MessageFactory mf) throws Exception {
+        ByteArrayDataInputStream in=new ByteArrayDataInputStream(buf, offset, length);
+        short type=in.readShort();
+        Message msg=mf.create(type);
+        msg.readFrom(in);
+        return msg;
+    }
+
+    public static ByteArray messageToByteBuffer(Message msg) throws Exception {
+        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(msg.size() +2);
+        out.writeBoolean(msg != null);
+        if(msg != null) {
+            out.writeShort(msg.getType());
+            msg.writeTo(out);
+        }
+        return out.getBuffer();
+    }
+
+
+    public static Message messageFromByteBuffer(byte[] buffer, int offset, int length, MessageFactory mf) throws Exception {
+        DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
+        if(!in.readBoolean())
+            return null;
+        short type=in.readShort();
+        Message msg=mf.create(type);
+        msg.readFrom(in);
+        return msg;
+    }
+
+    public static ByteBuffer wrapDirect(byte[] array) {
+        return wrapDirect(array, 0, array.length);
+    }
+
+    public static ByteBuffer wrapDirect(byte[] array, int offset, int length) {
+        ByteBuffer b=ByteBuffer.allocateDirect(length).put(array, offset, length);
+        b.flip();
+        return b;
+    }
 
     public static byte[] collectionToByteBuffer(Collection<Address> c) throws IOException {
         final ByteArrayDataOutputStream out=new ByteArrayDataOutputStream((int)Util.size(c));
@@ -1060,24 +1357,6 @@ public class Util {
         return sb.toString().toUpperCase();
     }
 
-    public static void binaryToAscii(InputStream in, OutputStream out) throws IOException {
-        byte[] input=new byte[2];
-        for(;;) {
-            input[0]=(byte)in.read();
-            if(input[0] == '\n' || input[0] == '\r')
-                continue;
-            if(input[0] < 0)
-                break;
-            input[1]=(byte)in.read();
-            if(input[1] == '\n' || input[1] < 0)
-                break;
-            String tmp=new String(input);
-            int val=Integer.parseInt(tmp, 16);
-            char c=(char)val;
-            out.write(c);
-        }
-    }
-
     public static boolean isAsciiString(String str) {
         if(str == null) return false;
         for(int i=0; i < str.length(); i++) {
@@ -1087,6 +1366,12 @@ public class Util {
         }
         return true;
     }
+
+    public static String hexToBin(String s) {
+        return new BigInteger(s, 16).toString(2);
+    }
+
+
 
     /** Compares 2 byte arrays, elements are treated as unigned */
     public static int compare(byte[] left,byte[] right) {
@@ -1120,15 +1405,16 @@ public class Util {
         if(multicast)
             flags+=MULTICAST;
         dos.writeByte(flags);
+        dos.writeShort(msg.getType());
         msg.writeTo(dos);
     }
 
-    public static Message readMessage(DataInput instream) throws IOException, ClassNotFoundException {
-        Message msg=new Message(false); // don't create headers, readFrom() will do this
-        msg.readFrom(instream);
+    public static Message readMessage(DataInput in, MessageFactory mf) throws IOException, ClassNotFoundException {
+        short type=in.readShort();
+        Message msg=mf.create(type);
+        msg.readFrom(in);
         return msg;
     }
-
 
 
     /**
@@ -1152,8 +1438,10 @@ public class Util {
         writeMessageListHeader(dest, src, cluster_name, msgs != null ? msgs.size() : 0, dos, multicast);
 
         if(msgs != null)
-            for(Message msg: msgs)
+            for(Message msg: msgs) {
+                dos.writeShort(msg.getType());
                 msg.writeToNoAddrs(src, dos, transport_id); // exclude the transport header
+            }
     }
 
     public static void writeMessageListHeader(Address dest, Address src, byte[] cluster_name, int numMsgs, DataOutput dos, boolean multicast) throws IOException {
@@ -1177,7 +1465,8 @@ public class Util {
     }
 
 
-    public static List<Message> readMessageList(DataInput in, short transport_id) throws IOException, ClassNotFoundException {
+    public static List<Message> readMessageList(DataInput in, short transport_id, MessageFactory mf)
+      throws IOException, ClassNotFoundException {
         List<Message> list=new LinkedList<>();
         Address dest=Util.readAddress(in);
         Address src=Util.readAddress(in);
@@ -1190,7 +1479,8 @@ public class Util {
         int len=in.readInt();
 
         for(int i=0; i < len; i++) {
-            Message msg=new Message(false);
+            short type=in.readShort(); // skip the
+            Message msg=mf.create(type);
             msg.readFrom(in);
             msg.setDest(dest);
             if(msg.getSrc() == null)
@@ -1216,7 +1506,8 @@ public class Util {
      * @return an array of 4 MessageBatches in the order above, the first batch is at index 0
      * @throws Exception
      */
-    public static MessageBatch[] readMessageBatch(DataInput in, boolean multicast) throws IOException, ClassNotFoundException {
+    public static MessageBatch[] readMessageBatch(DataInput in, boolean multicast, MessageFactory factory)
+      throws IOException, ClassNotFoundException {
         MessageBatch[] batches=new MessageBatch[4]; // [0]: reg, [1]: OOB, [2]: internal-oob, [3]: internal
         Address dest=Util.readAddress(in);
         Address src=Util.readAddress(in);
@@ -1227,7 +1518,8 @@ public class Util {
 
         int len=in.readInt();
         for(int i=0; i < len; i++) {
-            Message msg=new Message(false);
+            short type=in.readShort();
+            Message msg=factory.create(type);
             msg.readFrom(in);
             msg.setDest(dest);
             if(msg.getSrc() == null)
@@ -1236,17 +1528,16 @@ public class Util {
             boolean internal=msg.isFlagSet(Message.Flag.INTERNAL);
             int index=0;
             MessageBatch.Mode mode=MessageBatch.Mode.REG;
-
-            if(oob && !internal) {
-                index=1; mode=MessageBatch.Mode.OOB;
+            if(oob || internal) {
+                if(oob) {
+                    mode=MessageBatch.Mode.OOB;
+                    index=internal? 2 : 1;
+                }
+                else {
+                    index=3;
+                    mode=MessageBatch.Mode.INTERNAL;
+                }
             }
-            else if(oob && internal) {
-                index=2; mode=MessageBatch.Mode.OOB;
-            }
-            else if(!oob && internal) {
-                index=3; mode=MessageBatch.Mode.INTERNAL;
-            }
-
             if(batches[index] == null)
                 batches[index]=new MessageBatch(dest, src, cluster_name != null? new AsciiString(cluster_name) : null, multicast, mode, len);
             batches[index].add(msg);
@@ -1259,16 +1550,12 @@ public class Util {
         parse(new ByteArrayInputStream(buf, offset, length), msg_consumer, batch_consumer, tcp);
     }
 
-    public static void parse(String filename, BiConsumer<Short,Message> msg_consumer,
-                             BiConsumer<Short,MessageBatch> batch_consumer, boolean tcp) throws FileNotFoundException {
-        parse(new FileInputStream(filename), msg_consumer, batch_consumer, tcp);
-    }
-
     public static void parse(InputStream input, BiConsumer<Short,Message> msg_consumer,
                              BiConsumer<Short,MessageBatch> batch_consumer, boolean tcp) {
         if(msg_consumer == null && batch_consumer == null)
             return;
         byte[] tmp=new byte[Global.INT_SIZE];
+        MessageFactory mf=new DefaultMessageFactory();
         try(DataInputStream dis=new DataInputStream(input)) {
             for(;;) {
                 // for TCP, we send the length first; this needs to be skipped as it is not part of the JGroups payload
@@ -1292,7 +1579,7 @@ public class Util {
                 boolean is_message_list=(flags & LIST) == LIST;
                 boolean multicast=(flags & MULTICAST) == MULTICAST;
                 if(is_message_list) { // used if message bundling is enabled
-                    MessageBatch[] batches=Util.readMessageBatch(dis,multicast);
+                    final MessageBatch[] batches=Util.readMessageBatch(dis,multicast, mf);
                     for(MessageBatch batch: batches) {
                         if(batch == null)
                             continue;
@@ -1305,7 +1592,7 @@ public class Util {
                     }
                 }
                 else {
-                    Message msg=Util.readMessage(dis);
+                    Message msg=Util.readMessage(dis, mf);
                     if(msg_consumer != null)
                         msg_consumer.accept(version, msg);
                 }
@@ -1385,8 +1672,6 @@ public class Util {
         }
         else if(addr.getClass().equals(IpAddress.class))
             flags=Util.setFlag(flags,Address.IP_ADDR);
-        else if(addr.getClass().equals(IpAddressUUID.class))
-            flags=Util.setFlag(flags, Address.IP_ADDR_UUID);
         else
             streamable_addr=false;
         out.writeByte(flags);
@@ -1418,13 +1703,8 @@ public class Util {
             addr=new IpAddress();
             addr.readFrom(in);
         }
-        else if(Util.isFlagSet(flags, Address.IP_ADDR_UUID)) {
-            addr=new IpAddressUUID();
-            addr.readFrom(in);
-        }
-        else {
+        else
             addr=readOtherAddress(in);
-        }
         return addr;
     }
 
@@ -1587,6 +1867,17 @@ public class Util {
         return retval;
     }
 
+    public static int size(SizeStreamable s) {
+        int retval=Global.BYTE_SIZE;
+        if(s == null)
+            return retval;
+        retval+=Global.SHORT_SIZE; // magic number
+        short magic_number=ClassConfigurator.getMagicNumber(s.getClass());
+        if(magic_number == -1)
+            retval+=Bits.sizeUTF(s.getClass().getName());
+        return retval + s.serializedSize();
+    }
+
     public static void writeGenericStreamable(Streamable obj, DataOutput out) throws IOException {
         short magic_number;
         String classname;
@@ -1656,30 +1947,6 @@ public class Util {
             retval[i].readFrom(in);
         }
         return retval;
-    }
-
-
-
-    public static void writeObject(Object obj,DataOutput out) throws IOException {
-        if(obj instanceof Streamable) {
-            out.writeInt(-1);
-            writeGenericStreamable((Streamable)obj,out);
-        }
-        else {
-            byte[] buf=objectToByteBuffer(obj);
-            out.writeInt(buf.length);
-            out.write(buf,0,buf.length);
-        }
-    }
-
-    public static Object readObject(DataInput in) throws IOException, ClassNotFoundException {
-        int len=in.readInt();
-        if(len == -1)
-            return readGenericStreamable(in);
-
-        byte[] buf=new byte[len];
-        in.readFully(buf, 0, len);
-        return objectFromByteBuffer(buf);
     }
 
 
@@ -1753,7 +2020,7 @@ public class Util {
                 break;
             }
         }
-        return sb.toString();
+        return sb.length() > 0? sb.toString() : null;
     }
 
 
@@ -1808,24 +2075,6 @@ public class Util {
     }
 
 
-    public static Buffer messageToByteBuffer(Message msg) throws IOException {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream((int)msg.size()+1);
-        out.writeBoolean(msg != null);
-        if(msg != null)
-            msg.writeTo(out);
-        return out.getBuffer();
-    }
-
-    public static Message byteBufferToMessage(byte[] buffer,int offset,int length) throws IOException, ClassNotFoundException {
-        DataInput in=new ByteArrayDataInputStream(buffer,offset,length);
-        if(!in.readBoolean())
-            return null;
-        Message msg=new Message(false); // don't create headers, readFrom() will do this
-        msg.readFrom(in);
-        return msg;
-    }
-
-
     public static <T> boolean match(T obj1,T obj2) {
         if(obj1 == null && obj2 == null)
             return true;
@@ -1833,27 +2082,6 @@ public class Util {
             return obj1.equals(obj2);
         else
             return obj2.equals(obj1);
-    }
-
-
-    public static boolean match(long[] a1,long[] a2) {
-        if(a1 == null && a2 == null)
-            return true;
-        if(a1 == null || a2 == null)
-            return false;
-
-        if(a1.hashCode() == a2.hashCode()) // identity
-            return true;
-
-        // at this point, a1 != null and a2 != null
-        if(a1.length != a2.length)
-            return false;
-
-        for(int i=0; i < a1.length; i++) {
-            if(a1[i] != a2[i])
-                return false;
-        }
-        return true;
     }
 
 
@@ -2087,6 +2315,47 @@ public class Util {
     }
 
 
+    public static <T> Enumeration<T> enumerate(final T[] array, int offset, final int length) {
+        return new Enumeration<>() {
+            protected final int end_pos=offset + length;
+            protected int pos=offset;
+
+            public boolean hasMoreElements() {
+                return pos < end_pos;
+            }
+
+            public T nextElement() {
+                if(pos < end_pos)
+                    return array[pos++];
+                throw new NoSuchElementException(String.format("pos=%d, end_pos=%d", pos, end_pos));
+            }
+        };
+    }
+
+
+    public static <T,R> Enumeration<R> enumerate(final T[] array, int offset, final int length, Function<T,R> converter) {
+        return new Enumeration<>() {
+            protected final int end_pos=offset + length;
+            protected int pos=offset;
+
+            public boolean hasMoreElements() {
+                return pos < end_pos;
+            }
+
+            public R nextElement() {
+                if(pos < end_pos)
+                    return converter.apply(array[pos++]);
+                throw new NoSuchElementException(String.format("pos=%d, end_pos=%d", pos, end_pos));
+            }
+        };
+    }
+
+    public static <T extends Number> T nonNegativeValue(T num) {
+        if(num.longValue() < 0)
+            throw new IllegalArgumentException(String.format("%s must not be negative", num));
+        return num;
+    }
+
     /** Returns a random value in the range [1 - range]. If range is 0, 1 will be returned. If range is negative, an
      * exception will be thrown */
     public static long random(long range) {
@@ -2139,9 +2408,16 @@ public class Util {
         return sb.toString();
     }
 
+    public static String printStackTrace(Thread t) {
+        if(t == null)
+            return "null";
+        return String.format("-- %s:\n%s", t, Stream.of(t.getStackTrace()).map(StackTraceElement::toString)
+          .collect(Collectors.joining("\n")));
+    }
+
 
     protected static void _printThreads(ThreadMXBean bean,long[] ids,StringBuilder sb) {
-        ThreadInfo[] threads=bean.getThreadInfo(ids,20);
+        ThreadInfo[] threads=bean.getThreadInfo(ids,100);
         for(ThreadInfo info : threads) {
             if(info == null)
                 continue;
@@ -2175,44 +2451,45 @@ public class Util {
     }
 
 
-    public static String mapToString(Map<? extends Object,? extends Object> map) {
-        if(map == null)
-            return "null";
-        StringBuilder sb=new StringBuilder();
-        for(Map.Entry<? extends Object,? extends Object> entry : map.entrySet()) {
-            Object key=entry.getKey();
-            Object val=entry.getValue();
-            sb.append(key).append("=");
-            if(val == null)
-                sb.append("null");
-            else
-                sb.append(val);
-            sb.append("\n");
+    public static String printTime(double time, TimeUnit unit) {
+        switch(unit) {
+            case NANOSECONDS:
+                if(time < 1000) return print(time, unit);
+                return printTime(time / 1000.0, TimeUnit.MICROSECONDS);
+            case MICROSECONDS:
+                if(time < 1000) return print(time, unit);
+                return printTime(time / 1000.0, TimeUnit.MILLISECONDS);
+            case MILLISECONDS:
+                if(time < 1000) return print(time, unit);
+                return printTime(time / 1000.0, TimeUnit.SECONDS);
+            case SECONDS:
+                if(time < 60) return print(time, unit);
+                return printTime(time / 60.0, TimeUnit.MINUTES);
+            case MINUTES:
+                if(time < 60) return print(time, unit);
+                return printTime(time / 60.0, TimeUnit.HOURS);
+            case HOURS:
+                if(time < 24) return print(time, unit);
+                return printTime(time / 24.0, TimeUnit.DAYS);
+            default:           return print(time, unit);
         }
-        return sb.toString();
     }
 
-
-    public static String printNanos(long time_ns) {
-        double us=time_ns / 1_000.0;
-        return String.format("%d ns (%.2f us)", time_ns, us);
+    public static String suffix(TimeUnit u) {
+        switch(u) {
+            case NANOSECONDS:  return "ns";
+            case MICROSECONDS: return "us";
+            case MILLISECONDS: return "ms";
+            case SECONDS:      return "s";
+            case MINUTES:      return "m";
+            case HOURS:        return "h";
+            case DAYS:         return "d";
+            default:           return u.toString();
+        }
     }
 
-    public static String printNanos(double time_ns) {
-        double us=time_ns / 1_000.0;
-        return String.format("%.2f ns (%.2f us)", time_ns, us);
-    }
-
-    public static String printTime(long time,TimeUnit unit) {
-        long ns=TimeUnit.NANOSECONDS.convert(time,unit);
-        long us=TimeUnit.MICROSECONDS.convert(time,unit);
-        long ms=TimeUnit.MILLISECONDS.convert(time,unit);
-        long secs=TimeUnit.SECONDS.convert(time,unit);
-
-        if(secs > 0) return secs + "s";
-        if(ms > 0) return ms + "ms";
-        if(us > 0) return us + " us";
-        return ns + "ns";
+    public static String print(double time, TimeUnit unit) {
+        return format(time, suffix(unit));
     }
 
 
@@ -2258,46 +2535,32 @@ public class Util {
     }
 
     /**
-     * MByte nowadays doesn't mean 1024 * 1024 bytes, but 1 million bytes, see http://en.wikipedia.org/wiki/Megabyte
+     * MB nowadays doesn't mean 1024 * 1024 bytes, but 1 million bytes, see http://en.wikipedia.org/wiki/Megabyte
      * @param bytes
-     * @return
      */
-    public static String printBytes(long bytes) {
-        double tmp;
-
-        if(bytes < 1000)
-            return String.format("%db", bytes);
-        if(bytes < 1_000_000) {
-            tmp=bytes / 1000.0;
-            return String.format("%,.2fKB", tmp);
-        }
-        if(bytes < 1_000_000_000) {
-            tmp=bytes / 1_000_000.0;
-            return String.format("%,.2fMB", tmp);
-        }
-        else {
-            tmp=bytes / 1_000_000_000.0;
-            return String.format("%,.2fGB", tmp);
-        }
-    }
-
     public static String printBytes(double bytes) {
         double tmp;
 
         if(bytes < 1000)
-            return String.format("%.2fb", bytes);
+            return format(bytes, "b");
         if(bytes < 1_000_000) {
             tmp=bytes / 1000.0;
-            return String.format("%,.2fKB", tmp);
+            return format(tmp, "KB");
         }
         if(bytes < 1_000_000_000) {
             tmp=bytes / 1000_000.0;
-            return String.format("%,.2fMB", tmp);
+            return format(tmp, "MB");
         }
         else {
             tmp=bytes / 1_000_000_000.0;
-            return String.format("%,.2fGB", tmp);
+            return format(tmp, "GB");
         }
+    }
+
+    public static String format(double val, String suffix) {
+        int trailing=Math.floor(val) == val? 0 : 2;
+        String fmt=String.format("%%,.%df%s", trailing, suffix);
+        return String.format(fmt, val);
     }
 
 
@@ -2533,19 +2796,6 @@ public class Util {
     }
 
 
-    public static List<View> detectDifferentViews(Map<Address,View> map) {
-        final List<View> ret=new ArrayList<>();
-        for(View view : map.values()) {
-            if(view == null)
-                continue;
-            ViewId vid=view.getViewId();
-            if(!Util.containsViewId(ret,vid))
-                ret.add(view);
-        }
-        return ret;
-    }
-
-
     /**
      * Determines the members which take part in a merge. The resulting list consists of all merge coordinators
      * plus members outside a merge partition, e.g. for views A={B,A,C}, B={B,C} and C={B,C}, the merge coordinator
@@ -2707,13 +2957,37 @@ public class Util {
     }
 
 
-    public static byte[] generateArray(int size) {
-        byte[] retval=new byte[size];
-        for(int i=0; i < retval.length; i++) {
-            byte b=(byte)Util.random(26);
-            retval[i]=b;
+    public static byte[] generateArray(int length) {
+        byte[] array=new byte[length];
+        int index=0, num=1;
+        while(index + Global.INT_SIZE <= array.length) {
+            Bits.writeInt(num, array, index);
+            index+=Global.INT_SIZE;
+            num++;
         }
-        return retval;
+        return array;
+    }
+
+    public static boolean verifyArray(byte[] array) {
+        int index=0, expected_num=1;
+        while(index + Global.INT_SIZE <= array.length) {
+            int actual_num=Bits.readInt(array, index);
+            assert expected_num == actual_num : String.format("expected %d, but got %d", expected_num, actual_num);
+            index+=Global.INT_SIZE;
+            expected_num++;
+        }
+        return true;
+    }
+
+    public static boolean verifyByteBuffer(ByteBuffer buf) {
+        int index=buf.position(), expected_num=1;
+        while(index + Global.INT_SIZE <= buf.limit()) {
+            int actual_num=buf.getInt();
+            assert expected_num == actual_num : String.format("expected %d, but got %d", expected_num, actual_num);
+            index+=Global.INT_SIZE;
+            expected_num++;
+        }
+        return true;
     }
 
 
@@ -2770,6 +3044,12 @@ public class Util {
         return objs == null? "null" : objs.stream().map(Objects::toString).collect(Collectors.joining(", "));
     }
 
+    public static String print(Object[] objs) {
+        if(objs == null || objs.length == 0)
+            return "";
+        return objs.length == 1? (objs[0] == null? "" : objs[0].toString()) : Arrays.toString(objs);
+    }
+
 
     public static <T> String print(Map<T,T> map) {
         StringBuilder sb=new StringBuilder();
@@ -2785,30 +3065,6 @@ public class Util {
     }
 
 
-    public static String printPingData(List<PingData> rsps) {
-        StringBuilder sb=new StringBuilder();
-        if(rsps != null) {
-            int total=rsps.size();
-            int servers=0, clients=0, coords=0;
-            for(PingData rsp : rsps) {
-                if(rsp.isCoord())
-                    coords++;
-                if(rsp.isServer())
-                    servers++;
-                else
-                    clients++;
-            }
-            sb.append(total + " total (" + servers + " servers (" + coords + " coord), " + clients + " clients)");
-        }
-        return sb.toString();
-    }
-
-
-    public static String print(ByteBuffer buf) {
-        return buf == null? "null" : String.format("[pos=%d lim=%d cap=%d]", buf.position(), buf.limit(), buf.capacity());
-    }
-
-
     /**
      * Tries to load the class from the current thread's context class loader. If
      * not successful, tries to load the class from the current instance.
@@ -2817,7 +3073,7 @@ public class Util {
      *                  if no context class loader is available.
      * @return Class, or null on failure.
      */
-    public static Class loadClass(String classname,Class clazz) throws ClassNotFoundException {
+    public static Class<?> loadClass(String classname, Class<?> clazz) throws ClassNotFoundException {
         return loadClass(classname, clazz != null? clazz.getClassLoader() : null);
     }
 
@@ -2850,13 +3106,13 @@ public class Util {
         String defaultProtocolName=Global.PREFIX + protocol_name;
         Class<? extends Protocol> clazz=null;
         try {
-            clazz=Util.loadClass(defaultProtocolName, cl);
+            clazz=(Class<? extends Protocol>)Util.loadClass(defaultProtocolName, cl);
         }
         catch(ClassNotFoundException e) {
         }
         if(clazz == null) {
             try {
-                clazz=Util.loadClass(protocol_name, cl);
+                clazz=(Class<? extends Protocol>)Util.loadClass(protocol_name, cl);
             }
             catch(ClassNotFoundException e) {
             }
@@ -2867,9 +3123,9 @@ public class Util {
     }
 
     @SafeVarargs
-    public static Field[] getAllDeclaredFieldsWithAnnotations(final Class clazz, Class<? extends Annotation>... annotations) {
+    public static Field[] getAllDeclaredFieldsWithAnnotations(final Class<?> clazz, Class<? extends Annotation>... annotations) {
         List<Field> list=new ArrayList<>(30);
-        for(Class curr=clazz; curr != null; curr=curr.getSuperclass()) {
+        for(Class<?> curr=clazz; curr != null; curr=curr.getSuperclass()) {
             Field[] fields=curr.getDeclaredFields();
             if(fields != null) {
                 for(Field field: fields) {
@@ -2910,7 +3166,8 @@ public class Util {
         }
         if(method_func != null) {
             Stream.of(Util.getAllDeclaredMethodsWithAnnotations(obj.getClass()))
-              .filter(m -> filter != null && filter.test(m)).forEach(m -> method_func.accept(m, obj));
+              .filter(m -> filter != null && filter.test(m)).peek(m -> m.setAccessible(true))
+              .forEach(m -> method_func.accept(m, obj));
         }
     }
 
@@ -2927,9 +3184,9 @@ public class Util {
 
 
     @SafeVarargs
-    public static Method[] getAllDeclaredMethodsWithAnnotations(final Class clazz, Class<? extends Annotation>... annotations) {
+    public static Method[] getAllDeclaredMethodsWithAnnotations(final Class<?> clazz, Class<? extends Annotation>... annotations) {
         List<Method> list=new ArrayList<>(30);
-        for(Class curr=clazz; curr != null; curr=curr.getSuperclass()) {
+        for(Class<?> curr=clazz; curr != null; curr=curr.getSuperclass()) {
             Method[] methods=curr.getDeclaredMethods();
             if(methods != null) {
                 for(Method method : methods) {
@@ -2961,7 +3218,7 @@ public class Util {
         return null;
     }
 
-    public static Field getField(final Class clazz, String field_name) {
+    public static Field getField(final Class<?> clazz, String field_name) {
         try {
             return getField(clazz, field_name, false);
         }
@@ -2970,12 +3227,12 @@ public class Util {
         }
     }
 
-    public static Field getField(final Class clazz, String field_name, boolean throw_exception) throws NoSuchFieldException {
+    public static Field getField(final Class<?> clazz, String field_name, boolean throw_exception) throws NoSuchFieldException {
         if(clazz == null || field_name == null)
             return null;
 
         Field field=null;
-        for(Class curr=clazz; curr != null; curr=curr.getSuperclass()) {
+        for(Class<?> curr=clazz; curr != null; curr=curr.getSuperclass()) {
             try {
                 return curr.getDeclaredField(field_name);
             }
@@ -3027,6 +3284,92 @@ public class Util {
         return null;
     }
 
+    /** Called by the ProbeHandler impl. All args are strings. Needs to find a method where all parameter
+     * types are primitive types, so the strings can be converted */
+    public static Method findMethod(Class<?> target_class, String method_name, Object[] args) throws Exception {
+        int len=args != null? args.length : 0;
+        Method retval=null;
+        Method[] methods=getAllMethods(target_class);
+        for(int i=0; i < methods.length; i++) {
+            Method m=methods[i];
+            if(m.getName().equals(method_name)) {
+                Class<?>[] parameter_types=m.getParameterTypes();
+                if(parameter_types.length == len) {
+                    retval=m;
+                    // now check if all parameter types are primitive types:
+                    boolean all_primitive=true;
+                    for(Class<?> parameter_type: parameter_types) {
+                        if(!isPrimitiveType(parameter_type)) {
+                            all_primitive=false;
+                            break;
+                        }
+                    }
+                    if(all_primitive)
+                        return m;
+                }
+            }
+        }
+        return retval;
+    }
+
+    /**
+     * The method walks up the class hierarchy and returns <i>all</i> methods of this class
+     * and those inherited from superclasses and superinterfaces.
+     */
+    public static Method[] getAllMethods(Class<?> target) {
+        Class<?>    superclass = target;
+        Set<Method> methods = new HashSet<>();
+
+        while(superclass != null) {
+            try {
+                Method[] m = superclass.getDeclaredMethods();
+                Collections.addAll(methods, m);
+
+                // find the default methods of all interfaces (https://issues.jboss.org/browse/JGRP-2247)
+                Class<?>[] interfaces=superclass.getInterfaces();
+                if(interfaces != null) {
+                    for(Class<?> cl: interfaces) {
+                        Method[] tmp=getAllMethods(cl);
+                        if(tmp != null) {
+                            for(Method mm: tmp)
+                                if(mm.isDefault())
+                                    methods.add(mm);
+                        }
+                    }
+                }
+                superclass = superclass.getSuperclass();
+            }
+            catch(SecurityException e) {
+                // if it runs in an applet context, it won't be able to retrieve methods from superclasses that belong
+                // to the java VM and it will raise a security exception, so we catch it here.
+                superclass=null;
+            }
+        }
+
+        Method[] result = new Method[methods.size()];
+        int index = 0;
+        for(Method m: methods)
+            result[index++]=m;
+        return result;
+    }
+
+
+    public static boolean isPrimitiveType(Class<?> type) {
+        return type.isPrimitive()
+          || type == String.class
+          || type == Boolean.class
+          || type == Character.class
+          || type == Byte.class
+          || type == Short.class
+          || type == Integer.class
+          || type == Long.class
+          || type == Float.class
+          || type == Double.class;
+    }
+
+    public static boolean isPrimitiveType(Object obj) {
+        return (obj instanceof Class<?>? TYPES.get(obj) : TYPES.get(obj.getClass())) != null;
+    }
 
     public static Method findMethod(Object target,List<String> possible_names,Class<?>... parameter_types) {
         if(target == null)
@@ -3040,6 +3383,30 @@ public class Util {
             for(String name : possible_names) {
                 try {
                     return clazz.getDeclaredMethod(name,parameter_types);
+                }
+                catch(Exception ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+
+    public static Method findMethod(Class<?> cl, String method_name, Class<?>... parameter_types) {
+        for(Class<?> clazz=cl; clazz != null; clazz=clazz.getSuperclass()) {
+            try {
+                return clazz.getDeclaredMethod(method_name,parameter_types);
+            }
+            catch(Exception ignored) {
+            }
+        }
+
+        // if not found, check if any of the interfaces has a (default) impl
+        for(Class<?> clazz=cl; clazz != null; clazz=clazz.getSuperclass()) {
+            Class<?>[] interfaces=clazz.getInterfaces();
+            for(Class<?> clazz2: interfaces) {
+                try {
+                    return findMethod(clazz2, method_name, parameter_types); // clazz2.getDeclaredMethod(method_name, parameter_types);
                 }
                 catch(Exception ignored) {
                 }
@@ -3100,22 +3467,17 @@ public class Util {
     }
 
 
-    public static InputStream getResourceAsStream(String name,Class clazz) {
-        ClassLoader loader;
-        InputStream retval=null;
+    public static InputStream getResourceAsStream(String name,Class<?> clazz) {
+        return getResourceAsStream(name, clazz != null ? clazz.getClassLoader() : null);
+    }
 
-        // https://issues.jboss.org/browse/JGRP-1762: load the classloader from the defining class first
-        if(clazz != null) {
-            try {
-                loader=clazz.getClassLoader();
-                if(loader != null) {
-                    retval=loader.getResourceAsStream(name);
-                    if(retval != null)
-                        return retval;
-                }
-            }
-            catch(Throwable ignored) {
-            }
+    public static InputStream getResourceAsStream(String name,ClassLoader loader) {
+        InputStream retval;
+
+        if (loader != null) {
+            retval = loader.getResourceAsStream(name);
+            if (retval != null)
+                return retval;
         }
 
         try {
@@ -3132,13 +3494,41 @@ public class Util {
         try {
             loader=ClassLoader.getSystemClassLoader();
             if(loader != null) {
-                return loader.getResourceAsStream(name);
+                retval=loader.getResourceAsStream(name);
+                if(retval != null)
+                    return retval;
             }
         }
         catch(Throwable ignored) {
         }
 
-        return retval;
+        try {
+            return new FileInputStream(name);
+        }
+        catch(FileNotFoundException e) {
+        }
+        return null;
+    }
+
+    public static String getChild(final Element root, String path) {
+        String[] paths=path.split("\\.");
+        Element current=root;
+        boolean found=false;
+        for(String el: paths) {
+            NodeList subnodes=current.getChildNodes();
+            found=false;
+            for(int j=0; j < subnodes.getLength(); j++) {
+                Node subnode=subnodes.item(j);
+                if(subnode.getNodeType() != Node.ELEMENT_NODE)
+                    continue;
+                if(subnode.getNodeName().equals(el)) {
+                    current=(Element)subnode;
+                    found=true;
+                    break;
+                }
+            }
+        }
+        return found? current.getFirstChild().getNodeValue() : null;
     }
 
 
@@ -3181,52 +3571,6 @@ public class Util {
         throw new IllegalArgumentException("rejection policy \"" + rejection_policy + "\" not known");
     }
 
-
-    /**
-     * Parses comma-delimited longs; e.g., 2000,4000,8000.
-     * Returns array of long, or null.
-     */
-    public static int[] parseCommaDelimitedInts(String s) {
-        StringTokenizer tok;
-        List<Integer> v=new ArrayList<>();
-        Integer l;
-        int[] retval=null;
-
-        if(s == null) return null;
-        tok=new StringTokenizer(s,",");
-        while(tok.hasMoreTokens()) {
-            l= Integer.valueOf(tok.nextToken());
-            v.add(l);
-        }
-        if(v.isEmpty()) return null;
-        retval=new int[v.size()];
-        for(int i=0; i < v.size(); i++)
-            retval[i]=v.get(i);
-        return retval;
-    }
-
-    /**
-     * Parses comma-delimited longs; e.g., 2000,4000,8000.
-     * Returns array of long, or null.
-     */
-    public static long[] parseCommaDelimitedLongs(String s) {
-        StringTokenizer tok;
-        List<Long> v=new ArrayList<>();
-        Long l;
-        long[] retval=null;
-
-        if(s == null) return null;
-        tok=new StringTokenizer(s,",");
-        while(tok.hasMoreTokens()) {
-            l=Long.valueOf(tok.nextToken());
-            v.add(l);
-        }
-        if(v.isEmpty()) return null;
-        retval=new long[v.size()];
-        for(int i=0; i < v.size(); i++)
-            retval[i]=v.get(i);
-        return retval;
-    }
 
     /** e.g. "bela,jeannette,michelle" --> List{"bela", "jeannette", "michelle"} */
     public static List<String> parseCommaDelimitedStrings(String l) {
@@ -3297,43 +3641,6 @@ public class Util {
         return tmp;
     }
 
-    public static Map<String,String> parseCommaDelimitedProps(String s) {
-        if (s == null)
-            return null;
-        Map<String,String> props=new HashMap<>();
-        Pattern p=Pattern.compile("\\s*([^=\\s]+)\\s*=\\s*([^=\\s,]+)\\s*,?"); //Pattern.compile("\\s*([^=\\s]+)\\s*=\\s([^=\\s]+)\\s*,?");
-        Matcher matcher=p.matcher(s);
-        while(matcher.find()) {
-            props.put(matcher.group(1), matcher.group(2));
-        }
-        return props;
-    }
-
-
-    /**
-     * Reads and discards all characters from the input stream until a \r\n or EOF is encountered
-     * @param in
-     * @return
-     */
-    public static int discardUntilNewLine(InputStream in) {
-        int ch;
-        int num=0;
-
-        while(true) {
-            try {
-                ch=in.read();
-                if(ch == -1)
-                    break;
-                num++;
-                if(ch == '\n')
-                    break;
-            }
-            catch(IOException e) {
-                break;
-            }
-        }
-        return num;
-    }
 
     /**
      * Reads a line of text.  A line is considered to be terminated by any one
@@ -3523,85 +3830,45 @@ public class Util {
         return new ConcurrentHashMap<>(CCHM_INITIAL_CAPACITY,CCHM_LOAD_FACTOR,CCHM_CONCURRENCY_LEVEL);
     }
 
-    public static ServerSocket createServerSocket(SocketFactory factory, String service_name, InetAddress bind_addr, int start_port) {
+    public static ServerSocket createServerSocket(SocketFactory factory, String service_name, InetAddress bind_addr,
+                                                  int start_port, int end_port, int recv_buf_size) {
         ServerSocket ret=null;
         try {
             ret=factory.createServerSocket(service_name);
-            Util.bind(ret, bind_addr, start_port, start_port+1000, 50);
+            if(recv_buf_size > 0)
+                ret.setReceiveBufferSize(recv_buf_size); // https://issues.redhat.com/browse/JGRP-2504
+            Util.bind(ret, bind_addr, start_port, end_port);
             return ret;
         }
         catch(Exception e) {
+            Util.close(ret);
             return null;
         }
     }
 
 
-    public static ServerSocket createServerSocket(SocketFactory factory,String service_name,InetAddress bind_addr,
-                                                  int start_port,int end_port) throws Exception {
-        int original_start_port=start_port;
-        ServerSocket srv_sock=null;
-
-        while(true) {
-            try {
-                if(srv_sock != null);
-                    Util.close(srv_sock);
-                srv_sock=factory.createServerSocket(service_name);
-                InetSocketAddress sock_addr=new InetSocketAddress(bind_addr, start_port);
-                srv_sock.bind(sock_addr);
-                return srv_sock;
-            }
-            catch(SocketException bind_ex) {
-                if(start_port == end_port)
-                    throw new BindException(String.format("no port available in range [%d .. %d] (bind_addr=%s)",
-                                                          original_start_port, end_port, bind_addr));
-                if(bind_addr != null && !(bind_addr.isLoopbackAddress() || bind_addr.isAnyLocalAddress())) {
-                    NetworkInterface nic=NetworkInterface.getByInetAddress(bind_addr);
-                    if(nic == null)
-                        throw new BindException("bind_addr " + bind_addr + " is not a valid interface: " + bind_ex);
-                }
-                start_port++;
-            }
-        }
-    }
-
-    /**
-     * Finds first available port starting at start_port and returns server
-     * socket. Will not bind to port >end_port. Sets srv_port
-     */
-    public static ServerSocket createServerSocketAndBind(SocketFactory factory,String service_name,InetAddress bind_addr,
-                                                  int start_port,int end_port) throws Exception {
-        ServerSocket ret=factory.createServerSocket(service_name);
-        bind(ret, bind_addr, start_port, end_port);
-        return ret;
-    }
 
 
     public static void bind(ServerSocket srv_sock, InetAddress bind_addr,
                             int start_port, int end_port) throws Exception {
-        bind(srv_sock, bind_addr, start_port, end_port, 50);
-    }
-
-    public static void bind(ServerSocket srv_sock, InetAddress bind_addr,
-                            int start_port, int end_port, int backlog) throws Exception {
         int original_start_port=start_port;
 
         while(true) {
             try {
                 InetSocketAddress sock_addr=new InetSocketAddress(bind_addr, start_port);
-                srv_sock.bind(sock_addr, backlog);
+                srv_sock.bind(sock_addr);
+                break;
             }
             catch(SocketException bind_ex) {
                 if(start_port == end_port)
                     throw new BindException("No available port to bind to in range [" + original_start_port + " .. " + end_port + "]");
-                if(bind_addr != null && !bind_addr.isLoopbackAddress()) {
+                if(bind_addr != null && !bind_addr.isLoopbackAddress() && !bind_addr.isAnyLocalAddress()) {
                     NetworkInterface nic=NetworkInterface.getByInetAddress(bind_addr);
                     if(nic == null)
                         throw new BindException("bind_addr " + bind_addr + " is not a valid interface: " + bind_ex);
                 }
                 start_port++;
-                continue;
             }
-            break;
         }
     }
 
@@ -3613,6 +3880,7 @@ public class Util {
             try {
                 InetSocketAddress sock_addr=new InetSocketAddress(bind_addr, start_port);
                 sock.bind(sock_addr);
+                break;
             }
             catch(SocketException bind_ex) {
                 if(start_port == end_port)
@@ -3623,30 +3891,21 @@ public class Util {
                         throw new BindException("bind_addr " + bind_addr + " is not a valid interface: " + bind_ex);
                 }
                 start_port++;
-                continue;
             }
-            break;
         }
     }
 
 
-
-    public static ServerSocketChannel createServerSocketChannelAndBind(InetAddress bind_addr,
-                                                                int start_port, int end_port) throws Exception {
-        ServerSocketChannel channel=ServerSocketChannel.open();
-        bind(channel, bind_addr, start_port, end_port);
-        return channel;
-    }
-
     public static ServerSocketChannel createServerSocketChannel(SocketFactory factory,String service_name, InetAddress bind_addr,
-                                                                int start_port, int end_port) throws Exception {
+                                                                int start_port, int end_port, int recv_buf_size) throws Exception {
         int original_start_port=start_port;
         ServerSocketChannel ch=null;
         while(true) {
             try {
-                if(ch != null)
-                    Util.close(ch);
+                Util.close(ch);
                 ch=factory.createServerSocketChannel(service_name);
+                if(recv_buf_size > 0)
+                    ch.setOption(StandardSocketOptions.SO_RCVBUF, recv_buf_size);
                 ch.bind(new InetSocketAddress(bind_addr, start_port), 50);
                 return ch;
             }
@@ -3660,33 +3919,6 @@ public class Util {
                 }
                 start_port++;
             }
-        }
-    }
-
-
-    public static void bind(final ServerSocketChannel ch, InetAddress bind_addr, int start_port, int end_port) throws Exception {
-        bind(ch, bind_addr, start_port, end_port, 50);
-    }
-
-
-    public static void bind(final ServerSocketChannel ch, InetAddress bind_addr, int start_port, int end_port, int backlog) throws Exception {
-        int original_start_port=start_port;
-        while(true) {
-            try {
-                ch.bind(new InetSocketAddress(bind_addr, start_port), backlog);
-            }
-            catch(SocketException bind_ex) {
-                if(start_port == end_port)
-                    throw new BindException("No available port to bind to in range [" + original_start_port + " .. " + end_port + "]");
-                if(bind_addr != null && !bind_addr.isLoopbackAddress()) {
-                    NetworkInterface nic=NetworkInterface.getByInetAddress(bind_addr);
-                    if(nic == null)
-                        throw new BindException("bind_addr " + bind_addr + " is not a valid interface: " + bind_ex);
-                }
-                start_port++;
-                continue;
-            }
-            break;
         }
     }
 
@@ -3795,11 +4027,11 @@ public class Util {
         // 3. intf and bind_addr are both are specified, bind_addr needs to be on intf
         if(bind_addr != null) {
             boolean hasAddress=false;
-            Enumeration addresses=bind_intf.getInetAddresses();
+            Enumeration<InetAddress> addresses=bind_intf.getInetAddresses();
 
             while(addresses != null && addresses.hasMoreElements()) {
                 // get the next InetAddress for the current interface
-                InetAddress address=(InetAddress)addresses.nextElement();
+                InetAddress address=addresses.nextElement();
                 // check if address is on interface
                 if(bind_addr.equals(address)) {
                     hasAddress=true;
@@ -3853,7 +4085,7 @@ public class Util {
 
     private static boolean checkForPresence(String key,String value) {
         try {
-            String tmp=System.getProperty(key);
+            String tmp=SecurityActions.getProperty(key);
             return tmp != null && tmp.trim().toLowerCase().startsWith(value);
         }
         catch(Throwable t) {
@@ -3863,7 +4095,7 @@ public class Util {
 
     private static boolean contains(String key,String value) {
         try {
-            String tmp=System.getProperty(key);
+            String tmp=SecurityActions.getProperty(key);
             return tmp != null && tmp.trim().toLowerCase().contains(value.trim().toLowerCase());
         }
         catch(Throwable t) {
@@ -3881,12 +4113,6 @@ public class Util {
 
     public static InetAddress getLoopback() throws UnknownHostException {
         return getLoopback(Util.getIpStackType());
-    }
-
-    public static InetAddress getLocalMulticastAddress(StackType ip_version) throws UnknownHostException {
-        if(ip_version == StackType.IPv6)
-            return InetAddress.getByName("ff0e::5:5:5");
-        return InetAddress.getByName("225.5.5.5");
     }
 
 
@@ -3974,8 +4200,8 @@ public class Util {
      */
     public static InetAddress getAddress(NetworkInterface intf, AddressScope scope, StackType ip_version) {
         InetAddress first=null;
-        for(Enumeration addresses=intf.getInetAddresses(); addresses.hasMoreElements(); ) {
-            InetAddress addr=(InetAddress)addresses.nextElement();
+        for(Enumeration<InetAddress> addresses=intf.getInetAddresses(); addresses.hasMoreElements(); ) {
+            InetAddress addr=addresses.nextElement();
             if(scope == null || match(addr,scope)) {
                 if((addr instanceof Inet4Address && (ip_version == StackType.IPv4 || ip_version == StackType.Dual)) ||
                   (addr instanceof Inet6Address && ip_version == StackType.IPv6))
@@ -4036,9 +4262,9 @@ public class Util {
                                                  Global.MATCH_HOST + ":<pattern> or " + Global.MATCH_INTF + ":<pattern>");
 
         Pattern pat=Pattern.compile(real_pattern);
-        Enumeration intfs=NetworkInterface.getNetworkInterfaces();
+        Enumeration<NetworkInterface> intfs=NetworkInterface.getNetworkInterfaces();
         while(intfs.hasMoreElements()) {
-            NetworkInterface intf=(NetworkInterface)intfs.nextElement();
+            NetworkInterface intf=intfs.nextElement();
             try {
                 if(!isUp(intf))
                     continue;
@@ -4106,10 +4332,10 @@ public class Util {
         boolean supportsVersion=false;
         if(intf != null) {
             // get all the InetAddresses defined on the interface
-            Enumeration addresses=intf.getInetAddresses();
+            Enumeration<InetAddress> addresses=intf.getInetAddresses();
             while(addresses != null && addresses.hasMoreElements()) {
                 // get the next InetAddress for the current interface
-                InetAddress address=(InetAddress)addresses.nextElement();
+                InetAddress address=addresses.nextElement();
 
                 // check if we find an address of correct version
                 if((address instanceof Inet4Address && (ip_version == StackType.IPv4)) ||
@@ -4127,29 +4353,6 @@ public class Util {
 
     public static StackType getIpStackType() {
         return ip_stack_type;
-    }
-
-    public static boolean isIpv4StackAvailable() {
-        return ipv4_stack_available;
-    }
-
-    public static boolean isIpv6StackAvailable() {
-        return ipv6_stack_available;
-    }
-
-    public static boolean isIpAddressPermissible(InetAddress addr) {
-        if(ipv4_stack_available && !ipv6_stack_available)
-            return !(addr instanceof Inet6Address);
-        // todo: when we have an IPv4 address in an IPv6 stack -> map it to an IPv6 address
-        return true;
-    }
-
-    /** Returns true if the 2 addresses are of the same type (IPv4 or IPv6) */
-    public static boolean sameAddresses(InetAddress one,InetAddress two) {
-        return one == null
-          || two == null
-          || (one instanceof Inet6Address && two instanceof Inet6Address)
-          || (one instanceof Inet4Address && two instanceof Inet4Address);
     }
 
     /**
@@ -4193,8 +4396,8 @@ public class Util {
 
     public static List<NetworkInterface> getAllAvailableInterfaces() throws SocketException {
         List<NetworkInterface> retval=new ArrayList<>(10);
-        for(Enumeration en=NetworkInterface.getNetworkInterfaces(); en.hasMoreElements(); ) {
-            retval.add((NetworkInterface)en.nextElement());
+        for(Enumeration<NetworkInterface> en=NetworkInterface.getNetworkInterfaces(); en.hasMoreElements(); ) {
+            retval.add(en.nextElement());
         }
         return retval;
     }
@@ -4237,21 +4440,6 @@ public class Util {
     }
 
 
-    public static InetAddress convertToIPv6(InetAddress ipv4_addr) throws UnknownHostException {
-        if(!(ipv4_addr instanceof Inet4Address))
-            throw new IllegalArgumentException(String.format("address %s is not an IPv4 address", ipv4_addr));
-        byte[] bytes=ipv4_addr.getAddress();
-        byte[] ipv4asIpV6addr=new byte[16];
-        ipv4asIpV6addr[10]=(byte)0xff;
-        ipv4asIpV6addr[11]=(byte)0xff;
-        ipv4asIpV6addr[12]=bytes[0];
-        ipv4asIpV6addr[13]=bytes[1];
-        ipv4asIpV6addr[14]=bytes[2];
-        ipv4asIpV6addr[15]=bytes[3];
-        return InetAddress.getByAddress(ipv4asIpV6addr);
-    }
-
-
     /**
      * Returns a value associated wither with one or more system properties, or found in the props map
      * @param system_props
@@ -4273,7 +4461,7 @@ public class Util {
                 prop=system_props[i];
                 if(prop != null) {
                     try {
-                        tmp=System.getProperty(prop);
+                        tmp=SecurityActions.getProperty(prop);
                         if(tmp != null)
                             return tmp;
                     }
@@ -4338,80 +4526,6 @@ public class Util {
         }
     }
 
-
-    /**
-     * Go through the input string and replace any occurance of ${p} with the props.getProperty(p) value.
-     * If there is no such property p defined, then the ${p} reference will remain unchanged.
-     * <p/>
-     * If the property reference is of the form ${p:v} and there is no such
-     * property p, then the default value v will be returned.
-     * <p/>
-     * If the property reference is of the form ${p1,p2} or ${p1,p2:v} then the primary and the secondary properties
-     * will be tried in turn, before returning either the unchanged input, or the default value.
-     * <p/>
-     * The property ${/} is replaced with System.getProperty("file.separator") value and the property ${:} is replaced
-     * with System.getProperty("path.separator").
-     * @param string the string with possible ${} references
-     * @param props  the source for ${x} property ref values, null means use
-     *               System.getProperty()
-     * @return the input string with all property references replaced if any. If
-     *         there are no valid references the input string will be returned.
-     * @throws {@link java.security.AccessControlException} when not authorised to retrieved system properties
-     *
-     * @deprecated use {@link Util#substituteVariable(String)}
-     *
-     */
-    @Deprecated
-    public static String replaceProperties(final String string,final Properties props) {
-        return substituteVariable(string, props);
-    }
-
-    protected static void append(StringBuilder sb, String str) {
-        if(sb == null || str == null)
-            return;
-        sb.append(str.replace("\\${", "${"));
-    }
-
-
-    /**
-     * Try to resolve a "key" from the provided properties by checking if it is
-     * actually a "key1,key2", in which case try first "key1", then "key2". If
-     * all fails, return null.
-     * <p/>
-     * It also accepts "key1," and ",key2".
-     * @param key   the key to resolve
-     * @param props the properties to use
-     * @return the resolved key or null
-     */
-    private static String resolveCompositeKey(String key,Properties props) {
-        String value=null;
-
-        // Look for the comma
-        int comma=key.indexOf(',');
-        if(comma > -1) {
-            // If we have a first part, try resolve it
-            if(comma > 0) {
-                // Check the first part
-                String key1=key.substring(0,comma);
-                if(props != null)
-                    value=props.getProperty(key1);
-                else
-                    value=System.getProperty(key1);
-            }
-            // Check the second part, if there is one and first lookup failed
-            if(value == null && comma < key.length() - 1) {
-                String key2=key.substring(comma + 1);
-                if(props != null)
-                    value=props.getProperty(key2);
-                else
-                    value=System.getProperty(key2);
-            }
-        }
-        // Return whatever we've found or null
-        return value;
-    }
-
-
     /**
      * Replaces variables of ${var:default} with System.getProperty(var, default). If no variables are found, returns
      * the same string, otherwise a copy of the string with variables substituted
@@ -4447,7 +4561,7 @@ public class Util {
     private static String _substituteVar(String val, Properties p) {
         int start_index, end_index;
         start_index=val.indexOf("${");
-        if(start_index == -1 || val.indexOf("\\${") >= 0)
+        if(start_index == -1 || val.contains("\\${"))
             return val;
         end_index=val.indexOf("}",start_index + 2);
         if(end_index == -1)
@@ -4502,9 +4616,9 @@ public class Util {
             try {
                 if(p != null && (retval=p.getProperty(prop)) != null)
                     return retval;
-                if((retval=System.getProperty(prop)) != null)
+                if((retval=SecurityActions.getProperty(prop)) != null)
                     return retval;
-                if((retval=System.getenv(prop)) != null)
+                if((retval=SecurityActions.getEnv(prop)) != null)
                     return retval;
             }
             catch(Throwable ignored) {
@@ -4513,57 +4627,6 @@ public class Util {
         return default_value;
     }
 
-
-    /**
-     * Used to convert a byte array in to a java.lang.String object
-     * @param bytes the bytes to be converted
-     * @return the String representation
-     */
-    private static String getString(byte[] bytes) {
-        StringBuilder sb=new StringBuilder();
-        for(int i=0; i < bytes.length; i++) {
-            byte b=bytes[i];
-            sb.append(0x00FF & b);
-            if(i + 1 < bytes.length) {
-                sb.append("-");
-            }
-        }
-        return sb.toString();
-    }
-
-
-    /**
-     * Converts a java.lang.String in to a MD5 hashed String
-     * @param source the source String
-     * @return the MD5 hashed version of the string
-     */
-    public static String md5(String source) {
-        try {
-            MessageDigest md=MessageDigest.getInstance("MD5");
-            byte[] bytes=md.digest(source.getBytes());
-            return getString(bytes);
-        }
-        catch(Exception e) {
-            return null;
-        }
-    }
-
-    /**
-     * Converts a java.lang.String in to a SHA hashed String
-     * @param source the source String
-     * @return the MD5 hashed version of the string
-     */
-    public static String sha(String source) {
-        try {
-            MessageDigest md=MessageDigest.getInstance("SHA");
-            byte[] bytes=md.digest(source.getBytes());
-            return getString(bytes);
-        }
-        catch(Exception e) {
-            e.printStackTrace();
-            return null;
-        }
-    }
 
     /** Converts a method name to an attribute name, e.g. getFooBar() --> foo_bar, isFlag --> flag */
     public static String methodNameToAttributeName(final String methodName) {

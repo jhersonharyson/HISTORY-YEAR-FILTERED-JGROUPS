@@ -13,6 +13,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import java.util.Arrays;
 import java.util.Properties;
 
 /**
@@ -103,7 +104,7 @@ public class DiscardTest extends ChannelTestBase {
         System.out.printf("== Sent and received %d in %d ms, %.2f msgs/sec\n", NUM_MSGS, diff, msgs_sec);
     }
 
-    static class MyReceiver extends ReceiverAdapter {
+    static class MyReceiver implements Receiver {
         final Promise<Long> p;
         final long num_msgs_expected;
         long num_msgs=0;
@@ -138,9 +139,8 @@ public class DiscardTest extends ChannelTestBase {
 
     private static Message createMessage(int size) {
         byte[] buf=new byte[size];
-        for(int i=0;i < buf.length;i++)
-            buf[i]=(byte)'x';
-        return new Message(null, buf);
+        Arrays.fill(buf, (byte)'x');
+        return new BytesMessage(null, buf);
     }
 
 

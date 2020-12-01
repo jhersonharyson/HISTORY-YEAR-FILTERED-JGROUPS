@@ -42,8 +42,7 @@ public class BARRIERTest {
         ch.setReceiver(receiver);
         ch.down(new Event(Event.CLOSE_BARRIER)); // BARRIER starts discarding messages from now on
         for(int i=0; i < 5; i++) {
-            new Thread() {public void run() {
-                discovery_prot.up(createMessage());}}.start();
+            new Thread(() -> discovery_prot.up(createMessage())).start();
         }
 
         Util.sleep(2000);
@@ -67,10 +66,7 @@ public class BARRIERTest {
 
         Thread[] threads=new Thread[2];
         for(int i=1; i <= threads.length; i++) {
-            Thread thread=new Thread() {
-                public void run() {
-                    discovery_prot.up(createMessage());}
-            };
+            Thread thread=new Thread(() -> discovery_prot.up(createMessage()));
             thread.setName("blocker-" + i);
             thread.start();
         }
@@ -88,14 +84,11 @@ public class BARRIERTest {
         final CyclicBarrier barrier=new CyclicBarrier(3);
         BlockingReceiver receiver=new BlockingReceiver(barrier);
         ch.setReceiver(receiver);
-        barrier_prot.setValue("flush_timeout", 2000);
+        barrier_prot.setFlushTimeout(2000);
 
         Thread[] threads=new Thread[2];
         for(int i=1; i <= threads.length; i++) {
-            Thread thread=new Thread() {
-                public void run() {
-                    discovery_prot.up(createMessage());}
-            };
+            Thread thread=new Thread(() -> discovery_prot.up(createMessage()));
             thread.setName("blocker-" + i);
             thread.start();
         }
@@ -116,7 +109,7 @@ public class BARRIERTest {
 
 
     protected Message createMessage() {
-        return new Message(null).src(ch.getAddress()).putHeader(tp.getId(),new TpHeader("BARRIERTest"));
+        return new EmptyMessage(null).setSrc(ch.getAddress()).putHeader(tp.getId(), new TpHeader("BARRIERTest"));
     }
 
     protected void waitUntilNumThreadsAreBlocked(int expected, long timeout, long interval) {
@@ -129,7 +122,7 @@ public class BARRIERTest {
     }
 
 
-    protected static class MyReceiver extends ReceiverAdapter {
+    protected static class MyReceiver implements Receiver {
         protected final AtomicInteger num_mgs_received=new AtomicInteger(0);
 
         public void receive(Message msg) {
@@ -143,7 +136,7 @@ public class BARRIERTest {
     }
 
 
-    protected static class BlockingReceiver extends ReceiverAdapter {
+    protected static class BlockingReceiver implements Receiver {
         protected final CyclicBarrier barrier;
 
         BlockingReceiver(CyclicBarrier barrier) {

@@ -7,6 +7,7 @@ import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.blocks.cs.TcpServer;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.util.SocketFactory;
 
 import java.util.Collection;
@@ -34,11 +35,12 @@ public class TCP extends BasicTCP {
     public TCP() {}
 
     @Property(description="Size of the buffer of the BufferedInputStream in TcpConnection. A read always tries to read " +
-      "ahead as much data as possible into the buffer. 0: default size")
+      "ahead as much data as possible into the buffer. 0: default size",type=AttributeType.BYTES)
     protected int buffered_input_stream_size=8192;
 
     @Property(description="Size of the buffer of the BufferedOutputStream in TcpConnection. Smaller messages are " +
-      " buffered until this size is exceeded or flush() is called. Bigger messages are sent immediately. 0: default size")
+      " buffered until this size is exceeded or flush() is called. Bigger messages are sent immediately. 0: default size",
+      type=AttributeType.BYTES)
     protected int buffered_output_stream_size=8192;
 
     public int getBufferedInputStreamSize() {
@@ -88,11 +90,10 @@ public class TCP extends BasicTCP {
     }
 
     public void start() throws Exception {
-        server=new TcpServer(getThreadFactory(), getSocketFactory(), bind_addr, bind_port, bind_port+port_range, external_addr, external_port);
+        server=new TcpServer(getThreadFactory(), getSocketFactory(), bind_addr, bind_port, bind_port+port_range,
+                             external_addr, external_port, recv_buf_size);
         server.receiver(this)
           .timeService(time_service)
-          .receiveBufferSize(recv_buf_size)
-          .sendBufferSize(send_buf_size)
           .socketConnectionTimeout(sock_conn_timeout)
           .tcpNodelay(tcp_nodelay).linger(linger)
           .clientBindAddress(client_bind_addr).clientBindPort(client_bind_port).deferClientBinding(defer_client_bind_addr)
@@ -101,6 +102,11 @@ public class TCP extends BasicTCP {
           .peerAddressReadTimeout(peer_addr_read_timeout)
           .usePeerConnections(true)
           .socketFactory(getSocketFactory());
+
+        if(send_buf_size > 0)
+            server.sendBufferSize(send_buf_size);
+        if(recv_buf_size > 0)
+            server.receiveBufferSize(recv_buf_size);
 
         if(reaper_interval > 0 || conn_expire_time > 0) {
             if(reaper_interval == 0) {

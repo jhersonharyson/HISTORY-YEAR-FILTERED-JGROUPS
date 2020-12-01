@@ -1,12 +1,10 @@
 
 package org.jgroups.protocols;
 
-import org.jgroups.Address;
-import org.jgroups.Event;
-import org.jgroups.Message;
-import org.jgroups.PhysicalAddress;
+import org.jgroups.*;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.conf.PropertyConverters;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.stack.RouterStub;
@@ -38,24 +36,27 @@ public class TCPGOSSIP extends Discovery implements RouterStub.MembersNotificati
     
     /* -----------------------------------------    Properties     -------------------------------------------------- */
     
-    @Property(description="Max time for socket creation. Default is 1000 msec")
+    @Property(description="Max time for socket creation. Default is 1000 ms",type=AttributeType.TIME)
     protected int sock_conn_timeout=1000;
 
-    @Property(description="Interval (ms) by which a disconnected stub attempts to reconnect to the GossipRouter")
+    @Property(description="Interval (ms) by which a disconnected stub attempts to reconnect to the GossipRouter",
+      type=AttributeType.TIME)
     protected long reconnect_interval=10000L;
     
     @Property(name="initial_hosts", description="Comma delimited list of hosts to be contacted for initial membership", 
               converter=PropertyConverters.InitialHosts2.class)
-    public void setInitialHosts(List<InetSocketAddress> hosts) {
+    public TCPGOSSIP setInitialHosts(List<InetSocketAddress> hosts) {
         if(hosts == null || hosts.isEmpty())
             throw new IllegalArgumentException("initial_hosts must contain the address of at least one GossipRouter");
-        initial_hosts.addAll(hosts) ;
+        initial_hosts.addAll(hosts);
+        return this;
     }
 
-    public void setInitialHosts(Collection<InetSocketAddress> hosts) {
+    public TCPGOSSIP setInitialHosts(Collection<InetSocketAddress> hosts) {
         if(hosts == null || hosts.isEmpty())
             throw new IllegalArgumentException("initial_hosts must contain the address of at least one GossipRouter");
         initial_hosts.addAll(hosts) ;
+        return this;
     }
 
     public List<InetSocketAddress> getInitialHosts() {
@@ -84,8 +85,8 @@ public class TCPGOSSIP extends Discovery implements RouterStub.MembersNotificati
         super.init();
         stubManager = RouterStubManager.emptyGossipClientStubManager(this).useNio(this.use_nio);
         // we cannot use TCPGOSSIP together with TUNNEL (https://jira.jboss.org/jira/browse/JGRP-1101)
-        TP transport=getTransport();
-        if(transport instanceof TUNNEL)
+        TP tp=getTransport();
+        if(tp instanceof TUNNEL)
             throw new IllegalStateException("TCPGOSSIP cannot be used with TUNNEL; use either TUNNEL:PING or " +
                     "TCP:TCPGOSSIP as valid configurations");
     }
@@ -170,8 +171,8 @@ public class TCPGOSSIP extends Discovery implements RouterStub.MembersNotificati
             if(own_physical_addr.equals(physical_addr)) // no need to send the request to myself
                 continue;
             // the message needs to be DONT_BUNDLE, see explanation above
-            final Message msg=new Message(physical_addr).setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB)
-              .putHeader(this.id, hdr).setBuffer(marshal(data));
+            Message msg=new BytesMessage(physical_addr).putHeader(this.id, hdr).setArray(marshal(data))
+              .setFlag(Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE, Message.Flag.OOB);
             log.trace("%s: sending discovery request to %s", local_addr, msg.getDest());
             down_prot.down(msg);
         }

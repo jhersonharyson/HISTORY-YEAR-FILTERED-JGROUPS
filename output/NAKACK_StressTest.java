@@ -78,7 +78,7 @@ public class NAKACK_StressTest {
             public void up(MessageBatch batch) {
                 for(Message msg: batch) {
                     delivered_msgs.incrementAndGet();
-                    NakAckHeader2 hdr=(NakAckHeader2)msg.getHeader(NAKACK_ID);
+                    NakAckHeader2 hdr=msg.getHeader(NAKACK_ID);
                     if(hdr != null)
                         delivered_msg_list.add(hdr.getSeqno());
 
@@ -162,7 +162,7 @@ public class NAKACK_StressTest {
     }
 
     private static Message createMessage(Address dest, Address src, long seqno, boolean oob) {
-        Message msg=new Message(dest, "hello world").src(src);
+        Message msg=new BytesMessage(dest, "hello world").setSrc(src);
         NakAckHeader2 hdr=NakAckHeader2.createMessageHeader(seqno) ;
         msg.putHeader(NAKACK_ID, hdr);
         if(oob)

@@ -2,10 +2,7 @@ package org.jgroups.tests.byteman;
 
 import org.jboss.byteman.contrib.bmunit.BMNGRunner;
 import org.jboss.byteman.contrib.bmunit.BMScript;
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
-import org.jgroups.ReceiverAdapter;
+import org.jgroups.*;
 import org.jgroups.protocols.SHARED_LOOPBACK;
 import org.jgroups.protocols.SHARED_LOOPBACK_PING;
 import org.jgroups.protocols.UNICAST3;
@@ -15,8 +12,8 @@ import org.jgroups.util.Util;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Collection;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Tests the behavior of receiving a unicast message before being connected and sending a response which will
@@ -30,7 +27,7 @@ public class MessageBeforeConnectedTest extends BMNGRunner {
     protected static final String HELLO1="hello-1";
     protected static final String HELLO2="hello-2";
     protected Throwable           ex;
-    protected final List<String>  msgs=new ArrayList<>();
+    protected final Collection<String> msgs=new ConcurrentLinkedQueue<>();
 
     @AfterMethod
     protected void cleanup() {
@@ -38,12 +35,12 @@ public class MessageBeforeConnectedTest extends BMNGRunner {
     }
 
     protected void receive(Message msg) {
-        String greeting=(String)msg.getObject();
+        String greeting=msg.getObject();
         msgs.add(greeting);
         System.out.println("received " + greeting + " from " + msg.getSrc());
         if(HELLO1.equals(greeting)) {
             try {
-                a.send(new Message(a.getAddress(), HELLO2));
+                a.send(new BytesMessage(a.getAddress(), HELLO2));
             }
             catch(Exception e) {
                 ex=e;
@@ -59,7 +56,7 @@ public class MessageBeforeConnectedTest extends BMNGRunner {
     @BMScript(dir="scripts/MessageBeforeConnectedTest", value="testSendingOfMsgsOnUnconnectedChannel")
     public void testSendingOfMsgsOnUnconnectedChannel() throws Throwable {
         a=createChannel("A");
-        a.setReceiver(new ReceiverAdapter() {
+        a.setReceiver(new Receiver() {
             public void receive(Message msg)  {
                 MessageBeforeConnectedTest.this.receive(msg);
             }
@@ -81,12 +78,12 @@ public class MessageBeforeConnectedTest extends BMNGRunner {
 
 
 
-    protected JChannel createChannel(String name) throws Exception {
+    protected static JChannel createChannel(String name) throws Exception {
         JChannel ch=new JChannel(new SHARED_LOOPBACK(),
                                  new SHARED_LOOPBACK_PING(),
-                                 new NAKACK2().setValue("become_server_queue_size", 10),
+                                 new NAKACK2().setBecomeServerQueueSize(10),
                                  new UNICAST3(),
-                                 new GMS().setValue("print_local_addr", false));
+                                 new GMS().printLocalAddress(false));
         ch.setName(name);
         return ch;
     }

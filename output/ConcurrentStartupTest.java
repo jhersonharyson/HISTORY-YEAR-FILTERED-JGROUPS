@@ -1,7 +1,6 @@
 package org.jgroups.tests;
 
-import org.jgroups.Global;
-import org.jgroups.JChannel;
+import org.jgroups.*;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.*;
@@ -53,17 +52,37 @@ public class ConcurrentStartupTest {
         startThreads(CLUSTER_SHARED);
     }
 
-    // @Test(invocationCount=5)
+    @Test(invocationCount=10)
     public void testConcurrentJoinWithLOCAL_PING() throws Exception {
         setup(UDP.class, LOCAL_PING.class);
+        for(int i=0; i < channels.length; i++) {
+            final int index=i;
+            channels[i].setUpHandler(new UpHandler() {
+                boolean first_view_received;
+
+                public Object up(Message msg) {return null;}
+
+                public Object up(Event evt) {
+                    if(evt.getType() == Event.VIEW_CHANGE) {
+                        if(!first_view_received) {
+                            first_view_received=true;
+                            long sleep_time=Util.random(100);
+                            System.out.printf("%s: sleeping for %d ms\n", channels[index].getAddress(), sleep_time);
+                            Util.sleep(sleep_time);
+                        }
+                    }
+                    return null;
+                }
+            });
+        }
         startThreads(CLUSTER_LOCAL);
     }
 
     // @Test(invocationCount=10)
-    /*public void testConcurrentJoinWithPING() throws Exception {
+    public void testConcurrentJoinWithPING() throws Exception {
         setup(UDP.class, PING.class);
         startThreads("withUDPandPING");
-    }*/
+    }
 
     protected static JChannel create(Class<? extends TP> tp_cl, Class<? extends Discovery> discovery_cl,
                                      String name) throws Exception {
@@ -73,7 +92,7 @@ public class ConcurrentStartupTest {
           new NAKACK2(),
           new UNICAST3(),
           new STABLE(),
-          new GMS().joinTimeout(1000).leaveTimeout(100)
+          new GMS().setJoinTimeout(1000).setLeaveTimeout(100)
         };
         return new JChannel(protocols).name(name);
     }

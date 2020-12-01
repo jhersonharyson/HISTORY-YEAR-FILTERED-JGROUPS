@@ -3,6 +3,7 @@ package org.jgroups.blocks;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.Message;
+import org.jgroups.ObjectMessage;
 import org.jgroups.blocks.locking.LockService;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
@@ -46,7 +47,7 @@ public class RpcLockingTest {
         lock_b=new LockService(b).getLock("lock");
 
 		Util.waitUntilAllChannelsHaveSameView(30000, 1000, a, b);
-		System.out.println("");
+		System.out.println();
 
         disp_a.setRequestHandler(arg0 -> {
             System.out.println("A received a message, will now try to lock the lock");
@@ -75,7 +76,7 @@ public class RpcLockingTest {
             System.out.println("B is the coordinator");
         else
             System.out.println("A is the coordinator");
-        System.out.println("");
+        System.out.println();
     }
 
     @AfterMethod
@@ -86,13 +87,11 @@ public class RpcLockingTest {
     protected static JChannel createChannel(String name, Class<? extends Locking> locking_class) throws Exception {
         return new JChannel(
           new SHARED_LOOPBACK(), new SHARED_LOOPBACK_PING(),
-          new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000),
-          new NAKACK2().setValue("use_mcast_xmit", false).setValue("discard_delivered_msgs", true)
-            .setValue("log_discard_msgs", false).setValue("log_not_found_msgs", false),
-          new UNICAST3().setValue("xmit_table_num_rows", 5).setValue("xmit_interval", 500),
-          new GMS().joinTimeout(1000).setValue("print_local_addr", false).setValue("leave_timeout", 100)
-            .setValue("log_view_warnings", false).setValue("view_ack_collection_timeout", 2000)
-            .setValue("log_collect_msgs", false),
+          new MERGE3().setMinInterval(1000).setMaxInterval(3000),
+          new NAKACK2().useMcastXmit(false).logDiscardMessages(false).logNotFoundMessages(false),
+          new UNICAST3().setXmitTableNumRows(5).setXmitInterval(500),
+          new GMS().setJoinTimeout(1000).printLocalAddress(false).setLeaveTimeout(100)
+            .logViewWarnings(false).setViewAckCollectionTimeout(2000).logCollectMessages(false),
           locking_class.getDeclaredConstructor().newInstance())
           .name(name);
     }
@@ -112,8 +111,8 @@ public class RpcLockingTest {
         if (lock_a.tryLock()) {
             try {
                 System.out.println("A aquired the lock, about to send message to B");
-                byte[] buf="bla".getBytes();
-                String rsp=disp_a.sendMessage(b.getAddress(), buf, 0, buf.length, RequestOptions.SYNC().timeout(60000).flags(Message.Flag.OOB));
+                String rsp=disp_a.sendMessage(new ObjectMessage(b.getAddress(), "bla"),
+                                              RequestOptions.SYNC().timeout(60000).flags(Message.Flag.OOB));
                 if (rsp == null) {
                     System.err.println("ERROR: didn't return correctly");
                     Assert.fail("Didn't return correctly");
@@ -143,8 +142,8 @@ public class RpcLockingTest {
 		if(lock_b.tryLock()) {
 			try {
 				System.out.println("B aquired the lock, about to send message to A");
-                byte[] buf="bla".getBytes();
-				String rsp = disp_b.sendMessage(a.getAddress(), buf, 0, buf.length, RequestOptions.SYNC().flags(Message.Flag.OOB));
+                String rsp=disp_b.sendMessage(new ObjectMessage(a.getAddress(), "bla"),
+                                              RequestOptions.SYNC().flags(Message.Flag.OOB));
 				if (rsp == null) {
                     System.err.println("ERROR: didn't return correctly");
 					Assert.fail("Didn't return correctly");
@@ -163,8 +162,8 @@ public class RpcLockingTest {
 		if(lock_a.tryLock(5000, TimeUnit.MILLISECONDS)) {
 			try {
 				System.out.println("A aquired the lock, about to send message to B");
-                byte[] buf="bla".getBytes();
-                String rsp = disp_a.sendMessage(b.getAddress(), buf, 0, buf.length, RequestOptions.SYNC().timeout(60000).flags(Message.Flag.OOB));
+                String rsp = disp_a.sendMessage(new ObjectMessage(b.getAddress(), "bla"),
+                                                RequestOptions.SYNC().timeout(60000).flags(Message.Flag.OOB));
 				if (rsp == null) {
 					System.err.println("ERROR: didn't return correctly");
 					Assert.fail("Didn't return correctly");

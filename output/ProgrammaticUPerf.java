@@ -12,15 +12,13 @@ import org.jgroups.stack.NonReflectiveProbeHandler;
 import org.jgroups.stack.Protocol;
 import org.jgroups.util.*;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
+
+import static org.jgroups.tests.perf.PerfUtil.*;
 
 
 /**
@@ -28,7 +26,7 @@ import java.util.concurrent.atomic.LongAdder;
  *
  * @author Bela Ban
  */
-public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker {
+public class ProgrammaticUPerf implements Receiver, MethodInvoker {
     private JChannel               channel;
     private Address                local_addr;
     private RpcDispatcher          disp;
@@ -82,6 +80,9 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
         "\n[v] Version [x] Exit [X] Exit all\n";
 
 
+    static {
+        PerfUtil.init();
+    }
 
     public boolean getSync()                   {return sync;}
     public void    setSync(boolean s)          {this.sync=s;}
@@ -107,21 +108,17 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
 
 
 
-    public void init(String name, AddressGenerator generator, String bind_addr, int bind_port) throws Throwable {
-
+    public void init(String name, AddressGenerator generator, String bind_addr, int bind_port,
+                     boolean udp, String mcast_addr, int mcast_port,
+                     String initial_hosts) throws Throwable {
         InetAddress bind_address=bind_addr != null? Util.getAddress(bind_addr, Util.getIpStackType()) : Util.getLoopback();
 
-        // bind_address=InetAddress.getByName("::1"); // todo:" remove!!!
-
         Protocol[] prot_stack={
-          new TCP().setBindAddress(bind_address).setBindPort(7800)
-            .setDiagnosticsEnabled(true)
-            .diagEnableUdp(false) // todo: enable when MulticastSocket works
-            .diagEnableTcp(true),
-          new TCPPING().initialHosts(Collections.singletonList(new InetSocketAddress(bind_address, 7800))),
+          null,  // transport
+          null,  // discovery protocol
           new MERGE3(),
           new FD_SOCK(),
-          new FD_ALL(),
+          new FD_ALL3(),
           new VERIFY_SUSPECT(),
           new NAKACK2(),
           new UNICAST3(),
@@ -129,26 +126,39 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
           new GMS().setJoinTimeout(1000),
           new UFC(),
           new MFC(),
-          new FRAG2()};
+          new FRAG4()};
+
+        if(udp) {
+            prot_stack[0]=new UDP()
+              .setMulticastAddress(InetAddress.getByName(mcast_addr)).setMulticastPort(mcast_port)
+              .setDiagnosticsAddr(InetAddress.getByName("224.0.75.75")).diagEnableUdp(true);
+            prot_stack[1]=new PING();
+        }
+        else {
+            if(initial_hosts == null) {
+                InetAddress host=bind_addr == null? InetAddress.getLocalHost() : Util.getAddress(bind_addr, Util.getIpStackType());
+                initial_hosts=String.format("%s[%d]", host.getHostAddress(), bind_port);
+            }
+            prot_stack[0]=new TCP().diagEnableUdp(false).diagEnableTcp(true);
+            prot_stack[1]=new TCPPING().setInitialHosts2(Util.parseCommaDelimitedHosts(initial_hosts, 2));
+        }
+
+        ((TP)prot_stack[0]).setBindAddress(bind_address).setBindPort(bind_port).setDiagnosticsEnabled(true);
+
         channel=new JChannel(prot_stack).addAddressGenerator(generator).setName(name);
         TP transport=channel.getProtocolStack().getTransport();
-        if(bind_port > 0) {
-            transport=channel.getProtocolStack().getTransport();
-            transport.setBindPort(bind_port);
-        }
         // todo: remove default ProbeHandler for "jmx" and "op"
         NonReflectiveProbeHandler h=new NonReflectiveProbeHandler(channel);
         transport.registerProbeHandler(h);
         h.initialize(channel.getProtocolStack().getProtocols());
         // System.out.printf("contents:\n%s\n", h.dump());
-        disp=new RpcDispatcher(channel, this).setMembershipListener(this)
-          .setMethodInvoker(this).setMarshaller(new UPerfMarshaller());
+        disp=new RpcDispatcher(channel, this).setReceiver(this).setMethodInvoker(this);
         channel.connect(groupname);
         local_addr=channel.getAddress();
         if(members.size() < 2)
             return;
         Address coord=members.get(0);
-        Config config=disp.callRemoteMethod(coord, new MethodCall(GET_CONFIG), new RequestOptions(ResponseMode.GET_ALL, 5000));
+        Config config=disp.callRemoteMethod(coord, new CustomCall(GET_CONFIG), new RequestOptions(ResponseMode.GET_ALL, 5000));
         if(config != null) {
             applyConfig(config);
             System.out.println("Fetched config from " + coord + ": " + config + "\n");
@@ -422,15 +432,12 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
                         try {
                             RequestOptions options=new RequestOptions(ResponseMode.GET_NONE, 0)
                               .flags(Message.Flag.OOB, Message.Flag.DONT_BUNDLE, Message.Flag.NO_FC);
-                            disp.callRemoteMethods(null, new MethodCall(QUIT_ALL), options);
+                            disp.callRemoteMethods(null, new CustomCall(QUIT_ALL), options);
                             break;
                         }
                         catch(Throwable t) {
                             System.err.println("Calling quitAll() failed: " + t);
                         }
-                        break;
-                    case '\n':
-                    case '\r':
                         break;
                     default:
                         break;
@@ -444,7 +451,7 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
     }
 
     void invoke(short method_id, Object... args) throws Exception {
-        MethodCall call=new MethodCall(method_id, args);
+        MethodCall call=new CustomCall(method_id, args);
         disp.callRemoteMethods(null, call, RequestOptions.SYNC());
     }
 
@@ -454,7 +461,7 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
         try {
             RequestOptions options=new RequestOptions(ResponseMode.GET_ALL, 0);
             options.flags(Message.Flag.OOB, Message.Flag.DONT_BUNDLE, Message.Flag.NO_FC);
-            responses=disp.callRemoteMethods(null, new MethodCall(START), options);
+            responses=disp.callRemoteMethods(null, new CustomCall(START), options);
         }
         catch(Throwable t) {
             System.err.println("starting the benchmark failed: " + t);
@@ -472,7 +479,7 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
             Results result=rsp.getValue();
             if(result != null) {
                 total_reqs+=result.num_gets + result.num_puts;
-                total_time+=result.time;
+                total_time+=result.total_time;
                 if(avg_gets == null)
                     avg_gets=result.avg_gets;
                 else
@@ -532,64 +539,6 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
     }
 
 
-    protected class UPerfMarshaller implements Marshaller {
-        protected static final byte NORMAL=0, EXCEPTION=1, CONFIG=2,RESULTS=3;
-
-        public int estimatedSize(Object arg) {
-            if(arg == null)
-                return 2;
-            if(arg instanceof byte[])
-                return msg_size + 24;
-            if(arg instanceof Long)
-                return 10;
-            return 50;
-        }
-
-        // Unless and until serialization is supported on GraalVM, we're sending only the exception message across the
-        // wire, but not the entire exception
-        public void objectToStream(Object obj, DataOutput out) throws IOException {
-            if(obj instanceof Throwable) {
-                Throwable t=(Throwable)obj;
-                out.writeByte(EXCEPTION);
-                out.writeUTF(t.getMessage());
-                return;
-            }
-            if(obj instanceof Config) {
-                out.writeByte(CONFIG);
-                ((Config)obj).writeTo(out);
-                return;
-            }
-            if(obj instanceof Results) {
-                out.writeByte(RESULTS);
-                ((Results)obj).writeTo(out);
-                return;
-            }
-            out.writeByte(NORMAL);
-            Util.objectToStream(obj, out);
-        }
-
-        public Object objectFromStream(DataInput in) throws IOException, ClassNotFoundException {
-            byte type=in.readByte();
-            switch(type) {
-                case NORMAL:
-                    return Util.objectFromStream(in);
-                case EXCEPTION:  // read exception
-                    String message=in.readUTF();
-                    return new RuntimeException(message);
-                case CONFIG:
-                    Config cfg=new Config();
-                    cfg.readFrom(in);
-                    return cfg;
-                case RESULTS:
-                    Results res=new Results();
-                    res.readFrom(in);
-                    return res;
-                default:
-                    throw new IllegalArgumentException("type " + type + " not known");
-            }
-        }
-    }
-
 
     private class Invoker extends Thread {
         private final List<Address>  dests=new ArrayList<>();
@@ -613,8 +562,8 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
         public void run() {
             Object[] put_args={0, BUFFER};
             Object[] get_args={0};
-            MethodCall get_call=new MethodCall(GET, get_args);
-            MethodCall put_call=new MethodCall(PUT, put_args);
+            MethodCall get_call=new GetCall(GET, get_args);
+            MethodCall put_call=new PutCall(PUT, put_args);
             RequestOptions get_options=new RequestOptions(ResponseMode.GET_ALL, 40000, false, null);
             RequestOptions put_options=new RequestOptions(sync ? ResponseMode.GET_ALL : ResponseMode.GET_NONE, 40000, true, null);
 
@@ -651,6 +600,7 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
                         long start=System.nanoTime();
                         disp.callRemoteMethods(targets, put_call, put_options);
                         long put_time=System.nanoTime()-start;
+                        targets.clear();
                         avg_puts.add(put_time);
                         num_writes.increment();
                     }
@@ -677,94 +627,14 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
     }
 
 
-    public static class Results implements Streamable {
-        protected long          num_gets;
-        protected long          num_puts;
-        protected long          time;     // in ms
-        protected AverageMinMax avg_gets; // RTT in ns
-        protected AverageMinMax avg_puts; // RTT in ns
 
-        public Results() {
-            
-        }
-
-        public Results(int num_gets, int num_puts, long time, AverageMinMax avg_gets, AverageMinMax avg_puts) {
-            this.num_gets=num_gets;
-            this.num_puts=num_puts;
-            this.time=time;
-            this.avg_gets=avg_gets;
-            this.avg_puts=avg_puts;
-        }
-
-        public void writeTo(DataOutput out) throws IOException {
-            Bits.writeLong(num_gets, out);
-            Bits.writeLong(num_puts, out);
-            Bits.writeLong(time, out);
-            Util.writeStreamable(avg_gets, out);
-            Util.writeStreamable(avg_puts, out);
-        }
-
-        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
-            num_gets=Bits.readLong(in);
-            num_puts=Bits.readLong(in);
-            time=Bits.readLong(in);
-            avg_gets=Util.readStreamable(AverageMinMax::new, in);
-            avg_puts=Util.readStreamable(AverageMinMax::new, in);
-        }
-
-        public String toString() {
-            long total_reqs=num_gets + num_puts;
-            double total_reqs_per_sec=total_reqs / (time / 1000.0);
-            return String.format("%,.2f reqs/sec (%,d gets, %,d puts, get RTT %,.2f us, put RTT %,.2f us)",
-                                 total_reqs_per_sec, num_gets, num_puts, avg_gets.average() / 1000.0,
-                                 avg_puts.getAverage()/1000.0);
-        }
-    }
-
-
-    public static class Config implements Streamable {
-        protected Map<String,Object> values=new HashMap<>();
-
-        public Config() {
-        }
-
-        public Config add(String key, Object value) {
-            values.put(key, value);
-            return this;
-        }
-
-        public void writeTo(DataOutput out) throws IOException {
-            out.writeInt(values.size());
-            for(Map.Entry<String,Object> entry: values.entrySet()) {
-                Bits.writeString(entry.getKey(),out);
-                Util.objectToStream(entry.getValue(), out);
-            }
-        }
-
-        public void readFrom(DataInput in) throws IOException, ClassNotFoundException {
-            int size=in.readInt();
-            for(int i=0; i < size; i++) {
-                String key=Bits.readString(in);
-                Object value=Util.objectFromStream(in);
-                if(key == null)
-                    continue;
-                values.put(key, value);
-            }
-        }
-
-        public String toString() {
-            return values.toString();
-        }
-    }
-
-
-
-
-    public static void main(String[] args) {
-        String  name=null, bind_addr=null;
-        boolean run_event_loop=true, jmx=false;
+    public static void main(String[] args) throws Exception {
+        String  name=null, bind_addr=null, mcast_addr="232.4.5.6";
+        boolean run_event_loop=true;
         AddressGenerator addr_generator=null;
-        int port=0;
+        int port=7800, mcast_port=45566;
+        boolean udp=true;
+        String initial_hosts=null;
 
         for(int i=0; i < args.length; i++) {
             if("-name".equals(args[i])) {
@@ -776,19 +646,31 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
                 continue;
             }
             if("-uuid".equals(args[i])) {
-                addr_generator=new OneTimeAddressGenerator(Long.valueOf(args[++i]));
+                addr_generator=new OneTimeAddressGenerator(Long.parseLong(args[++i]));
                 continue;
             }
             if("-port".equals(args[i])) {
-                port=Integer.valueOf(args[++i]);
+                port=Integer.parseInt(args[++i]);
                 continue;
             }
             if("-bind_addr".equals(args[i])) {
                 bind_addr=args[++i];
                 continue;
             }
-            if("-jmx".equals(args[i])) {
-                jmx=Boolean.parseBoolean(args[++i]);
+            if("-tcp".equals(args[i])) {
+                udp=false;
+                continue;
+            }
+            if("-mcast_addr".equals(args[i])) {
+                mcast_addr=args[++i];
+                continue;
+            }
+            if("-mcast_port".equals(args[i])) {
+                mcast_port=Integer.parseInt(args[++i]);
+                continue;
+            }
+            if("-initial_hosts".equals(args[i])) {
+                initial_hosts=args[++i];
                 continue;
             }
             help();
@@ -798,7 +680,7 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
         ProgrammaticUPerf test=null;
         try {
             test=new ProgrammaticUPerf();
-            test.init(name, addr_generator, bind_addr, port);
+            test.init(name, addr_generator, bind_addr, port, udp, mcast_addr, mcast_port, initial_hosts);
             if(run_event_loop)
                 test.startEventThread();
         }
@@ -811,7 +693,9 @@ public class ProgrammaticUPerf extends ReceiverAdapter implements MethodInvoker 
 
     static void help() {
         System.out.printf("%s [-name name] [-nohup] [-uuid <UUID>] [-port <bind port>] " +
-                             "[-bind_addr bind-address]\n", ProgrammaticUPerf.class.getSimpleName());
+                             "[-bind_addr bind-address] [-tcp] [-mcast_addr addr] [-mcast_port port]\n" +
+                            "[-initial_hosts hosts]",
+                          ProgrammaticUPerf.class.getSimpleName());
     }
 
 

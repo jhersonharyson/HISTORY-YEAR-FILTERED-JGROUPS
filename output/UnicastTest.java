@@ -138,7 +138,7 @@ public class UnicastTest {
         System.out.println("sending " + num_msgs + " messages (" + Util.printBytes(msg_size) +
                 ") to " + destination + ": oob=" + oob + ", " + num_threads + " sender thread(s)");
         ByteBuffer buf=ByteBuffer.allocate(Global.BYTE_SIZE + Global.LONG_SIZE).put(START).putLong(num_msgs);
-        Message msg=new Message(destination, buf.array());
+        Message msg=new BytesMessage(destination, buf.array());
         channel.send(msg);
 
         long print=num_msgs / 10;
@@ -262,7 +262,7 @@ public class UnicastTest {
         public void run() {
             for(int i=1; i <= number_of_msgs; i++) {
                 try {
-                    Message msg=new Message(destination, buf);
+                    Message msg=new BytesMessage(destination, buf);
                     if(oob)
                         msg.setFlag(Message.Flag.OOB);
                     if(dont_bundle)
@@ -281,14 +281,14 @@ public class UnicastTest {
     }
 
 
-    protected class MyReceiver extends ReceiverAdapter {
+    protected class MyReceiver implements Receiver {
         protected long        start=0;
         protected long        print;
         protected AtomicLong  current_value=new AtomicLong(0), total_bytes=new AtomicLong(0);
 
 
         public void receive(Message msg) {
-            byte[] buf=msg.getRawBuffer();
+            byte[] buf=msg.getArray();
             byte   type=buf[msg.getOffset()];
 
             switch(type) {

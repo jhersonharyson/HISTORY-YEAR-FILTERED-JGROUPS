@@ -5,10 +5,11 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.Bits;
 import org.jgroups.util.Credit;
 import org.jgroups.util.MessageBatch;
+import org.jgroups.util.MessageIterator;
 import org.jgroups.util.Util;
 
 import java.util.List;
@@ -29,17 +30,16 @@ public abstract class FlowControl extends Protocol {
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
     
-    /**
-     * Max number of bytes to send per receiver until an ack must be received before continuing sending
-     */
-    @Property(description="Max number of bytes to send per receiver until an ack must be received to proceed")
-    protected long           max_credits=500000;
+    /** Max number of bytes to send per receiver until an ack must be received before continuing sending */
+    @Property(description="Max number of bytes to send per receiver until an ack must be received to proceed",
+      type=AttributeType.BYTES)
+    protected long           max_credits=5_000_000;
 
     /**
      * Max time (in milliseconds) to block. If credit hasn't been received after max_block_time, we send
      * a REPLENISHMENT request to the members from which we expect credits. A value <= 0 means to wait forever.
      */
-    @Property(description="Max time (in ms) to block")
+    @Property(description="Max time (in ms) to block",type=AttributeType.TIME)
     protected long           max_block_time=500;
 
     /**
@@ -68,7 +68,7 @@ public abstract class FlowControl extends Protocol {
      * Computed as <tt>max_credits</tt> times <tt>min_theshold</tt>. If explicitly set, this will
      * override the above computation
      */
-    @Property(description="Computed as max_credits x min_theshold unless explicitly set")
+    @Property(description="Computed as max_credits x min_theshold unless explicitly set",type=AttributeType.BYTES)
     protected long           min_credits;
     
 
@@ -91,7 +91,6 @@ public abstract class FlowControl extends Protocol {
 
     protected Address                   local_addr;
 
-
     /** Whether FlowControl is still running, this is set to false when the protocol terminates (on stop()) */
     protected volatile boolean          running=true;
 
@@ -106,41 +105,19 @@ public abstract class FlowControl extends Protocol {
         num_credit_responses_sent=num_credit_responses_received=num_credit_requests_received=num_credit_requests_sent=0;
     }
 
-    public long getMaxCredits() {
-        return max_credits;
-    }
+    public long                      getMaxCredits()           {return max_credits;}
+    public <T extends FlowControl> T setMaxCredits(long m)     {max_credits=m; return (T)this;}
+    public double                    getMinThreshold()         {return min_threshold;}
+    public <T extends FlowControl> T setMinThreshold(double m) {min_threshold=m; return (T)this;}
+    public long                      getMinCredits()           {return min_credits;}
+    public <T extends FlowControl> T setMinCredits(long m)     {min_credits=m; return (T)this;}
+    public long                      getMaxBlockTime()         {return max_block_time;}
+    public <T extends FlowControl> T setMaxBlockTime(long t)   {max_block_time=t; return (T)this;}
 
-    public void setMaxCredits(long max_credits) {
-        this.max_credits=max_credits;
-    }
-
-    public double getMinThreshold() {
-        return min_threshold;
-    }
-
-    public void setMinThreshold(double min_threshold) {
-        this.min_threshold=min_threshold;
-    }
-
-    public long getMinCredits() {
-        return min_credits;
-    }
-
-    public void setMinCredits(long min_credits) {
-        this.min_credits=min_credits;
-    }
-
-    public long getMaxBlockTime() {
-        return max_block_time;
-    }
-
-    public void setMaxBlockTime(long t) {
-        max_block_time=t;
-    }
 
     @Property(description="Max times to block for the listed messages sizes (Message.getLength()). Example: \"1000:10,5000:30,10000:500\"")
-    public void setMaxBlockTimes(String str) {
-        if(str == null) return;
+    public FlowControl setMaxBlockTimes(String str) {
+        if(str == null) return this;
         Long prev_key=null, prev_val=null;
         List<String> vals=Util.parseCommaDelimitedStrings(str);
         if(max_block_times == null)
@@ -149,8 +126,8 @@ public abstract class FlowControl extends Protocol {
             int index=tmp.indexOf(':');
             if(index == -1)
                 throw new IllegalArgumentException("element '" + tmp + "'  is missing a ':' separator");
-            Long key=Long.parseLong(tmp.substring(0, index).trim());
-            Long val=Long.parseLong(tmp.substring(index +1).trim());
+            long key=Long.parseLong(tmp.substring(0, index).trim());
+            long val=Long.parseLong(tmp.substring(index +1).trim());
 
             // sanity checks:
             if(key < 0 || val < 0)
@@ -166,6 +143,7 @@ public abstract class FlowControl extends Protocol {
             max_block_times.put(key, val);
         }
         log.debug("max_block_times: %s", max_block_times);
+        return this;
     }
 
     public String getMaxBlockTimes() {
@@ -186,22 +164,22 @@ public abstract class FlowControl extends Protocol {
 
     public abstract double getAverageTimeBlocked();
 
-    @ManagedAttribute(description="Number of credit requests received")
+    @ManagedAttribute(description="Number of credit requests received",type=AttributeType.SCALAR)
     public int getNumberOfCreditRequestsReceived() {
         return num_credit_requests_received;
     }
     
-    @ManagedAttribute(description="Number of credit requests sent")
+    @ManagedAttribute(description="Number of credit requests sent",type=AttributeType.SCALAR)
     public int getNumberOfCreditRequestsSent() {
         return num_credit_requests_sent;
     }
 
-    @ManagedAttribute(description="Number of credit responses received")
+    @ManagedAttribute(description="Number of credit responses received",type=AttributeType.SCALAR)
     public int getNumberOfCreditResponsesReceived() {
         return num_credit_responses_received;
     }
 
-    @ManagedAttribute(description="Number of credit responses sent")
+    @ManagedAttribute(description="Number of credit responses sent",type=AttributeType.SCALAR)
     public int getNumberOfCreditResponsesSent() {
         return num_credit_responses_sent;
     }
@@ -315,7 +293,7 @@ public abstract class FlowControl extends Protocol {
 
         // if the message is DONT_LOOPBACK, we will not receive it, therefore the credit
         // check needs to be done now
-        if(msg.isTransientFlagSet(Message.TransientFlag.DONT_LOOPBACK)) {
+        if(msg.isFlagSet(Message.TransientFlag.DONT_LOOPBACK)) {
             long new_credits=adjustCredit(received, local_addr, length);
             if(new_credits > 0)
                 sendCredit(local_addr, new_credits);
@@ -368,14 +346,14 @@ public abstract class FlowControl extends Protocol {
         switch(hdr.type) {
             case FcHeader.REPLENISH:
                 num_credit_responses_received++;
-                handleCredit(msg.getSrc(), bufferToLong(msg.getRawBuffer(), msg.getOffset()));
+                handleCredit(msg.getSrc(), ((LongMessage)msg).getValue());
                 break;
             case FcHeader.CREDIT_REQUEST:
                 num_credit_requests_received++;
                 Address sender=msg.getSrc();
-                Long requested_credits=bufferToLong(msg.getRawBuffer(), msg.getOffset());
-                if(requested_credits != null)
-                    handleCreditRequest(received, sender,requested_credits);
+                long requested_credits=((LongMessage)msg).getValue();
+                if(requested_credits > 0)
+                    handleCreditRequest(received, sender, requested_credits);
                 break;
             default:
                 log.error(Util.getMessage("HeaderTypeNotKnown"), local_addr, hdr.type);
@@ -386,7 +364,9 @@ public abstract class FlowControl extends Protocol {
 
     public void up(MessageBatch batch) {
         int length=0;
-        for(Message msg: batch) {
+        MessageIterator it=batch.iterator();
+        while(it.hasNext()) {
+            Message msg=it.next();
             if(msg.isFlagSet(Message.Flag.NO_FC))
                 continue;
 
@@ -399,7 +379,7 @@ public abstract class FlowControl extends Protocol {
                 continue;
 
             if(hdr != null) {
-                batch.remove(msg); // remove the message with a flow control header so it won't get passed up
+                it.remove(); // remove the message with a flow control header so it won't get passed up
                 handleUpEvent(msg,hdr);
                 continue;
             }
@@ -473,9 +453,8 @@ public abstract class FlowControl extends Protocol {
     protected void sendCredit(Address dest, long credits) {
         if(log.isTraceEnabled())
             log.trace("sending %d credits to %s", credits, dest);
-        Message msg=new Message(dest, longToBuffer(credits))
-          .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
-          .putHeader(this.id,getReplenishHeader());
+        Message msg=new LongMessage(dest, credits).putHeader(this.id,getReplenishHeader())
+          .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE);
         down_prot.down(msg);
         num_credit_responses_sent++;
     }
@@ -489,9 +468,8 @@ public abstract class FlowControl extends Protocol {
     protected void sendCreditRequest(final Address dest, long credits_needed) {
         if(log.isTraceEnabled())
             log.trace("sending request for %d credits to %s", credits_needed, dest);
-        Message msg=new Message(dest, longToBuffer(credits_needed))
-          .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE)
-          .putHeader(this.id, getCreditRequestHeader());
+        Message msg=new LongMessage(dest, credits_needed).putHeader(this.id, getCreditRequestHeader())
+          .setFlag(Message.Flag.OOB, Message.Flag.INTERNAL, Message.Flag.DONT_BUNDLE);
         down_prot.down(msg);
         num_credit_requests_sent++;
     }
@@ -515,19 +493,6 @@ public abstract class FlowControl extends Protocol {
                                              (sb,entry) -> sb.append(entry.getKey()).append(": ").append(entry.getValue()).append("\n"),
                                              (l,r) -> {}).toString();
     }
-
-    protected static byte[] longToBuffer(long num) {
-        byte[] buf=new byte[Global.LONG_SIZE];
-        Bits.writeLong(num, buf, 0);
-        return buf;
-    }
-
-    protected static long bufferToLong(byte[] buf, int offset) {
-        return Bits.readLong(buf, offset);
-    }
-
-
-
 
 
 }

@@ -67,7 +67,7 @@ public class NakackTest {
 
         // set up the sender and the receiver callbacks, according to whether the peer is a sender or a receiver
         for(int i=0; i < NUM_PEERS; i++) {
-            receivers[i]=new Receiver(channels[i]);
+            receivers[i]=new MyReceiver(channels[i]);
             channels[i].setReceiver(receivers[i]);
         }
         Util.waitUntilAllChannelsHaveSameView(10000, 1000, channels);
@@ -109,7 +109,7 @@ public class NakackTest {
         // the test fails if:
         // - a seqno is received out of order (not FIFO), or
         // - not all messages are received in time allotted (allMsgsReceived)
-        Assert.assertTrue(received_msgs.get() == TOT_MSGS_FOR_ALL_RECEIVERS, "Incorrect number of messages received by the receiver thread");
+        Assert.assertEquals(TOT_MSGS_FOR_ALL_RECEIVERS, received_msgs.get(), "Incorrect number of messages received by the receiver thread");
         Assert.assertFalse(notFIFO, "Sequenece numbers for a peer not in correct order");
     }
 
@@ -117,11 +117,11 @@ public class NakackTest {
         Protocol[] protocols={
           new SHARED_LOOPBACK(),
           new SHARED_LOOPBACK_PING(),
-          new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000),
-          new NAKACK2().setValue("use_mcast_xmit", false),
+          new MERGE3().setMinInterval(1000).setMaxInterval(3000),
+          new NAKACK2().useMcastXmit(false),
           new UNICAST3(),
-          new STABLE().setValue("max_bytes", 50000),
-          new GMS().setValue("print_local_addr", false),
+          new STABLE().setMaxBytes( 50000),
+          new GMS().printLocalAddress(false),
           new UFC(),
           new MFC(),
           new FRAG2()
@@ -137,11 +137,11 @@ public class NakackTest {
      * - check that sequence numbers for each sender are in order (with no gaps)
      * - terminate when correct number of messages have been received
      */
-    protected class Receiver extends ReceiverAdapter {
+    protected class MyReceiver implements Receiver {
         final JChannel               channel;
         ConcurrentMap<Address, Long> senders=new ConcurrentHashMap<>();
 
-        public Receiver(JChannel channel) {
+        public MyReceiver(JChannel channel) {
             this.channel=channel;
         }
 
@@ -163,7 +163,7 @@ public class NakackTest {
             long last_seqno=num;
 
             try {
-                num=(Long)msg.getObject();
+                num=msg.getObject();
                 long received_seqno=num;
 
                 // 1. check if sequence numbers are in sequence
@@ -202,7 +202,7 @@ public class NakackTest {
                 Address address=ch.getAddress();
                 for(int i=1; i <= NUM_MSGS; i++) {
                     try {
-                        Message msg=new Message(null, (long)i).src(address);
+                        Message msg=new BytesMessage(null, (long)i).setSrc(address);
                         ch.send(msg);
                         if(i % MSGS_PER_STATUS_LINE == 0) // status indicator
                             System.out.println("<" + address + ">:" + " ==> " + i);

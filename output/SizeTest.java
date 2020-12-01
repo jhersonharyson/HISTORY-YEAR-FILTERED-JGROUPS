@@ -66,11 +66,8 @@ public class SizeTest {
     }
 
     public static void testAuthHeader() throws Exception {
-        _testSize(new AuthHeader(new SimpleToken("secret")));
         _testSize(new AuthHeader(new FixedMembershipToken("192.168.1.5[7800],192.168.1.3[7800]")));
-        _testSize(new AuthHeader(new MD5Token("myauthvalue")));
         _testSize(new AuthHeader(new RegexMembership()));
-
         X509Token tok=new X509Token().encryptedToken(new byte[]{'b', 'e', 'l', 'a'});
         _testSize(new AuthHeader(tok));
     }
@@ -137,17 +134,12 @@ public class SizeTest {
     }
 
 
-    public static void testFdHeaders() throws Exception {
-        FD.FdHeader hdr=new FD.FdHeader(FD.FdHeader.HEARTBEAT_ACK);
-        _testSize(hdr);
-
+    public void testFdHeaders() throws Exception {
         IpAddress a1=new IpAddress("127.0.0.1", 5555);
         IpAddress a2=new IpAddress("127.0.0.1", 6666);
         List<Address> suspects=new ArrayList<>();
         suspects.add(a1);
         suspects.add(a2);
-        hdr=new FD.FdHeader(FD.FdHeader.SUSPECT, suspects, a1);
-        _testSize(hdr);
 
         FD_SOCK.FdHeader sockhdr=new FD_SOCK.FdHeader(FD_SOCK.FdHeader.GET_CACHE);
         _testSize(sockhdr);
@@ -570,17 +562,21 @@ public class SizeTest {
     public void testFragHeader() throws Exception {
         FragHeader hdr=new FragHeader(322649, 1, 10);
         _testSize(hdr);
+        hdr.needsDeserialization(true);
+        _testSize(hdr);
     }
 
     public void testFragHeader3() throws Exception {
         Frag3Header hdr=new Frag3Header(322649, 1, 10);
+        _testSize(hdr);
+        hdr.needsDeserialization(true);
         _testSize(hdr);
 
         hdr=new Frag3Header(322649, 2, 10, 10000, 3000);
         _testSize(hdr);
     }
 
-    public static void testCompressHeader() throws Exception {
+    public void testCompressHeader() throws Exception {
         COMPRESS.CompressHeader hdr=new COMPRESS.CompressHeader(2002);
         _testSize(hdr);
     }
@@ -596,18 +592,6 @@ public class SizeTest {
         _testSize(hdr);
     }
 
-    public static void testRelayHeader() throws Exception {
-        RELAY.RelayHeader hdr=RELAY.RelayHeader.create(RELAY.RelayHeader.Type.FORWARD);
-        _testSize(hdr);
-
-        hdr=RELAY.RelayHeader.createDisseminateHeader(Util.createRandomAddress("A"));
-        _testSize(hdr);
-
-        Map<Address,String> uuid_cache=new HashMap<>();
-        uuid_cache.put(Util.createRandomAddress("A"), "A");
-        uuid_cache.put(Util.createRandomAddress("B"), "B");
-        uuid_cache.put(Util.createRandomAddress("B"), "B");
-    }
 
     public static void testStateHeader() throws Exception {
         STATE_TRANSFER.StateHeader hdr=new STATE_TRANSFER.StateHeader(STATE_TRANSFER.StateHeader.STATE_REQ, null);
@@ -735,7 +719,7 @@ public class SizeTest {
 
 
 
-    public static void testUUID() throws Exception {
+    public void testUUID() throws Exception {
         org.jgroups.util.UUID uuid=org.jgroups.util.UUID.randomUUID();
         System.out.println("uuid = " + uuid);
         _testSize(uuid);

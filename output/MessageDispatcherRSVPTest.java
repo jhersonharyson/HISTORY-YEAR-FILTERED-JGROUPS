@@ -1,9 +1,6 @@
 package org.jgroups.tests;
 
-import org.jgroups.Address;
-import org.jgroups.Global;
-import org.jgroups.JChannel;
-import org.jgroups.Message;
+import org.jgroups.*;
 import org.jgroups.blocks.MessageDispatcher;
 import org.jgroups.blocks.RequestOptions;
 import org.jgroups.logging.Log;
@@ -52,17 +49,13 @@ public class MessageDispatcherRSVPTest {
             channels[i]=new JChannel(shared_loopback,
                                      new DISCARD(),
                                      new SHARED_LOOPBACK_PING(),
-                                     new MERGE3().setValue("min_interval", 1000).setValue("max_interval", 3000),
-                                     new NAKACK2().setValue("use_mcast_xmit",false)
-                                       .setValue("discard_delivered_msgs",true)
-                                       .setValue("log_discard_msgs", false).setValue("log_not_found_msgs", false),
-                                     new UNICAST3().setValue("xmit_table_num_rows",5).setValue("xmit_interval", 300),
-                                     new RSVP().setValue("timeout", 10000).setValue("throw_exception_on_timeout", true),
-                                     new GMS().setValue("print_local_addr",false)
-                                       .setValue("leave_timeout",100).setValue("join_timeout", 500)
-                                       .setValue("log_view_warnings",false)
-                                       .setValue("view_ack_collection_timeout",2000)
-                                       .setValue("log_collect_msgs",false));
+                                     new MERGE3().setMinInterval(1000).setMaxInterval(3000),
+                                     new NAKACK2().useMcastXmit(false),
+                                     new UNICAST3().setXmitTableNumRows(5).setXmitInterval(300),
+                                     new RSVP().setTimeout(10000).throwExceptionOnTimeout(true),
+                                     new GMS().printLocalAddress(false).setLeaveTimeout(100).setJoinTimeout(500)
+                                       .logViewWarnings(false).setViewAckCollectionTimeout(2000)
+                                       .logCollectMessages(false));
             channels[i].setName(String.valueOf((i + 1)));
             dispatchers[i]=new MessageDispatcher(channels[i]);
             channels[i].connect("MessageDispatcherRSVPTest");
@@ -122,23 +115,25 @@ public class MessageDispatcherRSVPTest {
 
     protected void testCancellationByClosing(boolean unicast, Thread closer) throws Exception {
         DISCARD discard=channels[0].getProtocolStack().findProtocol(DISCARD.class);
-        discard.setDiscardAll(true);
+        discard.discardAll(true);
 
         try {
             Address target=unicast? channels[1].getAddress() : null;
             byte[] data="bla".getBytes();
-            Buffer buf=new Buffer(data, 0, data.length);
-            Message msg=new Message(target, "bla");
+            ByteArray buf=new ByteArray(data, 0, data.length);
+            Message msg=new BytesMessage(target, "bla");
             msg.setFlag(Message.Flag.RSVP);
             closer.start();
             if(unicast) {
                 System.out.println("sending unicast message to " + target);
-                dispatchers[0].sendMessage(target, buf, RequestOptions.SYNC().flags(Message.Flag.RSVP));
+                dispatchers[0].sendMessage(new BytesMessage(target, buf), RequestOptions.SYNC().flags(Message.Flag.RSVP));
                 assert false: "sending the message on a closed channel should have thrown an exception";
             }
             else {
                 System.out.println("sending multicast message");
-                RspList<Object> rsps=dispatchers[0].castMessage(Collections.singleton(channels[1].getAddress()),buf,RequestOptions.SYNC());
+                Address dst=channels[1].getAddress();
+                RspList<Object> rsps=dispatchers[0].castMessage(Collections.singleton(dst),
+                                                                new BytesMessage(dst, buf), RequestOptions.SYNC());
                 System.out.println("rsps = " + rsps);
                 assert rsps.size() == 1;
                 Rsp<Object> rsp=rsps.iterator().next();
@@ -157,13 +152,15 @@ public class MessageDispatcherRSVPTest {
     protected void sendMessageOnClosedChannel(Address dest, Message.Flag... flags) throws Exception {
         RequestOptions opts=RequestOptions.SYNC().timeout(2000).flags(flags);
         byte[] data="bla".getBytes();
-        Buffer buf=new Buffer(data, 0, data.length);
+        ByteArray buf=new ByteArray(data, 0, data.length);
         channels[0].close();
         try {
-            if(dest == null) // multicast
-                dispatchers[0].castMessage(Collections.singleton(channels[1].getAddress()), buf, opts);
+            if(dest == null) { // multicast
+                Address dst=channels[1].getAddress();
+                dispatchers[0].castMessage(Collections.singleton(dst), new BytesMessage(dst, buf), opts);
+            }
             else
-                dispatchers[0].sendMessage(dest, buf, opts);
+                dispatchers[0].sendMessage(new BytesMessage(dest, buf), opts);
             assert false: "sending the message on a closed channel should have thrown an exception";
         }
         catch(IllegalStateException t) {

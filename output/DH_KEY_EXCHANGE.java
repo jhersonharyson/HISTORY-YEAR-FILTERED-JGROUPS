@@ -3,7 +3,9 @@ package org.jgroups.protocols;
 import org.jgroups.*;
 import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.util.MessageBatch;
+import org.jgroups.util.MessageIterator;
 import org.jgroups.util.Tuple;
 import org.jgroups.util.Util;
 
@@ -48,7 +50,7 @@ public class DH_KEY_EXCHANGE extends KeyExchange {
     protected int                           secret_key_length=128; // used for AES
 
     @Property(description="Max time (in ms) that a FETCH_SECRET_KEY down event will be ignored (if an existing " +
-      "request is in progress) until a new request for the secret key is sent to the keyserver")
+      "request is in progress) until a new request for the secret key is sent to the keyserver",type=AttributeType.TIME)
     protected long                          timeout=2000;
 
     /** Diffie-Hellman protocol engine */
@@ -121,7 +123,7 @@ public class DH_KEY_EXCHANGE extends KeyExchange {
             }
         }
         if(encoded_dh_key != null) {
-            Message msg=new Message(target).putHeader(id, DhHeader.createSecretKeyRequest(encoded_dh_key));
+            Message msg=new EmptyMessage(target).putHeader(id, DhHeader.createSecretKeyRequest(encoded_dh_key));
             down_prot.down(msg);
         }
     }
@@ -131,7 +133,7 @@ public class DH_KEY_EXCHANGE extends KeyExchange {
     public Object up(Message msg) {
         DhHeader hdr=msg.getHeader(id);
         if(hdr != null) {
-            handle(hdr, msg.src());
+            handle(hdr, msg.getSrc());
             return null;
         }
         return up_prot.up(msg);
@@ -140,11 +142,13 @@ public class DH_KEY_EXCHANGE extends KeyExchange {
 
 
     public void up(MessageBatch batch) {
-        for(Message msg: batch) {
+        MessageIterator it=batch.iterator();
+        while(it.hasNext()) {
+            Message msg=it.next();
             DhHeader hdr=msg.getHeader(id);
             if(hdr != null) {
-                batch.remove(msg);
-                handle(hdr, msg.src());
+                it.remove();
+                handle(hdr, msg.getSrc());
             }
         }
         if(!batch.isEmpty())
@@ -199,7 +203,7 @@ public class DH_KEY_EXCHANGE extends KeyExchange {
         log.debug("%s: sending public key rsp %s.. to %s", local_addr, print16(public_key_rsp), sender);
 
         // send response to sender with public_key_rsp, encrypted secret key and secret key version
-        Message rsp=new Message(sender)
+        Message rsp=new EmptyMessage(sender)
           .putHeader(id, DhHeader.createSecretKeyResponse(public_key_rsp.getEncoded(),
                                                           encrypted_secret_key, version));
         down_prot.down(rsp);

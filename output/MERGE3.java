@@ -6,9 +6,10 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
+import org.jgroups.conf.AttributeType;
 import org.jgroups.stack.Protocol;
-import org.jgroups.util.*;
 import org.jgroups.util.UUID;
+import org.jgroups.util.*;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -42,24 +43,18 @@ public class MERGE3 extends Protocol {
     
 
     /* -----------------------------------------    Properties     -------------------------------------------------- */
-    @Property(description="Minimum time in ms before sending an info message")
+    @Property(description="Minimum time in ms before sending an info message",type=AttributeType.TIME)
     protected long                          min_interval=1000;
 
     @Property(description="Interval (in milliseconds) when the next info " +
-            "message will be sent. A random value is picked from range [1..max_interval]")
+            "message will be sent. A random value is picked from range [1..max_interval]",type=AttributeType.TIME)
     protected long                          max_interval=10000;
 
     @Property(description="The max number of merge participants to be involved in a merge. 0 sets this to unlimited.")
     protected int                           max_participants_in_merge=100;
 
-    @Property(description="If true, only coordinators periodically check view consistency, otherwise everybody runs " +
-      "this task (https://issues.jboss.org/browse/JGRP-2092). Might get removed without notice.",
-      deprecatedMessage="false by default; everybody runs periodic consistency checks")
-    @Deprecated
-    protected boolean                       only_coords_run_consistency_checker;
-
     /* ---------------------------------------------- JMX -------------------------------------------------------- */
-    @Property(description="Interval (in ms) after which we check for view inconsistencies")
+    @Property(description="Interval (in ms) after which we check for view inconsistencies",type=AttributeType.TIME)
     protected long                          check_interval;
 
     @ManagedAttribute(description="Number of cached ViewIds")
@@ -191,8 +186,13 @@ public class MERGE3 extends Protocol {
         return this;
     }
 
-    public long    getCheckInterval()        {return check_interval;}
-    public MERGE3  setCheckInterval(long ci) {this.check_interval=ci; return this;}
+    public long    getCheckInterval()               {return check_interval;}
+    public MERGE3  setCheckInterval(long ci)        {this.check_interval=ci; return this;}
+    public int     getMaxParticipantsInMerge()      {return max_participants_in_merge;}
+    public MERGE3  setMaxParticipantsInMerge(int m) {this.max_participants_in_merge=m; return this;}
+
+    public boolean isCoord() {return is_coord;}
+
 
     protected long computeCheckInterval() {
         return (long)(max_interval * 1.6);
@@ -286,13 +286,13 @@ public class MERGE3 extends Protocol {
                 break;
             case VIEW_REQ:
                 View viewToSend=view;
-                Message view_rsp=new Message(sender).setFlag(Message.Flag.INTERNAL)
-                  .putHeader(getId(), MergeHeader.createViewResponse()).setBuffer(marshal(viewToSend));
+                Message view_rsp=new BytesMessage(sender).setFlag(Message.Flag.INTERNAL)
+                  .putHeader(getId(), MergeHeader.createViewResponse()).setArray(marshal(viewToSend));
                 log.trace("%s: sending view rsp: %s", local_addr, viewToSend);
                 down_prot.down(view_rsp);
                 break;
             case VIEW_RSP:
-                View tmp_view=readView(msg.getRawBuffer(), msg.getOffset(), msg.getLength());
+                View tmp_view=readView(msg.getArray(), msg.getOffset(), msg.getLength());
                 log.trace("%s: received view rsp from %s: %s", local_addr, msg.getSrc(), tmp_view);
                 if(tmp_view != null)
                     view_rsps.add(sender, tmp_view);
@@ -316,8 +316,13 @@ public class MERGE3 extends Protocol {
         return ret;
     }
 
-    public static Buffer marshal(View view) {
-        return Util.streamableToBuffer(view);
+    public static ByteArray marshal(View view) {
+        try {
+            return Util.streamableToBuffer(view);
+        }
+        catch(Exception e) {
+            return null;
+        }
     }
 
     protected View readView(byte[] buffer, int offset, int length) {
@@ -390,7 +395,7 @@ public class MERGE3 extends Protocol {
             return;
         }
         MergeHeader hdr=createInfo();
-        Message info=new Message(dest).setFlag(Message.Flag.INTERNAL).putHeader(getId(), hdr);
+        Message info=new EmptyMessage(dest).setFlag(Message.Flag.INTERNAL).putHeader(getId(), hdr);
         down_prot.down(info);
     }
 
@@ -402,14 +407,13 @@ public class MERGE3 extends Protocol {
             }
 
             MergeHeader hdr=createInfo();
-            if(transport_supports_multicasting) { // mcast the discovery request to all but self
-                Message msg=new Message().setFlag(Message.Flag.INTERNAL).putHeader(getId(), hdr)
-                  .setTransientFlag(Message.TransientFlag.DONT_LOOPBACK);
+            if(transport_supports_multicasting) {
+                Message msg=new EmptyMessage().setFlag(Message.Flag.INTERNAL).putHeader(getId(), hdr)
+                  .setFlag(Message.TransientFlag.DONT_LOOPBACK);
                 down_prot.down(msg);
-                return;
             }
-
-            down_prot.down(ASYNC_DISCOVERY_EVENT);
+            else
+                down_prot.down(ASYNC_DISCOVERY_EVENT);
         }
 
         public long nextInterval() {
@@ -469,7 +473,7 @@ public class MERGE3 extends Protocol {
                         view_rsps.add(local_addr, view);
                     continue;
                 }
-                Message view_req=new Message(target).setFlag(Message.Flag.INTERNAL)
+                Message view_req=new EmptyMessage(target).setFlag(Message.Flag.INTERNAL)
                   .putHeader(getId(), MergeHeader.createViewRequest());
                 down_prot.down(view_req);
             }

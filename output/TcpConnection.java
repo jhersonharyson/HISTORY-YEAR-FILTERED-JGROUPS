@@ -181,13 +181,15 @@ public class TcpConnection extends Connection {
 
     protected void setSocketParameters(Socket client_sock) throws SocketException {
         try {
-            client_sock.setSendBufferSize(server.send_buf_size);
+            if(server.send_buf_size > 0)
+                client_sock.setSendBufferSize(server.send_buf_size);
         }
         catch(IllegalArgumentException ex) {
             server.log.error("%s: exception setting send buffer to %d bytes: %s", server.local_addr, server.send_buf_size, ex);
         }
         try {
-            client_sock.setReceiveBufferSize(server.recv_buf_size);
+            if(server.recv_buf_size > 0)
+                client_sock.setReceiveBufferSize(server.recv_buf_size);
         }
         catch(IllegalArgumentException ex) {
             server.log.error("%s: exception setting receive buffer to %d bytes: %s", server.local_addr, server.recv_buf_size, ex);
@@ -293,22 +295,22 @@ public class TcpConnection extends Connection {
         public int     bufferSize() {return buffer != null? buffer.length : 0;}
 
         public void run() {
-            Throwable t=null;
-            while(canRun()) {
-                try {
+            try {
+                while(canRun()) {
                     int len=in.readInt(); // needed to read messages from TCP_NIO2
                     server.receive(peer_addr, in, len);
                     updateLastAccessed();
                 }
-                catch(OutOfMemoryError | IOException ignore) {
-                    t=ignore;
-                    break;
-                }
-                catch(Throwable e) {
-                }
             }
-            server.notifyConnectionClosed(TcpConnection.this, String.format("%s: %s", getClass().getSimpleName(),
-                                                                            t != null? t.toString() : "n/a"));
+            catch(EOFException | SocketException ex) {
+                ; // regular use case when a peer closes its connection - we don't want to log this as exception
+            }
+            catch(Exception e) {
+                server.log.warn("failed handling message from %s: %s", peer_addr, e);
+            }
+            finally {
+                server.notifyConnectionClosed(TcpConnection.this);
+            }
         }
     }
 

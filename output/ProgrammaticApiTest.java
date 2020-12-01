@@ -29,7 +29,7 @@ public class ProgrammaticApiTest {
         ch.connect("demo");
 
         Protocol transport=ch.getProtocolStack().getTransport();
-        transport.up(new Message(null, "hello world").src(Util.createRandomAddress()));
+        transport.up((Message)new BytesMessage(null, "hello world").setSrc(Util.createRandomAddress()));
         assert receiver.num_msgs_received == 1;
     }
 
@@ -48,7 +48,7 @@ public class ProgrammaticApiTest {
                 new PING(),
                 new MERGE3(),
                 new FD_SOCK(),
-                new FD_ALL().setValue("timeout", 12000).setValue("interval", 3000),
+                new FD_ALL3().setTimeout(12000).setInterval(3000),
                 new VERIFY_SUSPECT(),
                 new BARRIER(),
                 new NAKACK2(),
@@ -63,7 +63,7 @@ public class ProgrammaticApiTest {
 
 
 
-    static class MyReceiver extends ReceiverAdapter {
+    static class MyReceiver implements Receiver {
         int num_msgs_received;
 
         public void receive(Message msg) {
